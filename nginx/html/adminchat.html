@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>TA9 AI Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Markdown renderer to convert headings/bullets/code to HTML -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: "Segoe UI", Arial, sans-serif;
+    }
+
+    body {
+      background: #eef2f7;
+      color: #1f2d3d;
+      min-height: 100vh;
+      padding: 32px 24px 120px;
+    }
+
+    .page {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      background: #fff;
+      border: 1px solid #e1e7f0;
+      border-radius: 12px;
+      box-shadow: 0 14px 40px rgba(12, 29, 55, 0.08);
+      padding: 20px 20px 80px;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: flex-start;
+      align-items: center;
+    }
+
+    .title {
+      font-size: 24px;
+      font-weight: 700;
+      color: #0c1d37;
+    }
+
+    .ghost-btn {
+      background: #f6f8fb;
+      border: 1px solid #d9e1ef;
+      color: #0c1d37;
+      padding: 10px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: all 0.15s ease;
+    }
+
+    .ghost-btn:hover {
+      background: #e7edf7;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1.3fr;
+      gap: 18px;
+    }
+
+    /* Single-card layout + bottom input bar */
+    .main-card {
+      background: #fff;
+      border: 1px solid #e1e7f0;
+      border-radius: 10px;
+      box-shadow: 0 10px 30px rgba(12, 29, 55, 0.08);
+      padding: 18px;
+    }
+
+    .input-dock {
+      position: fixed;
+      left: 24px;
+      right: 24px;
+      bottom: 18px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    .input-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #fff;
+      border: 1px solid #d8e3f3;
+      border-radius: 10px;
+      padding: 8px;
+      box-shadow: 0 6px 20px rgba(12, 29, 55, 0.08);
+    }
+
+    .input-row textarea {
+      flex: 1;
+      border: none;
+      outline: none;
+      resize: none;
+      font-size: 14px;
+      min-height: 24px;
+      max-height: 120px;
+    }
+
+    .card {
+      background: #fff;
+      border: 1px solid #e1e7f0;
+      border-radius: 10px;
+      box-shadow: 0 10px 30px rgba(12, 29, 55, 0.08);
+      padding: 18px;
+    }
+
+    .card-head {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      color: #0c1d37;
+    }
+
+    .card-body {
+      font-size: 14px;
+      line-height: 1.6;
+      color: #304050;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .answer-card {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .card-head-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .question-chip {
+      background: #f0f4fb;
+      border: 1px solid #d8e3f3;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #10243f;
+      margin-top: 6px;
+    }
+
+    .status-pill {
+      background: #e8f5ee;
+      color: #1c7c3c;
+      border: 1px solid #c9e9d3;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      min-width: 80px;
+      text-align: center;
+    }
+
+    .answer-box {
+      background: #f7f9fc;
+      border: 1px solid #e1e7f0;
+      border-radius: 8px;
+      padding: 14px;
+      min-height: 180px;
+      font-size: 14px;
+      line-height: 1.6;
+      color: #1f2d3d;
+      white-space: normal; /* render HTML, not raw text */
+    }
+
+    /* Tidy up markdown content (plain headings, no cards) */
+    .answer-box h1,
+    .answer-box h2,
+    .answer-box h3 {
+      margin: 8px 0 6px;
+      font-weight: 700;
+      color: #0c1d37;
+    }
+    .answer-box ul {
+      padding-left: 18px;
+    }
+    .answer-box code {
+      background: #eef2f7;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    .answer-box pre code {
+      display: block;
+      background: #0c1d37;
+      color: #e7edf7;
+      padding: 12px;
+      border-radius: 10px;
+      overflow-x: auto;
+    }
+    /* Terminal look for shell commands only */
+    .answer-box pre code.language-bash,
+    .answer-box pre code.language-sh {
+      background: #0b1b34;
+      color: #d6e5ff;
+      border-left: 6px solid #0b8ef3;
+    }
+
+    .question-bubble {
+      background: #0b8ef3;
+      color: #fff;
+      padding: 12px 16px;
+      border-radius: 18px 18px 4px 18px;
+      max-width: 80%;
+      margin-left: auto;
+      font-size: 14px;
+      line-height: 1.5;
+      margin-bottom: 16px;
+      box-shadow: 0 2px 8px rgba(11, 142, 243, 0.2);
+    }
+
+    #chat-history {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .thinking {
+      position: relative;
+      color: #42546a;
+    }
+
+    .thinking::after {
+      content: '...';
+      position: absolute;
+      margin-left: 6px;
+      width: 24px;
+      animation: dots 1.2s steps(3, end) infinite;
+      color: #0b8ef3;
+    }
+
+    @keyframes dots {
+      0% { content: '.'; }
+      33% { content: '..'; }
+      66% { content: '...'; }
+      100% { content: '.'; }
+    }
+
+    .sources {
+      border-top: 1px solid #e9eef5;
+      padding-top: 10px;
+    }
+
+    .sources ul {
+      list-style: none;
+      margin-top: 6px;
+      padding-left: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 13px;
+      color: #42546a;
+    }
+
+    .ask-form {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding-top: 6px;
+      border-top: 1px solid #e9eef5;
+    }
+
+    .ask-form textarea {
+      width: 100%;
+      border: 1px solid #d8e3f3;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 14px;
+      resize: vertical;
+      min-height: 70px;
+      max-height: 180px;
+    }
+
+    .form-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .checkbox {
+      font-size: 13px;
+      color: #42546a;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn-primary {
+      background: #0b8ef3;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 14px;
+      cursor: pointer;
+      min-width: 90px;
+      transition: opacity 0.15s ease;
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    .hidden { display: none; }
+
+    @media (max-width: 1000px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .form-actions {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="topbar">
+      <div class="title">TA9 AI Chat</div>
+    </div>
+
+    <section id="chat-card" class="main-card hidden">
+      <div id="chat-history"></div>
+      <div id="answer-section" class="hidden">
+        <div class="card-head" style="margin:0 0 8px;">Answer</div>
+        <div id="answer-box" class="answer-box"></div>
+      </div>
+    </section>
+
+    <div class="input-dock">
+      <form id="chat-form" class="input-row">
+        <textarea id="question" placeholder="Type your question..." rows="1"></textarea>
+        <button id="send-btn" type="submit" class="btn-primary">Ask</button>
+        <button id="stop-btn" type="button" class="btn-primary hidden" style="background: #e74c3c;">Stop</button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const answerBox = document.getElementById('answer-box');
+    const form = document.getElementById('chat-form');
+    const questionInput = document.getElementById('question');
+    const sendBtn = document.getElementById('send-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const chatCard = document.getElementById('chat-card');
+    const chatHistory = document.getElementById('chat-history');
+    const answerSection = document.getElementById('answer-section');
+
+    let currentController = null;
+
+    // Render markdown answer as plain HTML; only code blocks are boxed
+    function renderAnswer(markdown) {
+      try {
+        marked.setOptions({ mangle: false, headerIds: false, breaks: true });
+        const html = marked.parse(markdown || '');
+        answerBox.innerHTML = html;
+      } catch (e) {
+        answerBox.textContent = markdown || '(empty answer)';
+      }
+    }
+
+    function addQuestionBubble(question) {
+      const bubble = document.createElement('div');
+      bubble.className = 'question-bubble';
+      bubble.textContent = question;
+      chatHistory.appendChild(bubble);
+    }
+
+    stopBtn.addEventListener('click', () => {
+      if (currentController) {
+        currentController.abort();
+        answerBox.classList.remove('thinking');
+        answerBox.textContent = 'Request stopped by user.';
+        sendBtn.disabled = false;
+        sendBtn.classList.remove('hidden');
+        stopBtn.classList.add('hidden');
+        currentController = null;
+      }
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const question = questionInput.value.trim();
+      if (!question) return;
+
+      // Show chat card and add question bubble
+      chatCard.classList.remove('hidden');
+      addQuestionBubble(question);
+      
+      // Clear input
+      questionInput.value = '';
+      
+      // Show answer section
+      answerSection.classList.remove('hidden');
+      answerBox.textContent = 'Thinking';
+      answerBox.classList.add('thinking');
+      
+      // Toggle buttons
+      sendBtn.disabled = true;
+      sendBtn.classList.add('hidden');
+      stopBtn.classList.remove('hidden');
+
+      // Create abort controller
+      currentController = new AbortController();
+
+      try {
+        const resp = await fetch('/adminchat/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question: question,
+            top_k: 5
+          }),
+          signal: currentController.signal
+        });
+
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          answerBox.classList.remove('thinking');
+          answerBox.textContent = 'Error: ' + (data.detail || resp.statusText);
+          return;
+        }
+
+        answerBox.classList.remove('thinking');
+        renderAnswer(data.answer || '');
+      } catch (err) {
+        answerBox.classList.remove('thinking');
+        if (err.name === 'AbortError') {
+          answerBox.textContent = 'Request stopped by user.';
+        } else {
+          answerBox.textContent = 'Network error: ' + err;
+        }
+      } finally {
+        sendBtn.disabled = false;
+        sendBtn.classList.remove('hidden');
+        stopBtn.classList.add('hidden');
+        currentController = null;
+      }
+    });
+  </script>
+</body>
+</html>

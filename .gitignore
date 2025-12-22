@@ -1,0 +1,17 @@
+# Secrets
+.env
+env.local.properties
+env.system.properties
+env.local_template.properties
+
+# Databases
+chroma_db/
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store

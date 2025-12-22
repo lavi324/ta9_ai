@@ -1,0 +1,43 @@
+services:
+  wiki_rag_api:
+    image: wiki-rag-api:1.5
+    networks:
+      - shared-ai-net
+    environment:
+      OLLAMA_URL: ${OLLAMA_URL}
+      OLLAMA_MODEL: ${OLLAMA_MODEL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_URL: ${OPENAI_URL}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL}
+      WIKI_DIR: ${WIKI_DIR}
+      CHROMA_DIR: ${CHROMA_DIR}
+    volumes:
+      - /root/stacks/wiki_rag/wiki_files:/app/wiki_files:ro
+      - /root/stacks/wiki_rag/chroma_db:/app/chroma_db
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  wiki_rag_nginx:
+    image: nginx:1.27-alpine
+    networks:
+      - shared-ai-net
+    depends_on:
+      - wiki_rag_api
+    ports:
+      - target: 80
+        published: ${UI_PORT}
+        protocol: tcp
+        mode: host
+    volumes:
+      - /root/stacks/wiki_rag/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /root/stacks/wiki_rag/nginx/html:/usr/share/nginx/html:ro
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+networks:
+  shared-ai-net:
+    external: true
