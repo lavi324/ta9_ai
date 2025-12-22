@@ -1,0 +1,164 @@
+[
+	{
+		"title": "Day of week by hour",
+		"name": "Data Model",
+		"style": {},
+		"size": {
+			"width": "50%",
+			"height": "300px"
+		},
+		"attrs": {
+			"schema": 276,
+			"skin": 19,
+			"options": "{\"showAdvancedFilters\":false,\"isAdvancedFiltersOpen\":false,\"sortedFields\":[],\"height\":\"100%\",\"mode\":1,\"isMasterGrid\":false,\"isRealTime\":false,\"runQueryOnStartup\":false,\"hideTitle\":false,\"isFacetSupport\":false,\"annotationAllowed\":true,\"refreshInterval\":360,\"autoRefresh\":true,\"hideFacets\":false,\"presentContentMenuActions\":true,\"facetFolding\":true,\"showMapItemTooltip\":true,\"isDataModelCorrelated\":false,\"IsFacetsStopsLiveMode\":false,\"pageSize\":10,\"externalTitle\":\"Day of week by hour\"}",
+			"filters": "{\"$type\":\"Contracts.Common.FilterGroup, Contracts.Common\",\"Not\":false,\"GroupItems\":[],\"ItemsOperator\":2}"
+		},
+		"restrict": "E",
+		"directive": "worksheet",
+		"type": 1
+	},
+	{
+		"title": "Incidents Statistics",
+		"name": "Data Model",
+		"style": {},
+		"size": {
+			"width": "50%",
+			"height": "300px"
+		},
+		"attrs": {
+			"schema": 273,
+			"skin": 109,
+			"options": "{\"showAdvancedFilters\":false,\"isAdvancedFiltersOpen\":false,\"sortedFields\":[],\"height\":\"100%\",\"mode\":1,\"isMasterGrid\":false,\"isRealTime\":false,\"runQueryOnStartup\":false,\"hideTitle\":false,\"isFacetSupport\":false,\"annotationAllowed\":true,\"refreshInterval\":360,\"autoRefresh\":true,\"hideFacets\":false,\"presentContentMenuActions\":true,\"facetFolding\":true,\"showMapItemTooltip\":true,\"isDataModelCorrelated\":false,\"IsFacetsStopsLiveMode\":false,\"pageSize\":10,\"externalTitle\":\"Incidents Statistics\"}",
+			"filters": "{\"$type\":\"Contracts.Common.FilterGroup, Contracts.Common\",\"Not\":false,\"GroupItems\":[],\"ItemsOperator\":2}"
+		},
+		"restrict": "E",
+		"directive": "worksheet",
+		"type": 1
+	},
+	{
+		"title": "Incident Type Distribution",
+		"name": "Data Model",
+		"style": {},
+		"size": {
+			"width": "25%",
+			"height": "300px"
+		},
+		"attrs": {
+			"schema": 271,
+			"skin": 3,
+			"options": "{\"showAdvancedFilters\":false,\"isAdvancedFiltersOpen\":false,\"sortedFields\":[],\"height\":\"100%\",\"mode\":1,\"isMasterGrid\":false,\"isRealTime\":false,\"runQueryOnStartup\":false,\"hideTitle\":false,\"isFacetSupport\":false,\"annotationAllowed\":true,\"refreshInterval\":360,\"autoRefresh\":true,\"hideFacets\":false,\"presentContentMenuActions\":true,\"facetFolding\":true,\"showMapItemTooltip\":true,\"isDataModelCorrelated\":false,\"IsFacetsStopsLiveMode\":false,\"pageSize\":10,\"externalTitle\":\"Incident Type Distribution\"}",
+			"filters": "{\"$type\":\"Contracts.Common.FilterGroup, Contracts.Common\",\"Not\":false,\"GroupItems\":[],\"ItemsOperator\":2}"
+		},
+		"restrict": "E",
+		"directive": "worksheet",
+		"type": 1
+	},
+	{
+		"title": "Common Words",
+		"name": "Data Model",
+		"style": {},
+		"size": {
+			"width": "25%",
+			"height": "300px"
+		},
+		"attrs": {
+			"schema": 268,
+			"skin": 3,
+			"options": "{\"showAdvancedFilters\":false,\"isAdvancedFiltersOpen\":false,\"sortedFields\":[],\"height\":\"100%\",\"mode\":1,\"isMasterGrid\":false,\"isRealTime\":false,\"runQueryOnStartup\":false,\"hideTitle\":false,\"isFacetSupport\":false,\"annotationAllowed\":true,\"refreshInterval\":360,\"autoRefresh\":true,\"hideFacets\":false,\"presentContentMenuActions\":true,\"facetFolding\":true,\"showMapItemTooltip\":true,\"isDataModelCorrelated\":false,\"IsFacetsStopsLiveMode\":false,\"pageSize\":10,\"externalTitle\":\"Common Phrases\"}",
+			"filters": "{\"$type\":\"Contracts.Common.FilterGroup, Contracts.Common\",\"Not\":false,\"GroupItems\":[],\"ItemsOperator\":2}"
+		},
+		"restrict": "E",
+		"directive": "worksheet",
+		"type": 1
+	},
+	{
+		"title": "Divisions Activity",
+		"name": "Data Model",
+		"style": {},
+		"size": {
+			"width": "50%",
+			"height": "300px"
+		},
+		"attrs": {
+			"schema": 275,
+			"skin": 7,
+			"options": "{\"showAdvancedFilters\":false,\"isAdvancedFiltersOpen\":false,\"sortedFields\":[],\"height\":\"100%\",\"mode\":1,\"isMasterGrid\":false,\"isRealTime\":false,\"runQueryOnStartup\":false,\"hideTitle\":false,\"isFacetSupport\":false,\"annotationAllowed\":true,\"refreshInterval\":360,\"autoRefresh\":true,\"hideFacets\":false,\"presentContentMenuActions\":true,\"facetFolding\":true,\"showMapItemTooltip\":true,\"isDataModelCorrelated\":false,\"IsFacetsStopsLiveMode\":false,\"pageSize\":10,\"externalTitle\":\"Divisions Activity\"}",
+			"filters": "{\"$type\":\"Contracts.Common.FilterGroup, Contracts.Common\",\"Not\":false,\"GroupItems\":[],\"ItemsOperator\":2}"
+		},
+		"restrict": "E",
+		"directive": "worksheet",
+		"type": 1
+	},
+	{
+		"title": "Incidents by Day",
+		"name": "Data Model",
+		"style": {},
+		"size": {
+			"width": "50%",
+			"height": "300px"
+		},
+		"attrs": {
+			"schema": 267,
+			"skin": 7,
+			"options": "{\"showAdvancedFilters\":false,\"isAdvancedFiltersOpen\":false,\"sortedFields\":[],\"height\":\"100%\",\"mode\":1,\"isMasterGrid\":false,\"isRealTime\":false,\"runQueryOnStartup\":false,\"hideTitle\":false,\"isFacetSupport\":false,\"annotationAllowed\":true,\"refreshInterval\":360,\"autoRefresh\":true,\"hideFacets\":false,\"presentContentMenuActions\":true,\"facetFolding\":true,\"showMapItemTooltip\":true,\"isDataModelCorrelated\":false,\"IsFacetsStopsLiveMode\":false,\"pageSize\":10,\"externalTitle\":\"Incidents by Day\"}",
+			"filters": "{\"$type\":\"Contracts.Common.FilterGroup, Contracts.Common\",\"Not\":false,\"GroupItems\":[],\"ItemsOperator\":2}"
+		},
+		"restrict": "E",
+		"directive": "worksheet",
+		"type": 1
+	},
+	{
+		"title": "Incidents by Hour",
+		"name": "Data Model",
+		"style": {},
+		"size": {
+			"width": "50%",
+			"height": "300px"
+		},
+		"attrs": {
+			"schema": 270,
+			"skin": 7,
+			"options": "{\"showAdvancedFilters\":false,\"isAdvancedFiltersOpen\":false,\"sortedFields\":[],\"height\":\"100%\",\"mode\":1,\"isMasterGrid\":false,\"isRealTime\":false,\"runQueryOnStartup\":false,\"hideTitle\":false,\"isFacetSupport\":false,\"annotationAllowed\":true,\"refreshInterval\":360,\"autoRefresh\":true,\"hideFacets\":false,\"presentContentMenuActions\":true,\"facetFolding\":true,\"showMapItemTooltip\":true,\"isDataModelCorrelated\":false,\"IsFacetsStopsLiveMode\":false,\"pageSize\":10,\"externalTitle\":\"Incidents by Hour\"}",
+			"filters": "{\"$type\":\"Contracts.Common.FilterGroup, Contracts.Common\",\"Not\":false,\"GroupItems\":[],\"ItemsOperator\":2}"
+		},
+		"restrict": "E",
+		"directive": "worksheet",
+		"type": 1
+	},
+	{
+		"title": "Incidents Map",
+		"name": "Data Model",
+		"style": {},
+		"size": {
+			"width": "49.98087954110898%",
+			"height": "300px"
+		},
+		"attrs": {
+			"schema": -3,
+			"skin": 4,
+			"options": "{\"showAdvancedFilters\":false,\"isAdvancedFiltersOpen\":false,\"sortedFields\":[],\"height\":\"100%\",\"mode\":1,\"isMasterGrid\":false,\"isRealTime\":false,\"runQueryOnStartup\":false,\"hideTitle\":false,\"isFacetSupport\":false,\"annotationAllowed\":true,\"refreshInterval\":360,\"autoRefresh\":true,\"hideFacets\":false,\"presentContentMenuActions\":true,\"facetFolding\":true,\"showMapItemTooltip\":true,\"isDataModelCorrelated\":false,\"IsFacetsStopsLiveMode\":false,\"pageSize\":10,\"externalTitle\":\"Incidents Map\"}",
+			"filters": "{\"$type\":\"Contracts.Common.FilterGroup, Contracts.Common\",\"Not\":false,\"GroupItems\":[],\"ItemsOperator\":2}"
+		},
+		"restrict": "E",
+		"directive": "worksheet",
+		"type": 1
+	},
+	{
+		"title": "Involved Entities",
+		"name": "Data Model",
+		"style": {},
+		"size": {
+			"width": "25%",
+			"height": "300px"
+		},
+		"attrs": {
+			"schema": 275,
+			"skin": 16,
+			"options": "{\"showAdvancedFilters\":false,\"isAdvancedFiltersOpen\":false,\"sortedFields\":[],\"height\":\"100%\",\"mode\":1,\"isMasterGrid\":false,\"isRealTime\":false,\"runQueryOnStartup\":false,\"hideTitle\":false,\"isFacetSupport\":false,\"annotationAllowed\":true,\"refreshInterval\":360,\"autoRefresh\":true,\"hideFacets\":false,\"presentContentMenuActions\":true,\"facetFolding\":true,\"showMapItemTooltip\":true,\"isDataModelCorrelated\":false,\"IsFacetsStopsLiveMode\":false,\"pageSize\":10,\"externalTitle\":\"Involved Entities\"}",
+			"filters": "{\"$type\":\"Contracts.Common.FilterGroup, Contracts.Common\",\"Not\":false,\"GroupItems\":[],\"ItemsOperator\":2}"
+		},
+		"restrict": "E",
+		"directive": "worksheet",
+		"type": 1
+	}
+]

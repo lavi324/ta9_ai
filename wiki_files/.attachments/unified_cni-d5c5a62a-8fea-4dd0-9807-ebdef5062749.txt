@@ -1,0 +1,51 @@
+create view "DBA"."unified_cni" as 
+
+ select trim("unified_subscribers_new"."NUMERO_PIECE") as NUMERO_PIECE, 
+
+   trim(lower("unified_subscribers_new"."NOM")) as NOM, 
+
+   trim(lower("unified_subscribers_new"."PRENOMS")) as PRENOMS, 
+
+   "unified_subscribers_new"."DATE_NAISSANCE" as DATE_NAISSANCE 
+
+   from "iqdemo"."DBA"."unified_subscribers_new"  
+
+     where NUMERO_PIECE is not null  
+
+     and NOM is not null  
+
+     and PRENOMS is not null  
+
+     and DATE_NAISSANCE is not null 
+
+     and NUMERO_PIECE not like '% %' 
+
+     and "NUMERO_PIECE" not like '-%' 
+
+  
+
+union 
+
+  
+
+ select trim("CITIZENS_stage"."NUMERO_PIECE") as NUMERO_PIECE, 
+
+   trim(lower("CITIZENS_stage"."NOM")) as NOM, 
+
+   trim(lower("CITIZENS_stage"."PRENOMS")) as PRENOMS, 
+
+   "CITIZENS_stage"."DATE_NAISSANCE" as DATE_NAISSANCE 
+
+   from "iqdemo"."DBA"."CITIZENS_stage" 
+
+       where NUMERO_PIECE is not null  
+
+       and NOM is not null  
+
+       and PRENOMS is not null  
+
+       and DATE_NAISSANCE is not null 
+
+       and NUMERO_PIECE not like '% %' 
+
+       and NUMERO_PIECE not like '-%' 

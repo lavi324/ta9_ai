@@ -1,0 +1,3 @@
+[This](https://dev.azure.com/ta-9/_git/Argus?path=%2FWeb%2FTA9.NG%2Fsrc%2Fapp%2Fmodules%2Fanalyst&version=GBdev&_a=contents) directory will contain all the current analyst components (and new one's - if applicable).
+The Analyst module has its own shell (not implemented yet) that contains worksheet and dashboard.
+The Analyst Module contains sub-modules that were migrated from angularJS to Angular such as [Federated Search](https://dev.azure.com/ta-9/_git/Argus?path=%2FWeb%2FTA9.NG%2Fsrc%2Fapp%2Fmodules%2Fanalyst%2Fmodules%2Ffederated-search&version=GBdev&_a=contents).

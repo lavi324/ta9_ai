@@ -1,0 +1,7 @@
+[iq]
+Driver=SQL Anywhere 16
+DatabaseName=iqdemo
+ServerName=iqdemo
+CommLinks=tcpip(host=10.100.102.41;port=2638)
+Password=sql
+UID=DBA

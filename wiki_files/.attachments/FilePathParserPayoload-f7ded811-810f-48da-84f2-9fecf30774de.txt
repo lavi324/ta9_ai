@@ -1,0 +1,356 @@
+{
+	"dataFields": [
+		{
+			"fieldID": 13974,
+			"fieldName": "ExtractionId",
+			"dataType": 1,
+			"identifierTypeID": "79",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13975,
+			"fieldName": "Direction",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13976,
+			"fieldName": "TimeZone",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13977,
+			"fieldName": "Deleted",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13928,
+			"fieldName": "FromNumber",
+			"dataType": 1,
+			"identifierTypeID": "1",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13966,
+			"fieldName": "FromOwner",
+			"dataType": 1,
+			"identifierTypeID": "66",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13929,
+			"fieldName": "ToNumber",
+			"dataType": 1,
+			"identifierTypeID": "1",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13967,
+			"fieldName": "ToOwner",
+			"dataType": 1,
+			"identifierTypeID": "66",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13930,
+			"fieldName": "FromImsi",
+			"dataType": 1,
+			"identifierTypeID": "2",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13931,
+			"fieldName": "ToImsi",
+			"dataType": 1,
+			"identifierTypeID": "2",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13948,
+			"fieldName": "Target_MSISDN",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13933,
+			"fieldName": "FromImei",
+			"dataType": 1,
+			"identifierTypeID": "3",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13971,
+			"fieldName": "FROM_IMEI_MODEL",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13934,
+			"fieldName": "ToImei",
+			"dataType": 1,
+			"identifierTypeID": "3",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13970,
+			"fieldName": "TO_IMEI_MODEL",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13935,
+			"fieldName": "CallDuration",
+			"dataType": 4,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13936,
+			"fieldName": "CallType",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13937,
+			"fieldName": "FromCell",
+			"dataType": 1,
+			"identifierTypeID": "16",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13953,
+			"fieldName": "FromCell_city",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13938,
+			"fieldName": "ToCell",
+			"dataType": 1,
+			"identifierTypeID": "16",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13952,
+			"fieldName": "ToCell_city",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13939,
+			"fieldName": "FromCellLongitude",
+			"dataType": 3,
+			"identifierTypeID": "-4",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13940,
+			"fieldName": "FromCellLatitude",
+			"dataType": 3,
+			"identifierTypeID": "-4",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13941,
+			"fieldName": "ToCellLongtitude",
+			"dataType": 3,
+			"identifierTypeID": "-4",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13942,
+			"fieldName": "ToCellLatitude",
+			"dataType": 3,
+			"identifierTypeID": "-4",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13943,
+			"fieldName": "Sensor",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13944,
+			"fieldName": "FromMNC",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13945,
+			"fieldName": "ToMNC",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13946,
+			"fieldName": "FromMCC",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13947,
+			"fieldName": "ToMCC",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13949,
+			"fieldName": "Target_IMEI",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13950,
+			"fieldName": "FromOperator",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13951,
+			"fieldName": "ToOperator",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13954,
+			"fieldName": "Year",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13955,
+			"fieldName": "Month",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13956,
+			"fieldName": "DayOfTheWeek",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13957,
+			"fieldName": "Hour",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13958,
+			"fieldName": "SmS_Content",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13959,
+			"fieldName": "Call_audio",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13960,
+			"fieldName": "caseid",
+			"dataType": 3,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13961,
+			"fieldName": "fileid",
+			"dataType": 4,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13962,
+			"fieldName": "departmentid",
+			"dataType": 1,
+			"identifierTypeID": "77",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13963,
+			"fieldName": "datasource",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13964,
+			"fieldName": "FromLac",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13965,
+			"fieldName": "ToLac",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13972,
+			"fieldName": "Target_IMSI",
+			"dataType": 1,
+			"identifierTypeID": "2",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13978,
+			"fieldName": "IsTechnical",
+			"dataType": 3,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13932,
+			"fieldName": "TDate",
+			"dataType": 5,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13979,
+			"fieldName": "TDate",
+			"dataType": 5,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		}
+	],
+	"filePath": "/data/638145769987518888/cdrmex5.csv",
+	"additionalParameters": {
+		"-1": -1,
+		"fileName": "cdrmex5.csv",
+		"filePath": "6,3db80fc5b1b4",
+		"tempFilePath": "/data/638145769987518888/cdrmex5.csv",
+		"mappingList": [],
+		"fileID": 10450
+	}
+}

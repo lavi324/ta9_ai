@@ -1,0 +1,24 @@
+# Add ODBC Driver
+RUN apt-get update && apt-get install --no-install-recommends -y \
+    curl \
+    unixodbc \
+    unixodbc-dev \
+    && rm -rf /var/lib/apt/lists/*
+    
+ENV PATH=/opt/sqlanywhere16/bin64:$PATH
+ENV LD_LIBRARY_PATH=/opt/sqlanywhere16/lib64:/opt/sqlanywhere16/lib32
+ENV ODBCINI=/etc/odbc.ini
+ENV ODBC_INI=/etc/odbc.ini
+
+# Download and install SAP SQL Anywhere 16
+WORKDIR /opt
+RUN curl https://d5d4ifzqzkhwt.cloudfront.net/sqla16client/sqla16_client_linux_x86x64.tar.gz --output sql16.tar.gz && \
+    tar -xzf sql16.tar.gz && \
+    rm sql16.tar.gz && \
+    ./client1600/setup -ss -I_accept_the_license_agreement
+    
+# Configure ODBC
+WORKDIR /etc
+RUN printf "[ODBC]\nTraceFile=/tmp/sql.log\nTrace=Yes" > odbcinst.ini
+RUN printf "[SQL Anywhere 16]\nDescription=SAP SQL Anywhere 16 Driver\nDriver=/opt/sqlanywhere16/lib64/libdbodbc16_r.so\nSetup=/opt/sqlanywhere16/lib64/libdbodbc16_r.so" > template
+RUN odbcinst -i -d -f template

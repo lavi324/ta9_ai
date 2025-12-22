@@ -1,0 +1,1 @@
+This section is a knowledge base containing information about the UX / UI guidelines of the system's components.

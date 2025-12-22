@@ -1,0 +1,14 @@
+LVM
+
+1) fdisk /dev/sdX
+2) pvcreate /dev/sdX{i}
+3) vgcreate VolGroup{name} /dev/sdX{i}
+4) lvcreate -L 100%free -n LogVol{name} VolGroup{name}
+5) vim /etc/fstab > /dev/VolGroup{name}/LogVol{name}   /mount_point  xfs/ext4 defaults 0 0 
+6) mkdir /mount_point
+7) mkfs.xfs /dev/VolGroup{name}/LogVol{name}
+8) mount -a
+
+/var/lib/docker - 50GiB
+/opt/data - 40GiB
+/var/log - 15 GiB

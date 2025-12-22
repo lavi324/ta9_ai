@@ -1,0 +1,13 @@
+- **IOC** - The old environment, version 3.0. Most of the new capabilities developed for Suzuki do not exist in IOC.
+- **FOC** - the new environment with the latest version.
+- **SMP** - Sense Making Platform. These are the initials the client is using to describe the project/ the users.
+- **STE**  - The integrator****
+- **HTX** - 3rd party responsible mainly on security
+- **SPF** - The end user
+- **UAT** - LIKE STAGE ENVIRONMENT
+- **PRODUCTION** - THE PRODUCTION ENVIRONMENT ON THE CLIENT'S SITE (SPF)
+- **NRIC** - Singapore ID
+- **Terminal ID** - external computer station to review FR request/ Video requests
+- **Protocol / Job Aid** - list of actions the user needs to do according to incident type. The protocol can be edited by Admin users under the Admin tools section. 
+- **Correlated incidents** - "related incidents", based on a predefined algorithm with business logic that considers time and location.
+- **Keywords manager** - TA9 IntSight V4.1 Situational awareness supports the ability to highlight keywords appearing on Incidents, based on a set of pre-defined keywords, managed in a lookup. To manage the keywords, open the “Lookup Manager” application and locate the “keywords” lookup.

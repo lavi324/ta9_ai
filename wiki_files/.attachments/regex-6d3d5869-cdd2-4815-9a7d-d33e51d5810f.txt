@@ -1,0 +1,8 @@
+[A-Z] \- [A-Z]\-\d{7}	LicensePlate_Dashes
+[A-Z]{2} \d{7}	LicensePlate_Spaces
+[A-Z] \- [A-Z] \d{7}	LicensePlate_DashesSpaces
+(\+65|65)?( )?(6|8|9)[0-9]{3}( )?[0-9]{4,4}	Phone_2
+(\+65|65)?( )?(6|8|9)[0-9]{3} [0-9]{4,4}	Phone_2_1
+(\+65|65)?( )?(6|8|9)[0-9]{7}	Phone_3
+(6|8|9)[0-9]{3} [0-9]{4,4}	Phone_4
+BEA \d{4}	Breathalyzer

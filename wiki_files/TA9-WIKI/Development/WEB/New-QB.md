@@ -1,0 +1,2 @@
+word - [QB.docx](/.attachments/QB-80a742bf-2b87-4ba4-b868-e0f907573d83.docx)
+video - https://ta9comp.sharepoint.com/sites/devteam/Shared%20Documents/Forms/AllItems.aspx?viewid=671b21c4%2Da9c0%2D4c50%2D968c%2D1d4447259543&id=%2Fsites%2Fdevteam%2FShared%20Documents%2FDev%2FFeature%20Cafe%2Fnew%20query%20builder

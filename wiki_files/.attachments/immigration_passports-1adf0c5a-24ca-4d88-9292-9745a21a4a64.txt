@@ -1,0 +1,77 @@
+Create view "DBA"."immigration_passports" 
+
+  as select "a1"."LASTNAME","a1"."FIRSTNAMES","a1"."BIRTHDATE","a1"."Document_Number" 
+
+    from(select "LOWER"("immigration"."person_last_name") as "LASTNAME", 
+
+        "LOWER"("immigration"."person_first_name") as "FIRSTNAMES", 
+
+        "immigration"."person_date_of_birth" as "BIRTHDATE", 
+
+        "LOWER"("immigration"."document_number") as "Document_Number" 
+
+        from "DBA"."immigration" 
+
+        where "LENGTH"("LASTNAME") > 1 
+
+        and "LENGTH"("FIRSTNAMES") > 1 
+
+        and "LENGTH"("document_number") > 1 and 
+
+        "document_number" not like '0000%' and 
+
+        "document_number" not like '-%' and 
+
+        "document_number" not like '% %' and 
+
+        "document_number" not like '%\\\\\\\\.\\\\\\\\%' and 
+
+        "document_number" not like '%\\\\\\\\/\\\\\\\\%' and 
+
+        "document_number" is not null and 
+
+        "LASTNAME" is not null and 
+
+        "FIRSTNAMES" is not null and 
+
+        "BIRTHDATE" is not null and 
+
+        "Document_Number" not like '% %'  
+
+union 
+
+      select "LOWER"("passports"."LASTNAME") as "LASTNAME", 
+
+        "LOWER"("passports"."FIRSTNAMES") as "FIRSTNAMES", 
+
+        "passports"."BIRTHDATE" as "BIRTHDATE", 
+
+        "LOWER"("passports"."NUMERO_PIECE") as "Document_Number" 
+
+        from "iqdemo"."DBA"."passports" 
+
+        where "LENGTH"("LASTNAME") > 1 
+
+        and "LENGTH"("FIRSTNAMES") > 1 
+
+        and "LENGTH"("document_number") > 1 and 
+
+        "document_number" not like '0000%' and 
+
+        "document_number" not like '-%' and 
+
+        "document_number" not like '% %' and 
+
+        "document_number" not like '%\\\\\\\\.\\\\\\\\%' and 
+
+        "document_number" not like '%\\\\\\\\/\\\\\\\\%' and 
+
+        "document_number" is not null and 
+
+        "LASTNAME" is not null and 
+
+        "FIRSTNAMES" is not null and 
+
+        "BIRTHDATE" is not null) as "a1" 
+
+    group by "a1"."LASTNAME","a1"."FIRSTNAMES","a1"."BIRTHDATE","a1"."Document_Number" 

@@ -1,0 +1,1 @@
+In order to work in development environment using both Angular and AngularJS applications please follow the instructions [here](https://dev.azure.com/ta-9/Argus/_wiki/wikis/Argus.wiki/65/WEB).

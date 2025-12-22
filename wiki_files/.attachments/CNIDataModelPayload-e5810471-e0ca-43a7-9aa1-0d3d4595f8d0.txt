@@ -1,0 +1,657 @@
+{
+	"dataFields": [
+		{
+			"fieldID": 13974,
+			"fieldName": "ExtractionId",
+			"dataType": 1,
+			"identifierTypeID": "79",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13975,
+			"fieldName": "Direction",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13976,
+			"fieldName": "TimeZone",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13977,
+			"fieldName": "Deleted",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13928,
+			"fieldName": "FromNumber",
+			"dataType": 1,
+			"identifierTypeID": "1",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13966,
+			"fieldName": "FromOwner",
+			"dataType": 1,
+			"identifierTypeID": "66",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13929,
+			"fieldName": "ToNumber",
+			"dataType": 1,
+			"identifierTypeID": "1",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13967,
+			"fieldName": "ToOwner",
+			"dataType": 1,
+			"identifierTypeID": "66",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13930,
+			"fieldName": "FromImsi",
+			"dataType": 1,
+			"identifierTypeID": "2",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13931,
+			"fieldName": "ToImsi",
+			"dataType": 1,
+			"identifierTypeID": "2",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13948,
+			"fieldName": "Target_MSISDN",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13933,
+			"fieldName": "FromImei",
+			"dataType": 1,
+			"identifierTypeID": "3",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13971,
+			"fieldName": "FROM_IMEI_MODEL",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13934,
+			"fieldName": "ToImei",
+			"dataType": 1,
+			"identifierTypeID": "3",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13970,
+			"fieldName": "TO_IMEI_MODEL",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13935,
+			"fieldName": "CallDuration",
+			"dataType": 4,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13936,
+			"fieldName": "CallType",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13937,
+			"fieldName": "FromCell",
+			"dataType": 1,
+			"identifierTypeID": "16",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13953,
+			"fieldName": "FromCell_city",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13938,
+			"fieldName": "ToCell",
+			"dataType": 1,
+			"identifierTypeID": "16",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13952,
+			"fieldName": "ToCell_city",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13939,
+			"fieldName": "FromCellLongitude",
+			"dataType": 3,
+			"identifierTypeID": "-4",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13940,
+			"fieldName": "FromCellLatitude",
+			"dataType": 3,
+			"identifierTypeID": "-4",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13941,
+			"fieldName": "ToCellLongtitude",
+			"dataType": 3,
+			"identifierTypeID": "-4",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13942,
+			"fieldName": "ToCellLatitude",
+			"dataType": 3,
+			"identifierTypeID": "-4",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13943,
+			"fieldName": "Sensor",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13944,
+			"fieldName": "FromMNC",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13945,
+			"fieldName": "ToMNC",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13946,
+			"fieldName": "FromMCC",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13947,
+			"fieldName": "ToMCC",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13949,
+			"fieldName": "Target_IMEI",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13950,
+			"fieldName": "FromOperator",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13951,
+			"fieldName": "ToOperator",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13954,
+			"fieldName": "Year",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13955,
+			"fieldName": "Month",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13956,
+			"fieldName": "DayOfTheWeek",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13957,
+			"fieldName": "Hour",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13958,
+			"fieldName": "SmS_Content",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13959,
+			"fieldName": "Call_audio",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13960,
+			"fieldName": "caseid",
+			"dataType": 3,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13961,
+			"fieldName": "fileid",
+			"dataType": 4,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13962,
+			"fieldName": "departmentid",
+			"dataType": 1,
+			"identifierTypeID": "77",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13963,
+			"fieldName": "datasource",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13964,
+			"fieldName": "FromLac",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13965,
+			"fieldName": "ToLac",
+			"dataType": 1,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13972,
+			"fieldName": "Target_IMSI",
+			"dataType": 1,
+			"identifierTypeID": "2",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13978,
+			"fieldName": "IsTechnical",
+			"dataType": 3,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13932,
+			"fieldName": "TDate",
+			"dataType": 5,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		},
+		{
+			"fieldID": 13979,
+			"fieldName": "TDate",
+			"dataType": 5,
+			"identifierTypeID": "0",
+			"isMultiple": false
+		}
+	],
+	"data": [
+		{
+			"evt": "cdr.cs.call",
+			"dir": "0",
+			"date": "2021-08-05 00:01:00",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "6122",
+			"callee number": "4224846",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.18777"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 00:00:23",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "100%BONUS",
+			"callee IMEI": "",
+			"callee IMSI": "6122",
+			"callee number": "4224846",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.18781"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 01:05:13",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "61202",
+			"callee number": "1234",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.5.100.18791"
+		},
+		{
+			"evt": "cdr.cs.call",
+			"dir": "0",
+			"date": "2021-09-05 02:01:00",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "6122",
+			"callee number": "4224846",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.18803"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 03:00:23",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "100%BONUS",
+			"callee IMEI": "",
+			"callee IMSI": "6122",
+			"callee number": "4224846",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.53247"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 04:05:13",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "61202",
+			"callee number": "1234",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.53512"
+		},
+		{
+			"evt": "cdr.cs.call",
+			"dir": "0",
+			"date": "2021-09-05 05:01:00",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "6122",
+			"callee number": "4224846",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.2.100.53516"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 06:00:23",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "100%BONUS",
+			"callee IMEI": "",
+			"callee IMSI": "6122",
+			"callee number": "4224846",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.53242"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 07:05:13",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "61202",
+			"callee number": "1234",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.60805"
+		},
+		{
+			"evt": "cdr.cs.call",
+			"dir": "0",
+			"date": "2021-09-05 08:01:00",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "6122",
+			"callee number": "4224846",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.60803"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 09:00:23",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "100%BONUS",
+			"callee IMEI": "",
+			"callee IMSI": "6122",
+			"callee number": "4224846",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.5.100.53517"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 21:05:13",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "61202",
+			"callee number": "1234",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.60801"
+		},
+		{
+			"evt": "cdr.cs.call",
+			"dir": "0",
+			"date": "2021-09-05 10:01:00",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "6122",
+			"callee number": "4224846",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.53512"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 00:50:23",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "100%BONUS",
+			"callee IMEI": "",
+			"callee IMSI": "6122",
+			"callee number": "4224846",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.53515"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 02:25:13",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "61202",
+			"callee number": "1234",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.53247"
+		},
+		{
+			"evt": "cdr.cs.call",
+			"dir": "0",
+			"date": "2021-09-05 03:07:00",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "6122",
+			"callee number": "4224846",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.1203"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 00:11:23",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "100%BONUS",
+			"callee IMEI": "",
+			"callee IMSI": "6122",
+			"callee number": "4224846",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.5.100.1491"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 11:05:13",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "61202",
+			"callee number": "1234",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.1493"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 21:35:13",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "61202",
+			"callee number": "1234",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.1206"
+		},
+		{
+			"evt": "cdr.cs.sms",
+			"dir": "1",
+			"date": "2021-09-05 23:15:13",
+			"dur": "1'30''",
+			"caller IMEI": "2550505828784",
+			"caller IMSI": "61203022323937",
+			"caller number": "225070973331",
+			"callee IMEI": "",
+			"callee IMSI": "61202",
+			"callee number": "1234",
+			"red": "",
+			"operator": "Orange",
+			"cgid": "612.3.100.1027"
+		}
+	],
+	"additionalParameters": {
+		"-1": -1,
+		"fileName": "good CNI orange change.csv",
+		"filePath": "1,3db097564b5b",
+		"tempFilePath": "/app/\\\\10.100.102.25\\centos\\wildfly\\upload/638119751747967820/good CNI orange change.csv",
+		"mappingList": [],
+		"fileID": 10358
+	}
+}
