@@ -54,8 +54,8 @@ Now, open the windows cmd in `TA9.Intsight.Infra.Middleware/circleci` folder, an
 
 `nuget push <generatedNugetName> -Source Azure-TA9 -ApiKey <GitCredentialsToken>`
 
-For current instance, the command loooks like this: 
-`nuget push TA9.Intsight.Infra.Middleware.4.0.435.nupkg -Source Azure-TA9 -ApiKey ***REMOVED***`
+For current instance, the command looks like this (use your token, do NOT commit it anywhere):
+`nuget push TA9.Intsight.Infra.Middleware.4.0.435.nupkg -Source Azure-TA9 -ApiKey <GitCredentialsToken>`
 
 
 You will this this message:
