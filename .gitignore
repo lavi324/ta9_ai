@@ -15,3 +15,6 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# Sensitive attachments (do not track settings XML with tokens)
+wiki_files/.attachments/settings-*.xml
