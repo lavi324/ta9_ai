@@ -13,6 +13,16 @@ import math
 import hashlib
 import fnmatch
 import chromadb
+import base64
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import asyncio
+import re
+from html import unescape
+from urllib.parse import quote
+import subprocess
+import tempfile
+import shutil
 
 load_dotenv()
 
@@ -41,6 +51,7 @@ CHROMA_DIR = os.getenv("CHROMA_DIR", "/app/chroma_db")
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 COLLECTION_NAME = "wiki_rag"
+MEMORY_COLLECTION_NAME = "wiki_memories"
 
 # Special “image criteria” doc we know exists
 IMAGE_CRITERIA_DOC_REL = "TA9-WIKI/IT/Add-an-image-to-criteria-in-4.x.md"
@@ -235,6 +246,132 @@ print(f"[CHROMA] Initializing PersistentClient path={CHROMA_DIR}")
 client = chromadb.PersistentClient(path=CHROMA_DIR)
 print(f"[CHROMA] Getting/creating collection '{COLLECTION_NAME}'")
 collection = client.get_or_create_collection(name=COLLECTION_NAME)
+print(f"[CHROMA] Getting/creating memory collection '{MEMORY_COLLECTION_NAME}'")
+memory_collection = client.get_or_create_collection(name=MEMORY_COLLECTION_NAME)
+
+# ---------------------------------------------------------------------
+# Azure DevOps config & helpers
+# ---------------------------------------------------------------------
+
+ADO_ORG = os.getenv("ADO_ORG")
+ADO_PROJECT = os.getenv("ADO_PROJECT")
+ADO_PAT = os.getenv("ADO_PAT")
+
+def _ado_headers() -> dict:
+    if not (ADO_ORG and ADO_PROJECT and ADO_PAT):
+        raise RuntimeError("Azure DevOps is not configured. Set ADO_ORG, ADO_PROJECT, ADO_PAT env vars.")
+    token = f":{ADO_PAT}"  # PAT used as password with empty username
+    b64 = base64.b64encode(token.encode("utf-8")).decode("utf-8")
+    return {
+        "Authorization": f"Basic {b64}",
+        "Content-Type": "application/json",
+    }
+
+def _ado_base() -> str:
+    return f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}"
+
+def ado_list_tickets(tag_contains: str = "CC") -> List[dict]:
+    """Run WIQL and return a list of work items with details (id,title,state,tags,url)."""
+    url = f"{_ado_base()}/_apis/wit/wiql?api-version=7.1-preview.2"
+    # WIQL: State <> Closed and Tags contains tag_contains
+    wiql = (
+        "SELECT [System.Id] FROM WorkItems "
+        "WHERE [System.TeamProject] = @project "
+        "AND [System.State] <> 'Closed' "
+        f"AND [System.Tags] CONTAINS '{tag_contains}' "
+        "ORDER BY [System.ChangedDate] DESC"
+    )
+    try:
+        resp = requests.post(url, json={"query": wiql}, headers=_ado_headers(), timeout=60)
+    except Exception as e:
+        print(f"[ADO][ERROR] WIQL call failed: {e}")
+        traceback.print_exc()
+        raise RuntimeError(f"ADO WIQL failed: {e}")
+    if resp.status_code != 200:
+        print(f"[ADO][ERROR] WIQL non-200: {resp.status_code} {resp.text[:300]}")
+        raise RuntimeError(f"ADO WIQL error: {resp.text}")
+    items = resp.json().get("workItems", [])
+    ids = [str(it.get("id")) for it in items if it.get("id")]
+    if not ids:
+        return []
+
+    # Fetch work item details
+    det_url = f"{_ado_base()}/_apis/wit/workitems?ids={','.join(ids)}&$expand=all&api-version=7.1"
+    det = requests.get(det_url, headers=_ado_headers(), timeout=60)
+    if det.status_code != 200:
+        print(f"[ADO][ERROR] workitems details non-200: {det.status_code} {det.text[:300]}")
+        raise RuntimeError(f"ADO workitems details error: {det.text}")
+    results = []
+    for wi in det.json().get("value", []):
+        fid = wi.get("id")
+        flds = wi.get("fields", {})
+        title = flds.get("System.Title", "")
+        state = flds.get("System.State", "")
+        tags = flds.get("System.Tags", "")
+        web_url = f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}/_workitems/edit/{fid}"
+        results.append({"id": fid, "title": title, "state": state, "tags": tags, "url": web_url})
+    return results
+
+def ado_check_access_by_id(work_item_id: int) -> bool:
+    try:
+        u = f"{_ado_base()}/_apis/wit/workitems/{work_item_id}?api-version=7.1"
+        r = requests.get(u, headers=_ado_headers(), timeout=30)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+def ado_parse_id_from_url(url: str) -> Optional[int]:
+    try:
+        # expected e.g. https://dev.azure.com/{org}/{project}/_workitems/edit/{id}
+        parts = url.rstrip("/").split("/")
+        return int(parts[-1])
+    except Exception:
+        return None
+
+def ado_fetch_ticket_text(work_item_id: int) -> str:
+    """Fetch main fields and comments to a single plain-text blob."""
+    base = _ado_base()
+    hdrs = _ado_headers()
+    main = requests.get(f"{base}/_apis/wit/workitems/{work_item_id}?$expand=all&api-version=7.1", headers=hdrs, timeout=60)
+    if main.status_code != 200:
+        raise RuntimeError(f"ADO workitem fetch error: {main.text}")
+    data = main.json()
+    f = data.get("fields", {})
+    title = f.get("System.Title", "")
+    state = f.get("System.State", "")
+    tags = f.get("System.Tags", "")
+    desc = f.get("System.Description", "") or f.get("Microsoft.VSTS.TCM.ReproSteps", "") or ""
+
+    # Convert possible HTML description to plain text for cleaner context
+    def _strip_html(text: str) -> str:
+        try:
+            # Remove HTML tags and collapse whitespace
+            txt = re.sub(r"<[^>]+>", " ", text or "")
+            txt = unescape(txt)
+            return " ".join(txt.split())
+        except Exception:
+            return text or ""
+
+    desc = _strip_html(desc)
+
+    comments_text = []
+    try:
+        c = requests.get(f"{base}/_apis/wit/workItems/{work_item_id}/comments?api-version=7.1-preview.3", headers=hdrs, timeout=60)
+        if c.status_code == 200:
+            for it in c.json().get("comments", []):
+                txt = it.get("text", "")
+                if txt:
+                    comments_text.append(_strip_html(txt))
+    except Exception as e:
+        print(f"[ADO][WARN] comments fetch failed: {e}")
+
+    blob = (
+        f"Title: {title}\nState: {state}\nTags: {tags}\n\nDescription:\n{desc}\n\n"
+        + ("Comments:\n" + "\n---\n".join(comments_text) if comments_text else "")
+    ).strip()
+    if not blob:
+        blob = f"(Empty work item {work_item_id})"
+    return blob
 
 
 def collection_empty() -> bool:
@@ -263,6 +400,109 @@ def get_ingested_sources() -> List[str]:
         print(f"[CHROMA][ERROR] Failed to get ingested sources: {e}")
         traceback.print_exc()
         return []
+
+
+# ---------------------------------------------------------------------
+# Azure DevOps Wiki API helpers
+# ---------------------------------------------------------------------
+
+def ado_list_wikis() -> List[dict]:
+    """Return available wikis (id, name)."""
+    url = f"{_ado_base()}/_apis/wiki/wikis?api-version=7.1"
+    print(f"[ADO][WIKI] Fetching wikis from: {url}")
+    try:
+        hdrs = _ado_headers()
+        print(f"[ADO][WIKI] Auth header set with PAT")
+        r = requests.get(url, headers=hdrs, timeout=60)
+    except Exception as e:
+        print(f"[ADO][WIKI][ERROR] list wikis failed: {e}")
+        traceback.print_exc()
+        raise
+    if r.status_code != 200:
+        print(f"[ADO][WIKI][ERROR] list wikis non-200: {r.status_code}")
+        print(f"[ADO][WIKI][ERROR] Response body: {r.text[:500]}")
+        print(f"[ADO][WIKI][ERROR] Response headers: {r.headers}")
+        raise RuntimeError(f"ADO list wikis error (status {r.status_code}): {r.text}")
+    val = r.json().get("value", [])
+    return [{"id": w.get("id"), "name": w.get("name")} for w in val]
+
+
+def ado_get_wiki_id_by_name(name: Optional[str] = None) -> str:
+    """Find a wiki id by name. If name is None, try project default '<PROJECT>.wiki'."""
+    wikis = ado_list_wikis()
+    if not wikis:
+        raise RuntimeError("No wikis found in Azure DevOps")
+    if name:
+        for w in wikis:
+            if str(w.get("name", "")) == name:
+                return str(w.get("id"))
+        raise RuntimeError(f"Wiki '{name}' not found. Available: {[w['name'] for w in wikis]}")
+    # Fallback: exact project wiki name
+    default_name = f"{ADO_PROJECT}.wiki"
+    for w in wikis:
+        if str(w.get("name", "")) == default_name:
+            return str(w.get("id"))
+    # If not found, just use the first wiki
+    return str(wikis[0].get("id"))
+
+
+def ado_wiki_get_pages_recursive(wiki_id: str, path: str = "/") -> List[dict]:
+    """Fetch all pages under a path and return list of {path, content}.
+
+    NOTE: The recursive list endpoint does NOT include content even with includeContent=true
+    in many orgs. So we first fetch the tree to collect all paths, then fetch content per path.
+    """
+    norm_path = path if path.startswith("/") else f"/{path}"
+    enc_path = quote(norm_path, safe="/")
+    tree_url = f"{_ado_base()}/_apis/wiki/wikis/{wiki_id}/pages?path={enc_path}&recursionLevel=full&api-version=7.1"
+    try:
+        r = requests.get(tree_url, headers=_ado_headers(), timeout=120)
+    except Exception as e:
+        print(f"[ADO][WIKI][ERROR] get pages tree failed: {e}")
+        traceback.print_exc()
+        raise
+    if r.status_code != 200:
+        print(f"[ADO][WIKI][ERROR] get pages tree non-200: {r.status_code} {r.text[:300]}")
+        raise RuntimeError(f"ADO wiki pages tree fetch error: {r.text}")
+
+    data = r.json()
+    all_paths: List[str] = []
+
+    def _collect_paths(node: dict):
+        p = node.get("path")
+        if p and p != "/":
+            all_paths.append(p)
+        for sub in node.get("subPages", []):
+            _collect_paths(sub)
+
+    _collect_paths(data)
+    print(f"[ADO][WIKI] Collected {len(all_paths)} page paths from tree")
+
+    pages: List[dict] = []
+
+    def _fetch_content(p: str) -> Optional[str]:
+        enc = quote(p if p.startswith("/") else f"/{p}", safe="/")
+        url = f"{_ado_base()}/_apis/wiki/wikis/{wiki_id}/pages?path={enc}&includeContent=true&api-version=7.1"
+        try:
+            rr = requests.get(url, headers=_ado_headers(), timeout=60)
+        except Exception as e:
+            print(f"[ADO][WIKI][WARN] fetch content failed for path='{p}': {e}")
+            return None
+        if rr.status_code != 200:
+            # Some nodes are containers only; ignore non-200 for them
+            print(f"[ADO][WIKI][WARN] content non-200 for path='{p}': {rr.status_code}")
+            return None
+        try:
+            return rr.json().get("content", "")
+        except Exception:
+            return None
+
+    for p in all_paths:
+        content = _fetch_content(p)
+        if content and content.strip():
+            pages.append({"path": p, "content": content})
+
+    return pages
 
 
 # ---------------------------------------------------------------------
@@ -486,6 +726,128 @@ def ingest_wiki_files(
 
 
 # ---------------------------------------------------------------------
+# Compare-and-ingest helper (git clone wiki and ingest missing)
+# ---------------------------------------------------------------------
+
+def _git_clone_wiki(tmp_root: Optional[str] = None) -> str:
+    if not (ADO_ORG and ADO_PROJECT and ADO_PAT):
+        raise RuntimeError("ADO env not configured (ADO_ORG, ADO_PROJECT, ADO_PAT)")
+    wiki_name = os.getenv("ADO_WIKI_NAME", f"{ADO_PROJECT}.wiki")
+    remote = f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}/_git/{wiki_name}"
+    b64 = base64.b64encode(f":{ADO_PAT}".encode("utf-8")).decode("utf-8")
+
+    base_dir = tempfile.mkdtemp(prefix="wiki_rag_git_", dir=tmp_root)
+    dest = os.path.join(base_dir, "repo")
+    print(f"[GIT] Cloning wiki '{wiki_name}' into {dest}")
+    cmd = [
+        "git",
+        "-c",
+        f"http.extraHeader=Authorization: Basic {b64}",
+        "clone",
+        "--depth",
+        "1",
+        remote,
+        dest,
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        print(f"[GIT][ERROR] clone failed: {e.stderr.decode('utf-8', errors='ignore')[:400]}")
+        shutil.rmtree(base_dir, ignore_errors=True)
+        raise RuntimeError("git clone failed")
+    return dest
+
+
+def compare_and_ingest_internal() -> Tuple[int, int]:
+    """Clone the Azure DevOps wiki repo and ingest only missing .md files."""
+    print("[COMPARE_INGEST] Starting compare-and-ingest via git clone")
+
+    # If ADO not configured, fallback to local filesystem ingest
+    if not (ADO_ORG and ADO_PROJECT and ADO_PAT):
+        print("[COMPARE_INGEST][WARN] ADO not configured, falling back to local files")
+        added = ingest_wiki_files(only_missing=True)
+        return added, collection.count()
+
+    repo_dir = None
+    try:
+        repo_dir = _git_clone_wiki()
+        print(f"[GIT] Clone completed: {repo_dir}")
+        # Collect all .md files from repo
+        md_files: List[str] = []
+        for p in pathlib.Path(repo_dir).rglob("*.md"):
+            if p.is_file():
+                rel = os.path.relpath(str(p), repo_dir)
+                md_files.append(rel)
+        print(f"[GIT] Found {len(md_files)} markdown files in wiki repo")
+
+        if not md_files:
+            return 0, collection.count()
+
+        existing_sources = set(get_ingested_sources())
+        to_ingest = [f for f in md_files if f not in existing_sources]
+        print(f"[COMPARE_INGEST] Files to ingest (missing) = {len(to_ingest)}")
+
+        if not to_ingest:
+            return 0, collection.count()
+
+        added_chunks = 0
+        for idx, rel in enumerate(to_ingest, start=1):
+            abs_path = os.path.join(repo_dir, rel)
+            print(f"[COMPARE_INGEST] [{idx}/{len(to_ingest)}] Ingesting file: {rel}")
+            try:
+                with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            except Exception as e:
+                print(f"[COMPARE_INGEST][ERROR] Failed to read {rel}: {e}")
+                continue
+
+            if not text.strip():
+                print(f"[COMPARE_INGEST] Empty file {rel} → skipping")
+                continue
+
+            chunks = chunk_text(text)
+            if not chunks:
+                print(f"[COMPARE_INGEST] 0 chunks for {rel} → skipping")
+                continue
+
+            ids: List[str] = []
+            docs: List[str] = []
+            metas: List[dict] = []
+            embeds: List[List[float]] = []
+            for i, ch in enumerate(chunks):
+                try:
+                    emb = embed_text(ch)
+                except Exception as e:
+                    print(f"[COMPARE_INGEST][ERROR] Embedding failed for {rel} chunk={i}: {e}")
+                    continue
+                ids.append(str(uuid.uuid4()))
+                docs.append(ch)
+                metas.append({"source": rel, "chunk": i})
+                embeds.append(emb)
+
+            if not ids:
+                print(f"[COMPARE_INGEST][WARN] No successful chunks for {rel} → skipping add()")
+                continue
+
+            try:
+                collection.add(ids=ids, documents=docs, metadatas=metas, embeddings=embeds)
+                added_chunks += len(ids)
+            except Exception as e:
+                print(f"[COMPARE_INGEST][ERROR] Failed to add chunks for {rel}: {e}")
+
+        total = collection.count()
+        print(f"[COMPARE_INGEST] Finished git-based ingest: added_chunks={added_chunks}, total_chunks={total}")
+        return added_chunks, total
+    finally:
+        if repo_dir and os.path.isdir(repo_dir):
+            try:
+                shutil.rmtree(os.path.dirname(repo_dir), ignore_errors=True)
+                print("[GIT] Cleaned up temp clone directory")
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------
 # RAG “brain” – augmentation + reranking
 # ---------------------------------------------------------------------
 
@@ -690,6 +1052,8 @@ class ChatRequest(BaseModel):
     question: str
     top_k: int = 5
     force_reingest: Optional[bool] = False
+    ticket_url: Optional[str] = None
+    teach: Optional[bool] = False
 
 
 class ChatResponse(BaseModel):
@@ -708,6 +1072,7 @@ class IngestRequest(BaseModel):
 class IngestResponse(BaseModel):
     added_chunks: int
     total_chunks: int
+    message: Optional[str] = None
 
 
 # ---------------------------------------------------------------------
@@ -727,6 +1092,29 @@ def health():
     }
     print(f"[API][HEALTH] {info}")
     return info
+
+
+@app.get("/azure/tickets")
+def azure_tickets(tag: str = "CC"):
+    print(f"[API][ADO] /azure/tickets tag={tag}")
+    try:
+        items = ado_list_tickets(tag_contains=tag)
+        return {"items": items}
+    except Exception as exc:
+        print(f"[API][ADO][ERROR] {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/azure/ticket/access")
+def azure_ticket_access(url: Optional[str] = None, id: Optional[int] = None):
+    print(f"[API][ADO] /azure/ticket/access url={url} id={id}")
+    if url:
+        id = ado_parse_id_from_url(url)
+    if not id:
+        raise HTTPException(status_code=400, detail="ticket id or url is required")
+    ok = ado_check_access_by_id(int(id))
+    return {"accessible": bool(ok)}
 
 
 @app.post("/ingest", response_model=IngestResponse)
@@ -820,6 +1208,29 @@ def ingest(req: IngestRequest):
         return IngestResponse(added_chunks=added, total_chunks=total)
     except Exception as exc:
         print(f"[API][INGEST][ERROR] {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------
+# Compare and Ingest Endpoint
+# ---------------------------------------------------------------------
+
+@app.post("/compare_and_ingest", response_model=IngestResponse)
+def compare_and_ingest():
+    """
+    Compare wiki files to the vector DB and ingest only missing ones.
+    Safe to call manually (curl) or via the scheduler.
+    """
+    try:
+        added, total = compare_and_ingest_internal()
+        if added == 0:
+            msg = "No new files to ingest. All wiki files are already in the vector database."
+        else:
+            msg = f"Successfully ingested {added} new chunks from wiki files."
+        return IngestResponse(added_chunks=added, total_chunks=total, message=msg)
+    except Exception as exc:
+        print(f"[API][COMPARE_INGEST][ERROR] {exc}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -953,6 +1364,38 @@ def chat(req: ChatRequest):
 
     # No forced root-file injection: all files treated equally
 
+    # If a ticket is selected, fetch it now and pin it later as the first context
+    selected_ticket_id: Optional[int] = None
+    selected_ticket_text: Optional[str] = None
+    if req.ticket_url:
+        selected_ticket_id = ado_parse_id_from_url(req.ticket_url)
+        if selected_ticket_id:
+            print(f"[API][CHAT] Fetching Azure DevOps ticket id={selected_ticket_id}")
+            try:
+                selected_ticket_text = ado_fetch_ticket_text(int(selected_ticket_id))
+            except Exception as e:
+                print(f"[API][CHAT][WARN] failed to fetch ticket: {e}")
+                selected_ticket_id = None
+                selected_ticket_text = None
+
+    # Also include memory snippets related to the question
+    # Gather memory docs (generic + ticket-specific) but do not pin them; they will be reranked
+    try:
+        mem = memory_collection.query(
+            query_embeddings=[q_emb],
+            n_results=6,
+            include=["documents", "metadatas", "ids", "distances"],
+        )
+        mem_docs = mem.get("documents", [[]])[0]
+        mem_metas = mem.get("metadatas", [[]])[0]
+        if mem_docs:
+            print(f"[API][CHAT] Collected {len(mem_docs)} memory docs for context candidates")
+            for d, m in zip(mem_docs, mem_metas):
+                docs.insert(0, d)
+                metas.insert(0, m or {"source": "memory", "chunk": 0})
+    except Exception as e:
+        print(f"[API][CHAT][WARN] memory query failed: {e}")
+
     inject_special_doc_for_image(question, docs, metas)
 
     if not docs:
@@ -973,7 +1416,16 @@ def chat(req: ChatRequest):
     MAX_CONTEXT_DOCS = 12
     print(f"[API][CHAT] Building context with MAX_CONTEXT_DOCS={MAX_CONTEXT_DOCS}")
 
-    for i, (doc, meta) in enumerate(list(zip(docs, metas))[:MAX_CONTEXT_DOCS]):
+    # Build context blocks, pinning the selected ticket first if present
+    if selected_ticket_text:
+        src = f"azure-devops:{selected_ticket_id} (selected ticket)"
+        source_strings.append(src)
+        snippet = selected_ticket_text[:200].replace("\n", " ")
+        print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
+        context_blocks.append(f"Source: {src}\n{selected_ticket_text}")
+
+    remaining_slots = MAX_CONTEXT_DOCS - (1 if selected_ticket_text else 0)
+    for i, (doc, meta) in enumerate(list(zip(docs, metas))[:remaining_slots]):
         id_val = ids[i] if i < len(ids) else None
         dist_val = distances[i] if i < len(distances) else None
         src = f"{meta.get('source')} (chunk {meta.get('chunk', 0)}) id={id_val} dist={dist_val}"
@@ -985,7 +1437,7 @@ def chat(req: ChatRequest):
     context_text = "\n\n---\n\n".join(context_blocks)
 
     # ChatGPT-style prompt for natural, high-quality responses
-    prompt = (
+    prompt_intro = (
         "You are an internal TA9 / IntSight assistant. Your goal is to respond in the same style and quality as ChatGPT: "
         "clear, structured, ordered, and professional.\n\n"
         "RULES FOR EVERY RESPONSE:\n\n"
@@ -1025,8 +1477,21 @@ def chat(req: ChatRequest):
         "- Use minimal headings; avoid over-structuring when not needed.\n"
         "- Only use fenced code blocks for commands or code. Do NOT put normal text in code blocks.\n"
         "- Avoid emojis unless they add clear value; if used, keep them rare.\n\n"
-        f"Context:\n{context_text}\n\n"
-        f"Question: {question}\n\n"
+    )
+
+    ticket_focus_rules = ""
+    if selected_ticket_id:
+        ticket_focus_rules = (
+            f"A SELECTED AZURE DEVOPS TICKET IS PROVIDED (ID {selected_ticket_id}). Follow these rules:\n"
+            "- Focus primarily on the selected ticket's content.\n"
+            "- Do not reference any other ticket numbers; if a number appears, ensure it matches the selected ticket ID.\n"
+            "- If information is missing in the ticket, state the gaps clearly and avoid guessing.\n\n"
+        )
+
+    prompt = (
+        prompt_intro + ticket_focus_rules +
+        f"Context:\n{context_text}\n\n" +
+        f"Question: {question}\n\n" +
         "Answer:"
     )
 
@@ -1037,5 +1502,64 @@ def chat(req: ChatRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"LLM call failed: {exc}")
 
+    # Optional teach: persist summarized lesson to memory collection
+    if req.teach:
+        try:
+            lesson_prompt = (
+                "Summarize the key knowledge learned from the following Q&A. "
+                "Return a concise explanation (<= 180 words) followed by 6-10 bullet points of exact steps or commands. "
+                "Avoid sensitive secrets. Keep it generally reusable.\n\n"
+                f"Question:\n{question}\n\nAnswer:\n{answer}\n\nSummary + Steps:"
+            )
+            lesson = call_llm(lesson_prompt)
+            emb = embed_text(lesson)
+            src = "memory:generic"
+            if req.ticket_url:
+                tid = ado_parse_id_from_url(req.ticket_url)
+                if tid:
+                    src = f"memory:ticket:{tid}"
+            memory_collection.add(
+                ids=[str(uuid.uuid4())],
+                documents=[lesson],
+                embeddings=[emb],
+                metadatas=[{"source": src, "created_at": datetime.utcnow().isoformat()}],
+            )
+            print(f"[API][CHAT] Stored lesson to memory collection source={src} len={len(lesson)}")
+        except Exception as e:
+            print(f"[API][CHAT][WARN] Failed to store memory: {e}")
+
     print(f"[API][CHAT] Returning answer len={len(answer)} with {len(source_strings)} sources")
     return ChatResponse(answer=answer, sources=source_strings)
+
+
+# ---------------------------------------------------------------------
+# Scheduler: run compare-and-ingest daily at 20:00 Asia/Jerusalem
+# ---------------------------------------------------------------------
+
+async def _wait_until(hour: int, minute: int, tz: ZoneInfo) -> float:
+    now = datetime.now(tz)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+async def _daily_compare_and_ingest_task():
+    tz = ZoneInfo("Asia/Jerusalem")
+    while True:
+        try:
+            wait_s = await _wait_until(20, 0, tz)
+            print(f"[SCHEDULE] Next compare_and_ingest at 20:00 Asia/Jerusalem in {wait_s:.0f}s")
+            await asyncio.sleep(wait_s)
+            print("[SCHEDULE] Triggering scheduled compare_and_ingest")
+            compare_and_ingest_internal()
+        except Exception as e:
+            print(f"[SCHEDULE][ERROR] {e}")
+            traceback.print_exc()
+            # small backoff before retrying scheduling loop
+            await asyncio.sleep(60)
+
+
+@app.on_event("startup")
+async def _start_scheduler():
+    asyncio.create_task(_daily_compare_and_ingest_task())

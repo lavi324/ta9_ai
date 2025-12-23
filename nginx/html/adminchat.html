@@ -15,50 +15,124 @@
     }
 
     body {
-      background: #eef2f7;
+      background: #fafbfc;
       color: #1f2d3d;
       min-height: 100vh;
-      padding: 32px 24px 120px;
+      padding: 0;
+      margin: 0;
     }
 
     .page {
-      max-width: 1200px;
+      max-width: 100%;
       margin: 0 auto;
       display: flex;
       flex-direction: column;
-      gap: 18px;
-      background: #fff;
-      border: 1px solid #e1e7f0;
-      border-radius: 12px;
-      box-shadow: 0 14px 40px rgba(12, 29, 55, 0.08);
-      padding: 20px 20px 80px;
+      min-height: 100vh;
+      background: #fafbfc;
+      padding-bottom: 140px;
     }
 
     .topbar {
+      background: #ffffff;
+      padding: 16px 40px;
       display: flex;
-      justify-content: flex-start;
+      justify-content: space-between;
       align-items: center;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+      border-bottom: 1px solid #e8eef5;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .logo {
+      height: 50px;
+      width: auto;
     }
 
     .title {
-      font-size: 24px;
-      font-weight: 700;
-      color: #0c1d37;
+      font-size: 22px;
+      font-weight: 600;
+      color: #1a2332;
+      letter-spacing: 0.2px;
+    }
+
+    .subtitle {
+      font-size: 12px;
+      color: #6b7784;
+      font-weight: 400;
+      margin-top: 2px;
+    }
+
+    .ticket-section {
+      width: 1200px;
+      max-width: calc(100% - 80px);
+      margin: 32px auto 24px;
+      padding: 0 40px;
+      position: sticky;
+      top: 82px;
+      background: #fafbfc;
+      z-index: 99;
+    }
+
+    .ticket-card {
+      background: #f0f6fb;
+      border-radius: 12px;
+      padding: 24px 28px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+      border: 1px solid #d4e4f0;
+      width: 100%;
+      max-width: 100%;
+    }
+
+    .ticket-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: #0c3d6b;
+      margin-bottom: 12px;
+      display: block;
+    }
+
+    .ticket-controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
     }
 
     .ghost-btn {
-      background: #f6f8fb;
-      border: 1px solid #d9e1ef;
-      color: #0c1d37;
-      padding: 10px 14px;
+      background: #ffffff;
+      border: 1px solid #e74855;
+      color: #e74855;
+      padding: 10px 18px;
       border-radius: 6px;
       cursor: pointer;
-      font-size: 14px;
-      transition: all 0.15s ease;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.2s ease;
     }
 
     .ghost-btn:hover {
-      background: #e7edf7;
+      background: #e74855;
+      color: #ffffff;
+    }
+
+    .ghost-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      border-color: #d4dae3;
+      color: #a0a8b4;
+    }
+
+    .ghost-btn:disabled:hover {
+      background: #ffffff;
+      color: #a0a8b4;
     }
 
     .grid {
@@ -69,11 +143,15 @@
 
     /* Single-card layout + bottom input bar */
     .main-card {
-      background: #fff;
-      border: 1px solid #e1e7f0;
-      border-radius: 10px;
-      box-shadow: 0 10px 30px rgba(12, 29, 55, 0.08);
-      padding: 18px;
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      box-shadow: none;
+      padding: 24px 40px;
+      width: 1200px;
+      max-width: calc(100% - 80px);
+      margin: 24px auto 0;
+      flex: 1;
     }
 
     .input-dock {
@@ -90,10 +168,10 @@
       align-items: center;
       gap: 10px;
       background: #fff;
-      border: 1px solid #d8e3f3;
+      border: 1px solid #e0e7ef;
       border-radius: 10px;
       padding: 8px;
-      box-shadow: 0 6px 20px rgba(12, 29, 55, 0.08);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
     }
 
     .input-row textarea {
@@ -164,15 +242,20 @@
     }
 
     .answer-box {
-      background: #f7f9fc;
-      border: 1px solid #e1e7f0;
-      border-radius: 8px;
-      padding: 14px;
-      min-height: 180px;
-      font-size: 14px;
-      line-height: 1.6;
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      padding: 20px 0;
+      min-height: 60px;
+      font-size: 15px;
+      line-height: 1.7;
       color: #1f2d3d;
-      white-space: normal; /* render HTML, not raw text */
+      white-space: normal;
+      text-align: left;
+      max-width: 100%;
+      margin-left: 0;
+      margin-right: auto;
+      margin-bottom: 0;
     }
 
     /* Tidy up markdown content (plain headings, no cards) */
@@ -210,21 +293,32 @@
     .question-bubble {
       background: #0b8ef3;
       color: #fff;
-      padding: 12px 16px;
+      padding: 16px 24px;
       border-radius: 18px 18px 4px 18px;
       max-width: 80%;
       margin-left: auto;
-      font-size: 14px;
-      line-height: 1.5;
-      margin-bottom: 16px;
+      margin-right: 0;
+      margin-bottom: 60px;
+      font-size: 15px;
+      line-height: 1.6;
       box-shadow: 0 2px 8px rgba(11, 142, 243, 0.2);
+      word-wrap: break-word;
+      display: block;
     }
 
     #chat-history {
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 0;
       margin-bottom: 16px;
+      max-width: 100%;
+      width: 100%;
+    }
+
+    .qa-pair {
+      display: flex;
+      flex-direction: column;
+      margin-bottom: 48px;
     }
 
     .thinking {
@@ -299,16 +393,46 @@
       gap: 6px;
     }
 
+    #ticket-select {
+      flex: 1;
+      min-width: 400px;
+      border: 1px solid #d4dae3;
+      border-radius: 8px;
+      padding: 11px 14px;
+      font-size: 14px;
+      font-family: "Segoe UI", Arial, sans-serif;
+      color: #1f2d3d;
+      background: #ffffff;
+      transition: all 0.2s ease;
+      outline: none;
+    }
+
+    #ticket-select:hover {
+      border-color: #0c3d6b;
+    }
+
+    #ticket-select:focus {
+      border-color: #0c3d6b;
+      box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.1);
+    }
+
     .btn-primary {
-      background: #0b8ef3;
+      background: #0c3d6b;
       color: #fff;
       border: none;
       border-radius: 8px;
-      padding: 10px 16px;
+      padding: 12px 24px;
       font-size: 14px;
+      font-weight: 500;
       cursor: pointer;
       min-width: 90px;
-      transition: opacity 0.15s ease;
+      transition: all 0.2s ease;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: #0a2f52;
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(12, 61, 107, 0.25);
     }
 
     .btn-primary:disabled {
@@ -333,20 +457,37 @@
 <body>
   <div class="page">
     <div class="topbar">
-      <div class="title">TA9 AI Chat</div>
+      <div class="header-left">
+        <img src="/adminchat/ta9_logo.png" alt="TA9" class="logo" onerror="this.style.display='none'">
+        <div>
+          <div class="title">AI Support Assistant</div>
+          <div class="subtitle">Powered by TA9</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="ticket-section">
+      <div class="ticket-card">
+        <label for="ticket-select" class="ticket-label">Select Ticket</label>
+        <div class="ticket-controls">
+          <select id="ticket-select">
+            <option value="" hidden selected></option>
+          </select>
+          <button id="clear-ticket" type="button" class="ghost-btn" title="Remove selected ticket" disabled>Clear</button>
+        </div>
+      </div>
     </div>
 
     <section id="chat-card" class="main-card hidden">
       <div id="chat-history"></div>
       <div id="answer-section" class="hidden">
-        <div class="card-head" style="margin:0 0 8px;">Answer</div>
         <div id="answer-box" class="answer-box"></div>
       </div>
     </section>
 
     <div class="input-dock">
       <form id="chat-form" class="input-row">
-        <textarea id="question" placeholder="Type your question..." rows="1"></textarea>
+        <textarea id="question" placeholder="Ask me anything..." rows="1"></textarea>
         <button id="send-btn" type="submit" class="btn-primary">Ask</button>
         <button id="stop-btn" type="button" class="btn-primary hidden" style="background: #e74c3c;">Stop</button>
       </form>
@@ -362,32 +503,91 @@
     const chatCard = document.getElementById('chat-card');
     const chatHistory = document.getElementById('chat-history');
     const answerSection = document.getElementById('answer-section');
+    const ticketSelect = document.getElementById('ticket-select');
+    const clearTicketBtn = document.getElementById('clear-ticket');
 
     let currentController = null;
 
     // Render markdown answer as plain HTML; only code blocks are boxed
-    function renderAnswer(markdown) {
+    function renderAnswer(markdown, targetBox) {
       try {
         marked.setOptions({ mangle: false, headerIds: false, breaks: true });
         const html = marked.parse(markdown || '');
-        answerBox.innerHTML = html;
+        targetBox.innerHTML = html;
       } catch (e) {
-        answerBox.textContent = markdown || '(empty answer)';
+        targetBox.textContent = markdown || '(empty answer)';
       }
     }
 
     function addQuestionBubble(question) {
+      const pair = document.createElement('div');
+      pair.className = 'qa-pair';
+      
       const bubble = document.createElement('div');
       bubble.className = 'question-bubble';
       bubble.textContent = question;
-      chatHistory.appendChild(bubble);
+      pair.appendChild(bubble);
+      
+      chatHistory.appendChild(pair);
+      return pair;
     }
+
+    async function loadTickets() {
+      try {
+        const resp = await fetch('/adminchat/api/azure/tickets?tag=CC');
+        const data = await resp.json();
+        const items = (data && data.items) || [];
+        // Reset options with a hidden placeholder (not shown in dropdown list)
+        ticketSelect.innerHTML = '<option value="" hidden selected></option>';
+        for (const it of items) {
+          const opt = document.createElement('option');
+          opt.value = it.url;
+          opt.textContent = `#${it.id} | ${it.title}`;
+          ticketSelect.appendChild(opt);
+        }
+      } catch (e) {
+        console.warn('Failed to load tickets', e);
+      }
+    }
+
+    function updateClearVisibility() {
+      if (!ticketSelect.value) {
+        clearTicketBtn.disabled = true;
+      } else {
+        clearTicketBtn.disabled = false;
+      }
+    }
+
+    clearTicketBtn.addEventListener('click', () => {
+      // Reset selection to hidden placeholder (empty)
+      ticketSelect.value = '';
+      if (ticketSelect.options.length > 0) {
+        ticketSelect.selectedIndex = 0;
+      }
+      updateClearVisibility();
+    });
+
+    ticketSelect.addEventListener('change', updateClearVisibility);
+
+    // Handle Enter to submit, Shift+Enter for newline
+    questionInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        form.dispatchEvent(new Event('submit'));
+      }
+    });
+
+    // Initial load
+    loadTickets().then(updateClearVisibility);
 
     stopBtn.addEventListener('click', () => {
       if (currentController) {
         currentController.abort();
-        answerBox.classList.remove('thinking');
-        answerBox.textContent = 'Request stopped by user.';
+        const lastAnswerBox = document.querySelector('.qa-pair:last-child .answer-box');
+        if (lastAnswerBox) {
+          lastAnswerBox.classList.remove('thinking');
+          lastAnswerBox.textContent = 'Request stopped by user.';
+        }
         sendBtn.disabled = false;
         sendBtn.classList.remove('hidden');
         stopBtn.classList.add('hidden');
@@ -402,15 +602,22 @@
 
       // Show chat card and add question bubble
       chatCard.classList.remove('hidden');
-      addQuestionBubble(question);
+      const qaPair = addQuestionBubble(question);
       
       // Clear input
       questionInput.value = '';
       
-      // Show answer section
-      answerSection.classList.remove('hidden');
+      // Create answer box and add to qa pair
+      const answerBox = document.createElement('div');
+      answerBox.className = 'answer-box';
       answerBox.textContent = 'Thinking';
       answerBox.classList.add('thinking');
+      qaPair.appendChild(answerBox);
+      
+      // Scroll to the new question
+      setTimeout(() => {
+        qaPair.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 100);
       
       // Toggle buttons
       sendBtn.disabled = true;
@@ -426,7 +633,8 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             question: question,
-            top_k: 5
+            top_k: 5,
+            ticket_url: ticketSelect.value || null
           }),
           signal: currentController.signal
         });
@@ -440,7 +648,7 @@
         }
 
         answerBox.classList.remove('thinking');
-        renderAnswer(data.answer || '');
+        renderAnswer(data.answer || '', answerBox);
       } catch (err) {
         answerBox.classList.remove('thinking');
         if (err.name === 'AbortError') {

@@ -1,6 +1,6 @@
 services:
   wiki_rag_api:
-    image: wiki-rag-api:1.5
+    image: wiki-rag-api:2.6
     networks:
       - shared-ai-net
     environment:
@@ -9,6 +9,9 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_URL: ${OPENAI_URL}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL}
+      ADO_ORG: ${ADO_ORG}
+      ADO_PROJECT: ${ADO_PROJECT}
+      ADO_PAT: ${ADO_PAT}
       WIKI_DIR: ${WIKI_DIR}
       CHROMA_DIR: ${CHROMA_DIR}
     volumes:
