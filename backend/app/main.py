@@ -5,7 +5,7 @@ import time
 import traceback
 from typing import List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import requests
@@ -19,7 +19,6 @@ from zoneinfo import ZoneInfo
 import asyncio
 import re
 from html import unescape
-from urllib.parse import quote
 import subprocess
 import tempfile
 import shutil
@@ -30,12 +29,6 @@ load_dotenv()
 # Env & constants
 # ---------------------------------------------------------------------
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama_ollama:11434").rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
-
-# Optional OpenAI embeddings config. If `OPENAI_API_KEY` is set, we use
-# OpenAI embeddings (defaults to `text-embedding-3-large`). This lets you
-# use a dedicated embedding model while keeping Ollama for chat/LLM.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_URL = os.getenv("OPENAI_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
@@ -53,9 +46,6 @@ CHUNK_OVERLAP = 200
 COLLECTION_NAME = "wiki_rag"
 MEMORY_COLLECTION_NAME = "wiki_memories"
 
-# Special “image criteria” doc we know exists
-IMAGE_CRITERIA_DOC_REL = "TA9-WIKI/IT/Add-an-image-to-criteria-in-4.x.md"
-
 app = FastAPI(title="Wiki RAG API")
 
 
@@ -65,143 +55,73 @@ app = FastAPI(title="Wiki RAG API")
 
 def embed_text(text: str) -> List[float]:
     snippet = text[:120].replace("\n", " ")
-    # If OPENAI_API_KEY is present, call OpenAI embeddings API
-    if OPENAI_API_KEY:
-        print(f"[EMBED] Calling OpenAI embeddings model={OPENAI_EMBEDDING_MODEL} len={len(text)} snippet='{snippet}...'")
-        start = time.time()
-        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-        body = {"model": OPENAI_EMBEDDING_MODEL, "input": text}
-        try:
-            resp = requests.post(f"{OPENAI_URL}/embeddings", json=body, headers=headers, timeout=120)
-        except Exception as e:
-            print(f"[EMBED][ERROR] Exception while calling OpenAI embeddings: {e}")
-            traceback.print_exc()
-            raise RuntimeError(f"Failed to call OpenAI embeddings: {e}")
-        duration = time.time() - start
-        print(f"[EMBED] OpenAI embeddings status={resp.status_code} took={duration:.2f}s")
-
-        if resp.status_code != 200:
-            print(f"[EMBED][ERROR] Non-200 from OpenAI embeddings: {resp.text[:400]}")
-            raise RuntimeError(f"OpenAI embeddings error: {resp.text}")
-
-        data = resp.json()
-        # OpenAI embeddings are in data['data'][0]['embedding']
-        try:
-            emb = data["data"][0]["embedding"]
-        except Exception as e:
-            print(f"[EMBED][ERROR] Unexpected OpenAI response shape: {data}")
-            raise RuntimeError(f"OpenAI embeddings response missing embedding: {e}")
-
-        # Compute metadata for easier tracing: preview, length, norm, and hash
-        preview = ",".join([f"{x:.6f}" for x in emb[:EMBED_PREVIEW_COUNT]])
-        norm = math.sqrt(sum([x * x for x in emb]))
-        h = hashlib.sha256(
-            ",".join([f"{x:.6f}" for x in emb[:16]]).encode("utf-8")
-        ).hexdigest()[:12]
-        print(f"[EMBED] Got OpenAI embedding length={len(emb)} preview=[{preview}] norm={norm:.6f} hash={h}")
-        if LOG_FULL_EMBEDDINGS:
-            print(f"[EMBED][FULL] {emb}")
-        return emb
-
-    # Fallback: Ollama embeddings (original behavior)
-    print(f"[EMBED] Calling Ollama embeddings len={len(text)} snippet='{snippet}...'")
+    print(f"[EMBED] Calling OpenAI embeddings model={OPENAI_EMBEDDING_MODEL} len={len(text)} snippet='{snippet}...'")
     start = time.time()
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    body = {"model": OPENAI_EMBEDDING_MODEL, "input": text}
     try:
-        resp = requests.post(
-            f"{OLLAMA_URL}/api/embeddings",
-            json={"model": OLLAMA_MODEL, "prompt": text},
-            timeout=120,
-        )
+        resp = requests.post(f"{OPENAI_URL}/embeddings", json=body, headers=headers, timeout=120)
     except Exception as e:
-        print(f"[EMBED][ERROR] Exception while calling Ollama embeddings: {e}")
+        print(f"[EMBED][ERROR] Exception while calling OpenAI embeddings: {e}")
         traceback.print_exc()
-        raise RuntimeError(f"Failed to call Ollama embeddings: {e}")
+        raise RuntimeError(f"Failed to call OpenAI embeddings: {e}")
     duration = time.time() - start
-    print(f"[EMBED] Ollama embeddings status={resp.status_code} took={duration:.2f}s")
+    print(f"[EMBED] OpenAI embeddings status={resp.status_code} took={duration:.2f}s")
 
     if resp.status_code != 200:
-        print(f"[EMBED][ERROR] Non-200 from Ollama embeddings: {resp.text[:400]}")
-        raise RuntimeError(f"Ollama embeddings error: {resp.text}")
+        print(f"[EMBED][ERROR] Non-200 from OpenAI embeddings: {resp.text[:400]}")
+        raise RuntimeError(f"OpenAI embeddings error: {resp.text}")
 
     data = resp.json()
-    if "embedding" not in data:
-        print(f"[EMBED][ERROR] Missing 'embedding' key in response: {data}")
-        raise RuntimeError(f"Ollama embeddings response missing 'embedding': {data}")
+    try:
+        emb = data["data"][0]["embedding"]
+    except Exception as e:
+        print(f"[EMBED][ERROR] Unexpected OpenAI response shape: {data}")
+        raise RuntimeError(f"OpenAI embeddings response missing embedding: {e}")
 
-    emb = data["embedding"]
-    # Compute metadata for easier tracing: preview, length, norm, and hash
     preview = ",".join([f"{x:.6f}" for x in emb[:EMBED_PREVIEW_COUNT]])
     norm = math.sqrt(sum([x * x for x in emb]))
     h = hashlib.sha256(
         ",".join([f"{x:.6f}" for x in emb[:16]]).encode("utf-8")
     ).hexdigest()[:12]
-    print(f"[EMBED] Got embedding of length {len(emb)} preview=[{preview}] norm={norm:.6f} hash={h}")
+    print(f"[EMBED] Got OpenAI embedding length={len(emb)} preview=[{preview}] norm={norm:.6f} hash={h}")
     if LOG_FULL_EMBEDDINGS:
         print(f"[EMBED][FULL] {emb}")
     return emb
 
 
 def call_llm(prompt: str) -> str:
-    """Call LLM for final answer. Prefer OpenAI chat if key is set, otherwise use Ollama."""
-    if OPENAI_API_KEY:
-        print(f"[LLM] Calling OpenAI chat model={OPENAI_CHAT_MODEL} prompt_len={len(prompt)}")
-        start = time.time()
-        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-        body = {
-            "model": OPENAI_CHAT_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2,
-        }
-        try:
-            resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=600)
-        except Exception as e:
-            print(f"[LLM][ERROR] Exception while calling OpenAI chat: {e}")
-            traceback.print_exc()
-            raise RuntimeError(f"Failed to call OpenAI chat: {e}")
-        duration = time.time() - start
-        print(f"[LLM] OpenAI chat status={resp.status_code} took={duration:.2f}s")
-
-        if resp.status_code != 200:
-            print(f"[LLM][ERROR] Non-200 from OpenAI chat: {resp.text[:400]}")
-            raise RuntimeError(f"OpenAI chat error: {resp.text}")
-
-        try:
-            data = resp.json()
-            msg = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        except Exception as e:
-            print(f"[LLM][ERROR] Unexpected OpenAI chat response: {resp.text[:400]}")
-            traceback.print_exc()
-            raise RuntimeError(f"OpenAI chat parse error: {e}")
-
-        print(f"[LLM] Got OpenAI answer length={len(msg)}")
-        return msg
-
-    print(f"[LLM] Calling Ollama chat with prompt length={len(prompt)}")
+    """Call OpenAI chat for final answer."""
+    print(f"[LLM] Calling OpenAI chat model={OPENAI_CHAT_MODEL} prompt_len={len(prompt)}")
     start = time.time()
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    body = {
+        "model": OPENAI_CHAT_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+    }
     try:
-        resp = requests.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={
-                "model": OLLAMA_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-            },
-            timeout=600,
-        )
+        resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=600)
     except Exception as e:
-        print(f"[LLM][ERROR] Exception while calling Ollama chat: {e}")
+        print(f"[LLM][ERROR] Exception while calling OpenAI chat: {e}")
         traceback.print_exc()
-        raise RuntimeError(f"Failed to call Ollama chat: {e}")
+        raise RuntimeError(f"Failed to call OpenAI chat: {e}")
     duration = time.time() - start
-    print(f"[LLM] Ollama chat status={resp.status_code} took={duration:.2f}s")
+    print(f"[LLM] OpenAI chat status={resp.status_code} took={duration:.2f}s")
 
     if resp.status_code != 200:
-        print(f"[LLM][ERROR] Non-200 from Ollama chat: {resp.text[:400]}")
-        raise RuntimeError(f"Ollama chat error: {resp.text}")
+        print(f"[LLM][ERROR] Non-200 from OpenAI chat: {resp.text[:400]}")
+        raise RuntimeError(f"OpenAI chat error: {resp.text}")
 
-    data = resp.json()
-    msg = data.get("message", {}).get("content", "").strip()
-    print(f"[LLM] Got answer length={len(msg)}")
+    try:
+        data = resp.json()
+        msg = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    except Exception as e:
+        print(f"[LLM][ERROR] Unexpected OpenAI chat response: {resp.text[:400]}")
+        traceback.print_exc()
+        raise RuntimeError(f"OpenAI chat parse error: {e}")
+
+    print(f"[LLM] Got OpenAI answer length={len(msg)}")
     return msg
 
 
@@ -312,14 +232,6 @@ def ado_list_tickets(tag_contains: str = "CC") -> List[dict]:
         results.append({"id": fid, "title": title, "state": state, "tags": tags, "url": web_url})
     return results
 
-def ado_check_access_by_id(work_item_id: int) -> bool:
-    try:
-        u = f"{_ado_base()}/_apis/wit/workitems/{work_item_id}?api-version=7.1"
-        r = requests.get(u, headers=_ado_headers(), timeout=30)
-        return r.status_code == 200
-    except Exception:
-        return False
-
 def ado_parse_id_from_url(url: str) -> Optional[int]:
     try:
         # expected e.g. https://dev.azure.com/{org}/{project}/_workitems/edit/{id}
@@ -400,109 +312,6 @@ def get_ingested_sources() -> List[str]:
         print(f"[CHROMA][ERROR] Failed to get ingested sources: {e}")
         traceback.print_exc()
         return []
-
-
-# ---------------------------------------------------------------------
-# Azure DevOps Wiki API helpers
-# ---------------------------------------------------------------------
-
-def ado_list_wikis() -> List[dict]:
-    """Return available wikis (id, name)."""
-    url = f"{_ado_base()}/_apis/wiki/wikis?api-version=7.1"
-    print(f"[ADO][WIKI] Fetching wikis from: {url}")
-    try:
-        hdrs = _ado_headers()
-        print(f"[ADO][WIKI] Auth header set with PAT")
-        r = requests.get(url, headers=hdrs, timeout=60)
-    except Exception as e:
-        print(f"[ADO][WIKI][ERROR] list wikis failed: {e}")
-        traceback.print_exc()
-        raise
-    if r.status_code != 200:
-        print(f"[ADO][WIKI][ERROR] list wikis non-200: {r.status_code}")
-        print(f"[ADO][WIKI][ERROR] Response body: {r.text[:500]}")
-        print(f"[ADO][WIKI][ERROR] Response headers: {r.headers}")
-        raise RuntimeError(f"ADO list wikis error (status {r.status_code}): {r.text}")
-    val = r.json().get("value", [])
-    return [{"id": w.get("id"), "name": w.get("name")} for w in val]
-
-
-def ado_get_wiki_id_by_name(name: Optional[str] = None) -> str:
-    """Find a wiki id by name. If name is None, try project default '<PROJECT>.wiki'."""
-    wikis = ado_list_wikis()
-    if not wikis:
-        raise RuntimeError("No wikis found in Azure DevOps")
-    if name:
-        for w in wikis:
-            if str(w.get("name", "")) == name:
-                return str(w.get("id"))
-        raise RuntimeError(f"Wiki '{name}' not found. Available: {[w['name'] for w in wikis]}")
-    # Fallback: exact project wiki name
-    default_name = f"{ADO_PROJECT}.wiki"
-    for w in wikis:
-        if str(w.get("name", "")) == default_name:
-            return str(w.get("id"))
-    # If not found, just use the first wiki
-    return str(wikis[0].get("id"))
-
-
-def ado_wiki_get_pages_recursive(wiki_id: str, path: str = "/") -> List[dict]:
-    """Fetch all pages under a path and return list of {path, content}.
-
-    NOTE: The recursive list endpoint does NOT include content even with includeContent=true
-    in many orgs. So we first fetch the tree to collect all paths, then fetch content per path.
-    """
-    norm_path = path if path.startswith("/") else f"/{path}"
-    enc_path = quote(norm_path, safe="/")
-    tree_url = f"{_ado_base()}/_apis/wiki/wikis/{wiki_id}/pages?path={enc_path}&recursionLevel=full&api-version=7.1"
-    try:
-        r = requests.get(tree_url, headers=_ado_headers(), timeout=120)
-    except Exception as e:
-        print(f"[ADO][WIKI][ERROR] get pages tree failed: {e}")
-        traceback.print_exc()
-        raise
-    if r.status_code != 200:
-        print(f"[ADO][WIKI][ERROR] get pages tree non-200: {r.status_code} {r.text[:300]}")
-        raise RuntimeError(f"ADO wiki pages tree fetch error: {r.text}")
-
-    data = r.json()
-    all_paths: List[str] = []
-
-    def _collect_paths(node: dict):
-        p = node.get("path")
-        if p and p != "/":
-            all_paths.append(p)
-        for sub in node.get("subPages", []):
-            _collect_paths(sub)
-
-    _collect_paths(data)
-    print(f"[ADO][WIKI] Collected {len(all_paths)} page paths from tree")
-
-    pages: List[dict] = []
-
-    def _fetch_content(p: str) -> Optional[str]:
-        enc = quote(p if p.startswith("/") else f"/{p}", safe="/")
-        url = f"{_ado_base()}/_apis/wiki/wikis/{wiki_id}/pages?path={enc}&includeContent=true&api-version=7.1"
-        try:
-            rr = requests.get(url, headers=_ado_headers(), timeout=60)
-        except Exception as e:
-            print(f"[ADO][WIKI][WARN] fetch content failed for path='{p}': {e}")
-            return None
-        if rr.status_code != 200:
-            # Some nodes are containers only; ignore non-200 for them
-            print(f"[ADO][WIKI][WARN] content non-200 for path='{p}': {rr.status_code}")
-            return None
-        try:
-            return rr.json().get("content", "")
-        except Exception:
-            return None
-
-    for p in all_paths:
-        content = _fetch_content(p)
-        if content and content.strip():
-            pages.append({"path": p, "content": content})
-
-    return pages
 
 
 # ---------------------------------------------------------------------
@@ -791,6 +600,10 @@ def compare_and_ingest_internal() -> Tuple[int, int]:
             return 0, collection.count()
 
         added_chunks = 0
+        skipped_empty: List[str] = []
+        skipped_no_chunks: List[str] = []
+        skipped_errors: List[str] = []
+        
         for idx, rel in enumerate(to_ingest, start=1):
             abs_path = os.path.join(repo_dir, rel)
             print(f"[COMPARE_INGEST] [{idx}/{len(to_ingest)}] Ingesting file: {rel}")
@@ -799,15 +612,18 @@ def compare_and_ingest_internal() -> Tuple[int, int]:
                     text = f.read()
             except Exception as e:
                 print(f"[COMPARE_INGEST][ERROR] Failed to read {rel}: {e}")
+                skipped_errors.append(rel)
                 continue
 
             if not text.strip():
                 print(f"[COMPARE_INGEST] Empty file {rel} → skipping")
+                skipped_empty.append(rel)
                 continue
 
             chunks = chunk_text(text)
             if not chunks:
                 print(f"[COMPARE_INGEST] 0 chunks for {rel} → skipping")
+                skipped_no_chunks.append(rel)
                 continue
 
             ids: List[str] = []
@@ -834,9 +650,31 @@ def compare_and_ingest_internal() -> Tuple[int, int]:
                 added_chunks += len(ids)
             except Exception as e:
                 print(f"[COMPARE_INGEST][ERROR] Failed to add chunks for {rel}: {e}")
+                skipped_errors.append(rel)
 
         total = collection.count()
-        print(f"[COMPARE_INGEST] Finished git-based ingest: added_chunks={added_chunks}, total_chunks={total}")
+        
+        # Print summary
+        print(f"[COMPARE_INGEST] ===== SUMMARY =====")
+        print(f"[COMPARE_INGEST] Total files in wiki repo: {len(md_files)}")
+        print(f"[COMPARE_INGEST] Already ingested: {len(existing_sources)}")
+        print(f"[COMPARE_INGEST] Missing files found: {len(to_ingest)}")
+        print(f"[COMPARE_INGEST] Successfully ingested: {added_chunks} chunks")
+        print(f"[COMPARE_INGEST] Skipped (empty files): {len(skipped_empty)}")
+        print(f"[COMPARE_INGEST] Skipped (no chunks): {len(skipped_no_chunks)}")
+        print(f"[COMPARE_INGEST] Skipped (errors): {len(skipped_errors)}")
+        print(f"[COMPARE_INGEST] Total chunks in DB: {total}")
+        
+        if skipped_empty:
+            print(f"[COMPARE_INGEST] Empty files list ({len(skipped_empty)} files):")
+            for f in skipped_empty[:10]:  # Show first 10
+                print(f"[COMPARE_INGEST]   - {f}")
+            if len(skipped_empty) > 10:
+                print(f"[COMPARE_INGEST]   ... and {len(skipped_empty) - 10} more")
+        
+        print(f"[COMPARE_INGEST] ==================")
+        print(f"[COMPARE_INGEST] DONE: api worked properly (added_chunks={added_chunks}, total_chunks={total})")
+        
         return added_chunks, total
     finally:
         if repo_dir and os.path.isdir(repo_dir):
@@ -971,40 +809,6 @@ def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
     return score
 
 
-def inject_special_doc_for_image(question: str, docs: List[str], metas: List[dict]) -> None:
-    q = question.lower()
-    needs_image_help = (
-        "image" in q
-        and ("criteria" in q or "field" in q or "upload" in q or "detection" in q)
-    )
-
-    print(f"[SPECIAL] inject_special_doc_for_image needs_image_help={needs_image_help}")
-    if not needs_image_help:
-        return
-
-    abs_path = os.path.join(WIKI_ROOT, IMAGE_CRITERIA_DOC_REL)
-    print(f"[SPECIAL] Checking special doc: {abs_path}")
-    if not os.path.exists(abs_path):
-        print("[SPECIAL][WARN] Special image criteria doc not found on disk")
-        return
-
-    try:
-        with open(abs_path, "r", encoding="utf-8") as f:
-            text = f.read().strip()
-    except Exception as e:
-        print(f"[SPECIAL][ERROR] Failed to read special doc: {e}")
-        traceback.print_exc()
-        return
-
-    if not text:
-        print("[SPECIAL][WARN] Special doc is empty")
-        return
-
-    docs.insert(0, text)
-    metas.insert(0, {"source": IMAGE_CRITERIA_DOC_REL, "chunk": 0})
-    print("[SPECIAL] Injected special 'Add image to criteria' doc as first context chunk")
-
-
 def rerank_results(
     question: str,
     docs: List[str],
@@ -1061,14 +865,6 @@ class ChatResponse(BaseModel):
     sources: List[str]
 
 
-class IngestRequest(BaseModel):
-    force: bool = False
-    only_missing: bool = False
-    include_empty: bool = False
-    paths: Optional[List[str]] = None  # relative to WIKI_ROOT, e.g. "TA9-WIKI/QA/Export-Event-Viewer-Logs.md"
-    validate_only: bool = False  # when True, just compute the planned file count without ingesting
-
-
 class IngestResponse(BaseModel):
     added_chunks: int
     total_chunks: int
@@ -1087,8 +883,8 @@ def health():
         "chroma_empty": collection_empty(),
         "wiki_root": WIKI_ROOT,
         "collection_name": COLLECTION_NAME,
-        "embedding_backend": "openai" if OPENAI_API_KEY else "ollama",
-        "embedding_model": OPENAI_EMBEDDING_MODEL if OPENAI_API_KEY else OLLAMA_MODEL,
+        "embedding_backend": "openai",
+        "embedding_model": OPENAI_EMBEDDING_MODEL,
     }
     print(f"[API][HEALTH] {info}")
     return info
@@ -1106,128 +902,52 @@ def azure_tickets(tag: str = "CC"):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/azure/ticket/access")
-def azure_ticket_access(url: Optional[str] = None, id: Optional[int] = None):
-    print(f"[API][ADO] /azure/ticket/access url={url} id={id}")
-    if url:
-        id = ado_parse_id_from_url(url)
-    if not id:
-        raise HTTPException(status_code=400, detail="ticket id or url is required")
-    ok = ado_check_access_by_id(int(id))
-    return {"accessible": bool(ok)}
-
-
-@app.post("/ingest", response_model=IngestResponse)
-def ingest(req: IngestRequest):
-    print(
-        f"[API][INGEST] /ingest called with "
-        f"force={req.force}, only_missing={req.only_missing}, "
-        f"include_empty={req.include_empty}, paths_count={0 if not req.paths else len(req.paths)}, validate_only={req.validate_only}"
-    )
-    try:
-        # Validation-only mode: compute planned file set size without ingesting
-        if req.validate_only:
-            print("[API][INGEST] validate_only=True → computing planned file set without ingesting")
-            # Build base file list
-            if req.paths:
-                all_files: List[pathlib.Path] = []
-                for rel in req.paths:
-                    abs_path = os.path.join(WIKI_ROOT, rel)
-                    if os.path.isfile(abs_path):
-                        all_files.append(pathlib.Path(abs_path))
-                        print(f"[INGEST][PLAN] Selected file found: {rel}")
-                    else:
-                        print(f"[INGEST][PLAN][WARN] Selected file not found on disk: {rel}")
-            else:
-                all_files = list(iter_markdown_files())
-
-            # Apply ignore patterns from .ragignore (wiki and repo root)
-            ignore_file = os.path.join(WIKI_ROOT, ".ragignore")
-            repo_ignore = os.path.join(os.path.dirname(WIKI_ROOT), ".ragignore")
-            compiled_ignores: List[str] = []
-            for ig in (ignore_file, repo_ignore):
-                if os.path.exists(ig):
-                    try:
-                        with open(ig, "r", encoding="utf-8") as f:
-                            for ln in f:
-                                ln = ln.strip()
-                                if not ln or ln.startswith("#"):
-                                    continue
-                                compiled_ignores.append(ln)
-                    except Exception as e:
-                        print(f"[INGEST][PLAN][WARN] Failed to read {ig}: {e}")
-            if compiled_ignores:
-                filtered = []
-                for p in all_files:
-                    rel = os.path.relpath(str(p), WIKI_ROOT)
-                    if any(fnmatch.fnmatch(rel, pat) for pat in compiled_ignores):
-                        print(f"[INGEST][PLAN] Skipping due to ignore: {rel}")
-                        continue
-                    filtered.append(p)
-                all_files = filtered
-
-            total_files = len(all_files)
-            print(f"[INGEST][PLAN] Base file set size (before only_missing/empty filters) = {total_files}")
-
-            # If only_missing requested, filter out already ingested sources
-            if req.only_missing and not req.force:
-                existing_sources = set(get_ingested_sources())
-                print(f"[INGEST][PLAN] only_missing=True existing_sources={len(existing_sources)}")
-                all_files = [p for p in all_files if os.path.relpath(str(p), WIKI_ROOT) not in existing_sources]
-                total_files = len(all_files)
-                print(f"[INGEST][PLAN] After only_missing filter, files={total_files}")
-
-            # Exclude empty files unless include_empty=True
-            if not req.include_empty:
-                filtered = []
-                for p in all_files:
-                    try:
-                        sz = os.path.getsize(str(p))
-                    except Exception:
-                        sz = 0
-                    if sz == 0:
-                        print(f"[INGEST][PLAN] Skipping empty file: {os.path.relpath(str(p), WIKI_ROOT)}")
-                        continue
-                    filtered.append(p)
-                all_files = filtered
-                total_files = len(all_files)
-                print(f"[INGEST][PLAN] After empty-file filter, files={total_files}")
-
-            # Do NOT ingest; just return a summary. total_chunks is a proxy (unknown until chunking), so we return file count.
-            print(f"[API][INGEST][PLAN] Completed. planned_files={total_files}")
-            return IngestResponse(added_chunks=0, total_chunks=total_files)
-
-        added = ingest_wiki_files(
-            force=req.force,
-            only_missing=req.only_missing,
-            include_empty=req.include_empty,
-            selected_paths=req.paths,
-        )
-        total = collection.count()
-        print(f"[API][INGEST] Completed. added_chunks={added}, total_chunks={total}")
-        return IngestResponse(added_chunks=added, total_chunks=total)
-    except Exception as exc:
-        print(f"[API][INGEST][ERROR] {exc}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
 # ---------------------------------------------------------------------
 # Compare and Ingest Endpoint
 # ---------------------------------------------------------------------
 
 @app.post("/compare_and_ingest", response_model=IngestResponse)
-def compare_and_ingest():
+def compare_and_ingest(async_run: bool = False, background_tasks: BackgroundTasks = None):
     """
     Compare wiki files to the vector DB and ingest only missing ones.
     Safe to call manually (curl) or via the scheduler.
     """
+    # Optional background mode to avoid long-running request timeouts
+    if async_run:
+        print("[API][COMPARE_INGEST] async_run=True → scheduling background task")
+
+        def _bg_job():
+            try:
+                a, t = compare_and_ingest_internal()
+                print(f"[API][COMPARE_INGEST][ASYNC] DONE: api worked properly (added_chunks={a}, total_chunks={t})")
+            except Exception as e:
+                print(f"[API][COMPARE_INGEST][ASYNC][ERROR] {e}")
+                traceback.print_exc()
+
+        if background_tasks is not None:
+            background_tasks.add_task(_bg_job)
+        else:
+            # Fallback if BackgroundTasks not provided
+            asyncio.create_task(asyncio.to_thread(_bg_job))
+        # We can't know counts yet; return immediate acknowledgement
+        try:
+            current_total = collection.count()
+        except Exception:
+            current_total = 0
+        print("[API][COMPARE_INGEST] async ok: api worked! background task scheduled; responding immediately")
+        return IngestResponse(
+            added_chunks=0,
+            total_chunks=current_total,
+            message="api worked! compare_and_ingest started in background; check logs for progress",
+        )
+
     try:
         added, total = compare_and_ingest_internal()
         if added == 0:
             msg = "No new files to ingest. All wiki files are already in the vector database."
         else:
             msg = f"Successfully ingested {added} new chunks from wiki files."
+        print(f"[API][COMPARE_INGEST] success: api worked properly (added_chunks={added}, total_chunks={total})")
         return IngestResponse(added_chunks=added, total_chunks=total, message=msg)
     except Exception as exc:
         print(f"[API][COMPARE_INGEST][ERROR] {exc}")
@@ -1395,8 +1115,6 @@ def chat(req: ChatRequest):
                 metas.insert(0, m or {"source": "memory", "chunk": 0})
     except Exception as e:
         print(f"[API][CHAT][WARN] memory query failed: {e}")
-
-    inject_special_doc_for_image(question, docs, metas)
 
     if not docs:
         print("[API][CHAT] No docs after injection → calling LLM with 'no context' message")
