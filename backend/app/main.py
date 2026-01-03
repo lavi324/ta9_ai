@@ -3,7 +3,7 @@ import uuid
 import pathlib
 import time
 import traceback
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -47,6 +47,9 @@ COLLECTION_NAME = "wiki_rag"
 MEMORY_COLLECTION_NAME = "wiki_memories"
 
 app = FastAPI(title="Wiki RAG API")
+
+# Track if a structured "first ticket response" was already sent per ticket key (id or URL fallback)
+ticket_first_reply_done: Dict[str, bool] = {}
 
 
 # ---------------------------------------------------------------------
@@ -235,8 +238,11 @@ def ado_list_tickets(tag_contains: str = "CC") -> List[dict]:
 def ado_parse_id_from_url(url: str) -> Optional[int]:
     try:
         # expected e.g. https://dev.azure.com/{org}/{project}/_workitems/edit/{id}
-        parts = url.rstrip("/").split("/")
-        return int(parts[-1])
+        # Be resilient to trailing params or alternative shapes; grab the last digit run.
+        digits = re.findall(r"(\d+)", url or "")
+        if not digits:
+            return None
+        return int(digits[-1])
     except Exception:
         return None
 
@@ -858,6 +864,8 @@ class ChatRequest(BaseModel):
     force_reingest: Optional[bool] = False
     ticket_url: Optional[str] = None
     teach: Optional[bool] = False
+    # If a ticket is selected, set to True for follow-up messages after the first structured reply
+    is_followup: Optional[bool] = False
 
 
 class ChatResponse(BaseModel):
@@ -962,7 +970,27 @@ def compare_and_ingest(async_run: bool = False, background_tasks: BackgroundTask
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     print(f"[API][CHAT] /chat called question='{req.question[:200]}' top_k={req.top_k} force_reingest={req.force_reingest}")
-    question = req.question.strip()
+    question = (req.question or "").strip()
+
+    # Parse ticket selection early so we can allow an empty initial message to trigger the first structured reply
+    selected_ticket_id: Optional[int] = None
+    selected_ticket_text: Optional[str] = None
+    ticket_key: Optional[str] = None
+    if req.ticket_url:
+        ticket_key = (req.ticket_url or "").strip() or None
+        selected_ticket_id = ado_parse_id_from_url(req.ticket_url)
+        if selected_ticket_id is not None:
+            ticket_key = str(selected_ticket_id)
+            print(f"[API][CHAT] Fetching Azure DevOps ticket id={selected_ticket_id}")
+            try:
+                selected_ticket_text = ado_fetch_ticket_text(int(selected_ticket_id))
+            except Exception as e:
+                print(f"[API][CHAT][WARN] failed to fetch ticket: {e}")
+                selected_ticket_text = None
+
+    has_ticket = bool(ticket_key)
+
+    # Enforce non-empty question
     if not question:
         print("[API][CHAT][ERROR] Empty question")
         raise HTTPException(status_code=400, detail="question is empty")
@@ -1084,20 +1112,6 @@ def chat(req: ChatRequest):
 
     # No forced root-file injection: all files treated equally
 
-    # If a ticket is selected, fetch it now and pin it later as the first context
-    selected_ticket_id: Optional[int] = None
-    selected_ticket_text: Optional[str] = None
-    if req.ticket_url:
-        selected_ticket_id = ado_parse_id_from_url(req.ticket_url)
-        if selected_ticket_id:
-            print(f"[API][CHAT] Fetching Azure DevOps ticket id={selected_ticket_id}")
-            try:
-                selected_ticket_text = ado_fetch_ticket_text(int(selected_ticket_id))
-            except Exception as e:
-                print(f"[API][CHAT][WARN] failed to fetch ticket: {e}")
-                selected_ticket_id = None
-                selected_ticket_text = None
-
     # Also include memory snippets related to the question
     # Gather memory docs (generic + ticket-specific) but do not pin them; they will be reranked
     try:
@@ -1154,57 +1168,98 @@ def chat(req: ChatRequest):
 
     context_text = "\n\n---\n\n".join(context_blocks)
 
-    # ChatGPT-style prompt for natural, high-quality responses
-    prompt_intro = (
-        "You are an internal TA9 / IntSight assistant. Your goal is to respond in the same style and quality as ChatGPT: "
-        "clear, structured, ordered, and professional.\n\n"
-        "RULES FOR EVERY RESPONSE:\n\n"
-        "1. STRUCTURE\n"
-        "- Always organize answers into clear sections.\n"
-        "- Use headings, numbered steps, and bullet points where appropriate.\n"
-        "- Present information in a logical top-down order (overview → details → examples).\n\n"
-        "2. CLARITY\n"
-        "- Be concise but complete.\n"
-        "- Avoid unnecessary repetition.\n"
-        "- Explain technical concepts clearly and precisely.\n\n"
-        "3. ORDER & FLOW\n"
-        "- Start with a short direct answer or summary.\n"
-        "- Then expand with details.\n"
-        "- End with practical tips, examples, or next steps when relevant.\n\n"
-        "4. TONE\n"
-        "- Professional, calm, confident.\n"
-        "- Helpful and instructional.\n"
-        "- No emojis unless explicitly requested.\n\n"
-        "5. TECHNICAL ANSWERS\n"
-        "- Use code blocks for commands or code.\n"
-        "- Explain what the code does.\n"
-        "- Prefer best practices and production-grade solutions.\n\n"
-        "6. UNCERTAINTY\n"
-        "- If information is missing, state what is known first.\n"
-        "- Clearly say what is unknown and why.\n"
-        "- Never hallucinate facts.\n\n"
-        "7. FORMAT EXAMPLES\n"
-        "- Use tables when comparing things.\n"
-        "- Use step-by-step lists for procedures.\n"
-        "- Use short paragraphs for explanations.\n\n"
-        "8. DEFAULT STYLE\n"
-        "- Assume the user prefers ChatGPT-level answers: well-structured, readable, and actionable.\n\n"
-        "If context is provided, base your answer strictly on that context.\n"
-        "If context is partial, answer with what is available and state limitations.\n\n"
-        "Formatting guidelines:\n"
-        "- Use minimal headings; avoid over-structuring when not needed.\n"
-        "- Only use fenced code blocks for commands or code. Do NOT put normal text in code blocks.\n"
-        "- Avoid emojis unless they add clear value; if used, keep them rare.\n\n"
+    # Prompt templates adjusted for customer support use cases
+    is_followup = bool(req.is_followup)
+
+    unstructured_prompt = (
+        "You are a TA9 / IntSight customer support assistant."
+        " Respond with an unstructured, direct, and highly actionable answer."
+        " Be assertive and confident; maximize helpfulness with concrete steps,"
+        " copy-pastable commands, and pragmatic recommendations."
+        " Avoid rigid sections or headings unless they add clear value."
+        " Use fenced code blocks ONLY for commands or code."
+        " State assumptions or uncertainties briefly if relevant, and do not hallucinate facts."
+        " Keep a professional tone.\n\n"
+    )
+
+    ticket_first_prompt = (
+        "You are a TA9 / IntSight customer support assistant handling a selected Azure DevOps ticket.\n\n"
+        "The support engineer has asked you a SPECIFIC QUESTION and also provided a ticket for context.\n"
+        "Provide a professional response using EXACTLY this format with delimiters. "
+        "Output each section in order with NO extra content:\n\n"
+
+        "---ANSWER_START---\n"
+        "Answer the support engineer's SPECIFIC QUESTION directly. Focus ONLY on what they asked. "
+        "Be concise, accurate, and specific. Include relevant technical details, commands, or steps. "
+        "Do NOT try to resolve the ticket here—just answer their question. No greetings.\n"
+        "---ANSWER_END---\n\n"
+
+        "---CUSTOMER_REPLY_START---\n"
+        "Now write what to post to the CUSTOMER in the ticket. Start with 'Hi <name>,' if the name is known; "
+        "otherwise start with 'Hi there,'. Address the ticket issue with clear next steps and any commands. "
+        "Keep it brief, professional, and actionable. "
+        "End with a professional closing like 'Please let me know if you need any further assistance.' or "
+        "'Feel free to reach out if you have any questions.' DO NOT use casual sign-offs like 'Best,' or 'Thanks,'.\n"
+        "---CUSTOMER_REPLY_END---\n\n"
+
+        "---BACKGROUND_START---\n"
+        "Explain the ticket context in natural paragraphs: the customer's environment, what they're trying to achieve, "
+        "and what the current problem is. This helps understand the situation better.\n"
+        "---BACKGROUND_END---\n\n"
+
+        "---DIAGNOSIS_START---\n"
+        "Provide your analysis of the ticket issue: what's happening and why. Explain the root cause clearly. "
+        "Write in flowing paragraphs—no bullet points or lists.\n"
+        "---DIAGNOSIS_END---\n\n"
+
+        "---ACTIONS_START---\n"
+        "What the customer should do to resolve the ticket. Include exact commands in code blocks. "
+        "Explain each step clearly. Also mention what information or logs we need from them to move forward.\n"
+        "---ACTIONS_END---\n\n"
+
+        "Be precise. Use natural flowing paragraphs. No numbered lists or dashes at sentence starts."
+    )
+
+    ticket_followup_prompt = (
+        "You are a TA9 / IntSight customer support assistant."
+        " Answer the user's SPECIFIC QUESTION directly and concisely."
+        " The ticket context is provided for background reference only—do NOT try to resolve the entire ticket unless asked."
+        " Focus on what the user is actually asking about."
+        " Be assertive and confident; give concrete steps and copy-pastable commands when relevant."
+        " Use fenced code blocks ONLY for commands or code."
+        " Keep your answer brief and to the point—avoid unnecessary ticket summaries or introductions."
+        " Do not reference any other ticket numbers; if mentioning a number, it must match the selected ticket ID."
+        " State uncertainties briefly and avoid hallucinations. Keep a professional tone.\n\n"
     )
 
     ticket_focus_rules = ""
-    if selected_ticket_id:
-        ticket_focus_rules = (
-            f"A SELECTED AZURE DEVOPS TICKET IS PROVIDED (ID {selected_ticket_id}). Follow these rules:\n"
-            "- Focus primarily on the selected ticket's content.\n"
+    if has_ticket:
+        ticket_label = f"ID {selected_ticket_id}" if selected_ticket_id is not None else "selected ticket"
+        other_number_rule = (
             "- Do not reference any other ticket numbers; if a number appears, ensure it matches the selected ticket ID.\n"
+            if selected_ticket_id is not None
+            else "- Do not reference any other ticket numbers; the exact ticket ID was not provided in the request.\n"
+        )
+        ticket_focus_rules = (
+            f"A SELECTED AZURE DEVOPS TICKET IS PROVIDED ({ticket_label}). Follow these rules:\n"
+            "- Focus primarily on the selected ticket's content.\n"
+            f"{other_number_rule}"
             "- If information is missing in the ticket, state the gaps clearly and avoid guessing.\n\n"
         )
+
+    # Choose prompt style:
+    # - No ticket: always unstructured
+    # - Ticket selected: structured for first reply (is_followup=False), unstructured for follow-ups (is_followup=True)
+    # Frontend controls is_followup flag based on its own tracking
+    use_structured_first = False
+    if not has_ticket:
+        prompt_intro = unstructured_prompt
+    else:
+        if is_followup:
+            prompt_intro = ticket_followup_prompt
+        else:
+            prompt_intro = ticket_first_prompt
+            use_structured_first = True
 
     prompt = (
         prompt_intro + ticket_focus_rules +

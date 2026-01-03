@@ -1,6 +1,6 @@
 services:
   wiki_rag_api:
-    image: wiki-rag-api:3.4
+    image: wiki-rag-api:5.2
     networks:
       - shared-ai-net
     environment:

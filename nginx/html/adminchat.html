@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <title>TA9 AI Chat</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/png" href="/adminchat/ta9_logo.png">
   <!-- Markdown renderer to convert headings/bullets/code to HTML -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
@@ -246,10 +247,10 @@
       background: transparent;
       border: none;
       border-radius: 0;
-      padding: 20px 0;
+      padding: 0;
       min-height: 60px;
       font-size: 15px;
-      line-height: 1.7;
+      line-height: 1.75;
       color: #1f2d3d;
       white-space: normal;
       text-align: left;
@@ -257,38 +258,219 @@
       margin-left: 0;
       margin-right: auto;
       margin-bottom: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
     }
 
-    /* Tidy up markdown content (plain headings, no cards) */
-    .answer-box h1,
-    .answer-box h2,
-    .answer-box h3 {
-      margin: 8px 0 6px;
-      font-weight: 700;
+    /* Boxed sections */
+    .response-box {
+      background: linear-gradient(135deg, #f0f7ff 0%, #ffffff 100%);
+      border: 1.5px solid #3b82f6;
+      border-radius: 12px;
+      padding: 22px;
+      line-height: 1.75;
       color: #0c1d37;
+      font-size: 15px;
+      box-shadow: 0 2px 10px rgba(59, 130, 246, 0.12);
     }
-    .answer-box ul {
-      padding-left: 18px;
+
+    .response-box h3 {
+      margin: 0 0 10px 0;
+      font-size: 15px;
+      font-weight: 700;
+      color: #0b3a75;
     }
-    .answer-box code {
-      background: #eef2f7;
-      padding: 2px 6px;
+
+    .response-box p {
+      margin: 0 0 12px 0;
+    }
+
+    .response-box p:last-child {
+      margin-bottom: 0;
+    }
+
+    .response-box ol,
+    .response-box ul {
+      margin: 12px 0;
+      padding-left: 24px;
+    }
+
+    .response-box li {
+      margin-bottom: 8px;
+      line-height: 1.6;
+    }
+
+    .customer-box {
+      background: linear-gradient(135deg, #f5fff5 0%, #ffffff 100%);
+      border: 1.5px solid #22c55e;
+      border-radius: 12px;
+      padding: 22px;
+      line-height: 1.75;
+      color: #0f2a12;
+      font-size: 15px;
+      box-shadow: 0 2px 10px rgba(34, 197, 94, 0.12);
+    }
+
+    .customer-box h3 {
+      margin: 0 0 10px 0;
+      font-size: 15px;
+      font-weight: 700;
+      color: #0f5132;
+    }
+
+    .customer-box p {
+      margin: 0 0 12px 0;
+    }
+
+    .customer-box p:last-child {
+      margin-bottom: 0;
+    }
+
+    .customer-box ol,
+    .customer-box ul {
+      margin: 12px 0;
+      padding-left: 24px;
+    }
+
+    .customer-box li {
+      margin-bottom: 8px;
+      line-height: 1.6;
+    }
+
+    /* Customer box code blocks - inline style, no dark theme */
+    .customer-box pre {
+      background: #e8f5e9;
+      border: 1px solid #c3e6cb;
       border-radius: 6px;
-    }
-    .answer-box pre code {
-      display: block;
-      background: #0c1d37;
-      color: #e7edf7;
-      padding: 12px;
-      border-radius: 10px;
+      padding: 12px 16px;
+      margin: 12px 0;
       overflow-x: auto;
     }
-    /* Terminal look for shell commands only */
-    .answer-box pre code.language-bash,
-    .answer-box pre code.language-sh {
-      background: #0b1b34;
-      color: #d6e5ff;
-      border-left: 6px solid #0b8ef3;
+
+    .customer-box pre code {
+      background: transparent;
+      color: #2d5016;
+      padding: 0;
+      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .customer-box .code-header {
+      display: none; /* Hide the copy button in customer replies */
+    }
+
+    /* Other sections stay as clean text (no boxes) */
+    .content-section {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .content-section h3 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #0c1d37;
+      margin-top: 8px;
+      margin-bottom: 6px;
+    }
+
+    .content-section p {
+      margin: 0 0 12px 0;
+    }
+
+    .content-section p:last-child {
+      margin-bottom: 0;
+    }
+
+    .content-section ol,
+    .content-section ul {
+      margin: 0;
+      padding-left: 24px;
+    }
+
+    .content-section li {
+      margin-bottom: 8px;
+    }
+
+    /* Code blocks styling */
+    pre {
+      background: #1e1e1e;
+      border-radius: 8px;
+      padding: 0;
+      margin: 16px 0;
+      position: relative;
+      overflow: hidden;
+    }
+
+    pre code {
+      display: block;
+      padding: 16px;
+      overflow-x: auto;
+      color: #d4d4d4;
+      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .code-header {
+      background: #2d2d2d;
+      padding: 8px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #3e3e3e;
+    }
+
+    .code-language {
+      color: #858585;
+      font-size: 12px;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      text-transform: lowercase;
+    }
+
+    .copy-code-btn {
+      background: transparent;
+      border: 1px solid #4a4a4a;
+      color: #d4d4d4;
+      padding: 4px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .copy-code-btn:hover {
+      background: #3e3e3e;
+      border-color: #5a5a5a;
+    }
+
+    .copy-code-btn.copied {
+      color: #22c55e;
+      border-color: #22c55e;
+    }
+
+    .response-box pre,
+    .customer-box pre,
+    .content-section pre {
+      margin: 12px 0;
+    }
+
+    .response-box code:not(pre code),
+    .customer-box code:not(pre code),
+    .content-section code:not(pre code),
+    .answer-box code:not(pre code) {
+      background: #f0f0f0;
+      color: #e01e5a;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 13px;
+      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
     }
 
     .question-bubble {
@@ -325,22 +507,6 @@
     .thinking {
       position: relative;
       color: #42546a;
-    }
-
-    .thinking::after {
-      content: '...';
-      position: absolute;
-      margin-left: 6px;
-      width: 24px;
-      animation: dots 1.2s steps(3, end) infinite;
-      color: #0b8ef3;
-    }
-
-    @keyframes dots {
-      0% { content: '.'; }
-      33% { content: '..'; }
-      66% { content: '...'; }
-      100% { content: '.'; }
     }
 
     .sources {
@@ -508,14 +674,189 @@
     const clearTicketBtn = document.getElementById('clear-ticket');
 
     let currentController = null;
+    let ticketFirstQuestionAsked = {}; // Track if first question was asked for each ticket URL
+    let lastSelectedTicket = null; // Track the last selected ticket to detect changes
+    let thinkingInterval = null; // Track thinking animation interval
 
-    // Render markdown answer as plain HTML; only code blocks are boxed
+    // Animate "Thinking..." text
+    function startThinkingAnimation(element) {
+      let dotCount = 0;
+      element.textContent = 'Thinking';
+      thinkingInterval = setInterval(() => {
+        dotCount = (dotCount + 1) % 4;
+        element.textContent = 'Thinking' + '.'.repeat(dotCount);
+      }, 400);
+    }
+
+    function stopThinkingAnimation() {
+      if (thinkingInterval) {
+        clearInterval(thinkingInterval);
+        thinkingInterval = null;
+      }
+    }
+
+    // Enhance code blocks with copy button
+    function enhanceCodeBlocks(container) {
+      const codeBlocks = container.querySelectorAll('pre code');
+      codeBlocks.forEach((codeBlock, index) => {
+        const pre = codeBlock.parentElement;
+        
+        // Skip if already enhanced
+        if (pre.querySelector('.code-header')) return;
+        
+        // Detect language from class name (marked.js adds language-xxx)
+        let language = 'code';
+        const classes = codeBlock.className.split(' ');
+        for (const cls of classes) {
+          if (cls.startsWith('language-')) {
+            language = cls.replace('language-', '');
+            break;
+          }
+        }
+        
+        // Create header
+        const header = document.createElement('div');
+        header.className = 'code-header';
+        
+        const langLabel = document.createElement('span');
+        langLabel.className = 'code-language';
+        langLabel.textContent = language;
+        
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';  // Prevent form submission
+        copyBtn.className = 'copy-code-btn';
+        copyBtn.innerHTML = '📋 Copy code';
+        copyBtn.onclick = async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const code = codeBlock.textContent;
+          
+          // Try modern clipboard API first
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            try {
+              await navigator.clipboard.writeText(code);
+              const originalText = copyBtn.innerHTML;
+              copyBtn.innerHTML = '✓ Copied!';
+              copyBtn.classList.add('copied');
+              setTimeout(() => {
+                copyBtn.innerHTML = originalText;
+                copyBtn.classList.remove('copied');
+              }, 2000);
+              return;
+            } catch (err) {
+              console.log('Clipboard API failed, trying fallback:', err);
+            }
+          }
+          
+          // Fallback method for older browsers or non-HTTPS
+          try {
+            const textArea = document.createElement('textarea');
+            textArea.value = code;
+            textArea.style.position = 'fixed';
+            textArea.style.left = '-999999px';
+            textArea.style.top = '-999999px';
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            
+            const successful = document.execCommand('copy');
+            document.body.removeChild(textArea);
+            
+            if (successful) {
+              const originalText = copyBtn.innerHTML;
+              copyBtn.innerHTML = '✓ Copied!';
+              copyBtn.classList.add('copied');
+              setTimeout(() => {
+                copyBtn.innerHTML = originalText;
+                copyBtn.classList.remove('copied');
+              }, 2000);
+            } else {
+              copyBtn.innerHTML = '❌ Failed';
+              setTimeout(() => {
+                copyBtn.innerHTML = '📋 Copy code';
+              }, 2000);
+            }
+          } catch (err) {
+            console.error('All copy methods failed:', err);
+            copyBtn.innerHTML = '❌ Failed';
+            setTimeout(() => {
+              copyBtn.innerHTML = '📋 Copy code';
+            }, 2000);
+          }
+        };
+        
+        header.appendChild(langLabel);
+        header.appendChild(copyBtn);
+        pre.insertBefore(header, codeBlock);
+      });
+    }
+
+    // Render markdown answer; structured replies show boxed answer + customer reply
     function renderAnswer(markdown, targetBox) {
       try {
         marked.setOptions({ mangle: false, headerIds: false, breaks: true });
-        const html = marked.parse(markdown || '');
-        targetBox.innerHTML = html;
+
+        // Check if this is a structured response with new delimiters
+        const hasResponse = markdown.includes('---ANSWER_START---');
+        console.log('[renderAnswer] hasResponse:', hasResponse);
+        console.log('[renderAnswer] markdown preview:', markdown.substring(0, 200));
+
+        if (hasResponse) {
+          console.log('[renderAnswer] Rendering structured response');
+          targetBox.innerHTML = '';
+          targetBox.style.display = 'flex';
+          targetBox.style.flexDirection = 'column';
+          targetBox.style.gap = '20px';
+
+          const sections = [
+            { delim: 'ANSWER', className: 'response-box', title: 'Answer' },
+            { delim: 'CUSTOMER_REPLY', className: 'customer-box', title: 'Customer reply' },
+            { delim: 'BACKGROUND', className: 'content-section', title: 'Context' },
+            { delim: 'DIAGNOSIS', className: 'content-section', title: 'Analysis' },
+            { delim: 'ACTIONS', className: 'content-section', title: 'What to Do Now' }
+          ];
+
+          for (const section of sections) {
+            const startDelim = `---${section.delim}_START---`;
+            const endDelim = `---${section.delim}_END---`;
+
+            const startIdx = markdown.indexOf(startDelim);
+            const endIdx = markdown.indexOf(endDelim);
+
+            console.log(`[renderAnswer] Section ${section.delim}: startIdx=${startIdx}, endIdx=${endIdx}`);
+
+            if (startIdx !== -1 && endIdx !== -1) {
+              const content = markdown.substring(startIdx + startDelim.length, endIdx).trim();
+              if (content) {
+                console.log(`[renderAnswer] Adding section ${section.delim}, content length=${content.length}`);
+                const sectionDiv = document.createElement('div');
+                sectionDiv.className = section.className;
+
+                if (section.title) {
+                  const titleEl = document.createElement('h3');
+                  titleEl.textContent = section.title;
+                  sectionDiv.appendChild(titleEl);
+                }
+
+                const htmlContent = marked.parse(content);
+                const contentDiv = document.createElement('div');
+                contentDiv.innerHTML = htmlContent;
+                sectionDiv.appendChild(contentDiv);
+
+                targetBox.appendChild(sectionDiv);
+              }
+            }
+          }
+        } else {
+          console.log('[renderAnswer] Rendering unstructured response');
+          const html = marked.parse(markdown || '');
+          targetBox.innerHTML = html;
+        }
+        
+        // Enhance code blocks with copy buttons
+        enhanceCodeBlocks(targetBox);
       } catch (e) {
+        console.error('[renderAnswer] Error:', e);
         targetBox.textContent = markdown || '(empty answer)';
       }
     }
@@ -561,9 +902,14 @@
 
     clearTicketBtn.addEventListener('click', () => {
       // Reset selection to hidden placeholder (empty)
+      const oldTicket = ticketSelect.value;
       ticketSelect.value = '';
       if (ticketSelect.options.length > 0) {
         ticketSelect.selectedIndex = 0;
+      }
+      // Clear the tracking for this ticket since we're deselecting it
+      if (oldTicket && ticketFirstQuestionAsked[oldTicket]) {
+        delete ticketFirstQuestionAsked[oldTicket];
       }
       updateClearVisibility();
     });
@@ -584,6 +930,7 @@
     stopBtn.addEventListener('click', () => {
       if (currentController) {
         currentController.abort();
+        stopThinkingAnimation();
         const lastAnswerBox = document.querySelector('.qa-pair:last-child .answer-box');
         if (lastAnswerBox) {
           lastAnswerBox.classList.remove('thinking');
@@ -601,6 +948,14 @@
       const question = questionInput.value.trim();
       if (!question) return;
 
+      // Check if ticket selection changed - if so, reset tracking
+      const currentTicket = ticketSelect.value || null;
+      if (currentTicket !== lastSelectedTicket) {
+        // Ticket changed or cleared - start fresh
+        ticketFirstQuestionAsked = {};
+        lastSelectedTicket = currentTicket;
+      }
+
       // Show chat card and add question bubble
       chatCard.classList.remove('hidden');
       const qaPair = addQuestionBubble(question);
@@ -610,10 +965,12 @@
       
       // Create answer box and add to qa pair
       const answerBox = document.createElement('div');
-      answerBox.className = 'answer-box';
+      answerBox.className = 'answer-box thinking';
       answerBox.textContent = 'Thinking';
-      answerBox.classList.add('thinking');
       qaPair.appendChild(answerBox);
+      
+      // Start thinking animation
+      startThinkingAnimation(answerBox);
       
       // Scroll to the new question
       setTimeout(() => {
@@ -635,27 +992,41 @@
           body: JSON.stringify({
             question: question,
             top_k: 5,
-            ticket_url: ticketSelect.value || null
+            ticket_url: ticketSelect.value || null,
+            is_followup: !!(ticketSelect.value && ticketFirstQuestionAsked[ticketSelect.value])
           }),
           signal: currentController.signal
         });
 
-        const data = await resp.json();
-
         if (!resp.ok) {
+          const errorData = await resp.json().catch(() => ({ detail: resp.statusText }));
+          stopThinkingAnimation();
           answerBox.classList.remove('thinking');
-          answerBox.textContent = 'Error: ' + (data.detail || resp.statusText);
+          const errorMsg = typeof errorData.detail === 'string' ? errorData.detail : JSON.stringify(errorData.detail);
+          answerBox.textContent = 'Error: ' + errorMsg;
+          console.error('[Chat Error]', errorData);
           return;
         }
 
+        const data = await resp.json();
+
+        stopThinkingAnimation();
         answerBox.classList.remove('thinking');
         renderAnswer(data.answer || '', answerBox);
+        
+        // Mark that we've asked the first question for this ticket
+        if (ticketSelect.value && !ticketFirstQuestionAsked[ticketSelect.value]) {
+          ticketFirstQuestionAsked[ticketSelect.value] = true;
+        }
       } catch (err) {
+        stopThinkingAnimation();
         answerBox.classList.remove('thinking');
         if (err.name === 'AbortError') {
           answerBox.textContent = 'Request stopped by user.';
         } else {
-          answerBox.textContent = 'Network error: ' + err;
+          console.error('[Chat Network Error]', err);
+          const errorMsg = err.message || (typeof err === 'string' ? err : JSON.stringify(err));
+          answerBox.textContent = 'Network error: ' + errorMsg;
         }
       } finally {
         sendBtn.disabled = false;
