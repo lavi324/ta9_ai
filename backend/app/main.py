@@ -4,6 +4,7 @@ import pathlib
 import time
 import traceback
 from typing import List, Optional, Tuple, Dict
+import random
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -93,15 +94,15 @@ def embed_text(text: str) -> List[float]:
     return emb
 
 
-def call_llm(prompt: str) -> str:
+def call_llm(prompt: str, temperature: float = 0.2) -> str:
     """Call OpenAI chat for final answer."""
-    print(f"[LLM] Calling OpenAI chat model={OPENAI_CHAT_MODEL} prompt_len={len(prompt)}")
+    print(f"[LLM] Calling OpenAI chat model={OPENAI_CHAT_MODEL} prompt_len={len(prompt)} temp={temperature}")
     start = time.time()
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     body = {
         "model": OPENAI_CHAT_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
+        "temperature": temperature,
     }
     try:
         resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=600)
@@ -178,7 +179,10 @@ memory_collection = client.get_or_create_collection(name=MEMORY_COLLECTION_NAME)
 
 ADO_ORG = os.getenv("ADO_ORG")
 ADO_PROJECT = os.getenv("ADO_PROJECT")
+ADO_PROJECT_TICKET_SUMMARY = os.getenv("ADO_PROJECT_TICKET_SUMMARY", "").strip('"')
 ADO_PAT = os.getenv("ADO_PAT")
+
+LEARN_QUERY_NAME = os.getenv("ADO_LEARN_QUERY_NAME", "ai_learn_tickets_query")
 
 def _ado_headers() -> dict:
     if not (ADO_ORG and ADO_PROJECT and ADO_PAT):
@@ -192,6 +196,256 @@ def _ado_headers() -> dict:
 
 def _ado_base() -> str:
     return f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}"
+
+
+def _ado_wiql_learning_query(project: Optional[str] = None) -> str:
+    """
+    WIQL based on the query shown in the screenshot:
+      - Changed Date > @Today - 720
+      - Work Item Type = [Any] (no filter)
+      - State In closed,completed,fixed,ready,resolved
+    """
+    if project:
+        return (
+            "SELECT [System.Id] FROM WorkItems "
+            f"WHERE [System.TeamProject] = '{project}' "
+            "AND [System.ChangedDate] > @Today - 720 "
+            "AND [System.State] IN ('Closed','Completed','Fixed','Ready','Resolved') "
+            "ORDER BY [System.ChangedDate] DESC"
+        )
+    return (
+        "SELECT [System.Id] FROM WorkItems "
+        "WHERE [System.TeamProject] = @project "
+        "AND [System.ChangedDate] > @Today - 720 "
+        "AND [System.State] IN ('Closed','Completed','Fixed','Ready','Resolved') "
+        "ORDER BY [System.ChangedDate] DESC"
+    )
+
+
+def ado_list_learning_tickets(limit: Optional[int] = None) -> List[int]:
+    """Run WIQL and return a list of work item IDs matching the learning query."""
+    project = ADO_PROJECT_TICKET_SUMMARY or ADO_PROJECT
+    url = f"https://dev.azure.com/{ADO_ORG}/{project}/_apis/wit/wiql?api-version=7.1-preview.2"
+    wiql = _ado_wiql_learning_query(project)
+    try:
+        resp = requests.post(url, json={"query": wiql}, headers=_ado_headers(), timeout=60)
+    except Exception as e:
+        print(f"[ADO][ERROR] WIQL call failed: {e}")
+        traceback.print_exc()
+        raise RuntimeError(f"ADO WIQL failed: {e}")
+    if resp.status_code != 200:
+        print(f"[ADO][ERROR] WIQL non-200: {resp.status_code} {resp.text[:300]}")
+        raise RuntimeError(f"ADO WIQL error: {resp.text}")
+    items = resp.json().get("workItems", [])
+    ids = [int(it.get("id")) for it in items if it.get("id")]
+    if limit is not None:
+        ids = ids[: max(0, int(limit))]
+    return ids
+
+
+def _extract_images_from_html(html: str) -> List[str]:
+    """
+    Extract image URLs/references from HTML.
+    Returns list of image src attributes.
+    """
+    if not html:
+        return []
+    try:
+        img_pattern = r'<img[^>]+src=["\']?([^"\'>\s]+)["\']?'
+        matches = re.findall(img_pattern, html or "")
+        return [m for m in matches if m.strip()]
+    except Exception:
+        return []
+
+
+def _describe_image_via_vision(image_url: str) -> str:
+    """
+    Use OpenAI vision to describe an image.
+    Returns a text description of the image.
+    """
+    try:
+        # Only attempt if it's a valid URL
+        if not (image_url.startswith("http://") or image_url.startswith("https://")):
+            return f"[Local image: {image_url}]"
+        
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+        body = {
+            "model": "gpt-4o-mini",  # Vision capable model
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Briefly describe what you see in this image. Focus on any technical content, errors, UI elements, or relevant details."},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                }
+            ],
+            "max_tokens": 150,
+        }
+        resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            description = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            print(f"[VISION] Described image {image_url[:60]}... -> {description[:100]}...")
+            return description
+        else:
+            print(f"[VISION][WARN] Vision call failed for {image_url}: {resp.status_code}")
+            return f"[Image: {image_url}]"
+    except Exception as e:
+        print(f"[VISION][WARN] Failed to describe image {image_url}: {e}")
+        return f"[Image: {image_url}]"
+
+
+def _strip_html(text: str) -> str:
+    try:
+        txt = re.sub(r"<[^>]+>", " ", text or "")
+        txt = unescape(txt)
+        return " ".join(txt.split())
+    except Exception:
+        return text or ""
+
+
+def _first_field(fields: dict, keys: List[str]) -> str:
+    for k in keys:
+        if k in fields and fields.get(k) not in (None, ""):
+            v = fields.get(k)
+            if isinstance(v, dict):
+                return v.get("displayName") or v.get("uniqueName") or str(v)
+            return str(v)
+    return ""
+
+
+def ado_fetch_ticket_full(work_item_id: int) -> dict:
+    """Fetch main fields + comments for a work item."""
+    base = _ado_base()
+    hdrs = _ado_headers()
+    main = requests.get(
+        f"{base}/_apis/wit/workitems/{work_item_id}?$expand=all&api-version=7.1",
+        headers=hdrs,
+        timeout=60,
+    )
+    if main.status_code != 200:
+        raise RuntimeError(f"ADO workitem fetch error: {main.text}")
+    data = main.json()
+    fields = data.get("fields", {})
+
+    comments: List[dict] = []
+    try:
+        c = requests.get(
+            f"{base}/_apis/wit/workItems/{work_item_id}/comments?api-version=7.1-preview.3",
+            headers=hdrs,
+            timeout=60,
+        )
+        if c.status_code == 200:
+            for it in c.json().get("comments", []):
+                comments.append(
+                    {
+                        "text": _strip_html(it.get("text", "")),
+                        "createdBy": (it.get("createdBy") or {}).get("displayName")
+                        or (it.get("createdBy") or {}).get("uniqueName")
+                        or "",
+                        "createdDate": it.get("createdDate") or "",
+                    }
+                )
+    except Exception as e:
+        print(f"[ADO][WARN] comments fetch failed: {e}")
+
+    return {"id": work_item_id, "fields": fields, "comments": comments}
+
+
+def build_conversation_block(comments: List[dict]) -> str:
+    if not comments:
+        return "Not provided."
+    lines: List[str] = []
+    for c in comments:
+        who = c.get("createdBy") or "Unknown"
+        when = c.get("createdDate") or ""
+        txt = c.get("text") or ""
+        lines.append(f"[{when}] {who}: {txt}")
+    return "\n".join(lines)
+
+
+def generate_professional_ticket_report(ticket: dict) -> str:
+    fields = ticket.get("fields", {})
+    comments = ticket.get("comments", [])
+
+    work_item_type = _first_field(fields, ["System.WorkItemType"]) or "Not provided"
+    title = _first_field(fields, ["System.Title"]) or "Not provided"
+    product = _first_field(
+        fields,
+        [
+            "Custom.Product",
+            "Microsoft.VSTS.Common.Product",
+            "Product",
+            "Custom.ProductName",
+        ],
+    ) or "Not provided"
+    service = _first_field(
+        fields,
+        [
+            "Custom.Service",
+            "Microsoft.VSTS.Common.Service",
+            "Service",
+            "Custom.ServiceName",
+        ],
+    ) or "Not provided"
+    
+    # Get raw HTML description to extract images
+    raw_description = _first_field(
+        fields,
+        ["System.Description", "Microsoft.VSTS.TCM.ReproSteps", "System.History"],
+    ) or ""
+    
+    # Extract and describe images
+    image_descriptions = ""
+    if raw_description:
+        images = _extract_images_from_html(raw_description)
+        if images:
+            print(f"[TICKET] Found {len(images)} images in description, describing via vision...")
+            image_texts = []
+            for img_url in images[:3]:  # Limit to first 3 images to avoid too many API calls
+                desc = _describe_image_via_vision(img_url)
+                image_texts.append(desc)
+            if image_texts:
+                image_descriptions = "\n\nImages in description:\n" + "\n".join(image_texts)
+    
+    description = _strip_html(raw_description) + image_descriptions
+
+    conversation = build_conversation_block(comments)
+
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured; cannot format ticket report.")
+
+    llm_prompt = (
+        "You are a technical support documentation assistant. "
+        "Using ONLY the provided ticket data, create a professional report with EXACT sections below. "
+        "If data is missing, write 'Not provided.' Do not invent facts. "
+        "Return plain text with these headings exactly and in this order:\n\n"
+        "Ticket type:\n"
+        "Title:\n"
+        "Product:\n"
+        "Service:\n\n"
+        "User description:\n\n"
+        "Observed error:\n\n"
+        "Expected behavior:\n\n"
+        "Resolution steps (step-by-step):\n\n"
+        "-----\n"
+        "Ticket data:\n"
+        f"Type: {work_item_type}\n"
+        f"Title: {title}\n"
+        f"Product: {product}\n"
+        f"Service: {service}\n\n"
+        f"Description: {description}\n\n"
+        f"Conversation: {conversation}\n"
+    )
+
+    report = call_llm(llm_prompt)
+    full_report = (
+        report.strip()
+        + "\n\nConversation with client (chronological):\n"
+        + conversation
+    )
+    return full_report
 
 def ado_list_tickets(tag_contains: str = "CC") -> List[dict]:
     """Run WIQL and return a list of work items with details (id,title,state,tags,url)."""
@@ -258,19 +512,22 @@ def ado_fetch_ticket_text(work_item_id: int) -> str:
     title = f.get("System.Title", "")
     state = f.get("System.State", "")
     tags = f.get("System.Tags", "")
-    desc = f.get("System.Description", "") or f.get("Microsoft.VSTS.TCM.ReproSteps", "") or ""
+    raw_desc = f.get("System.Description", "") or f.get("Microsoft.VSTS.TCM.ReproSteps", "") or ""
 
-    # Convert possible HTML description to plain text for cleaner context
-    def _strip_html(text: str) -> str:
-        try:
-            # Remove HTML tags and collapse whitespace
-            txt = re.sub(r"<[^>]+>", " ", text or "")
-            txt = unescape(txt)
-            return " ".join(txt.split())
-        except Exception:
-            return text or ""
+    # Extract and describe images
+    image_descriptions = ""
+    if raw_desc:
+        images = _extract_images_from_html(raw_desc)
+        if images:
+            print(f"[ADO_FETCH] Found {len(images)} images in ticket {work_item_id}, describing via vision...")
+            image_texts = []
+            for img_url in images[:3]:  # Limit to first 3 images
+                desc = _describe_image_via_vision(img_url)
+                image_texts.append(desc)
+            if image_texts:
+                image_descriptions = "\n\nImages in description:\n" + "\n".join(image_texts)
 
-    desc = _strip_html(desc)
+    desc = _strip_html(raw_desc) + image_descriptions
 
     comments_text = []
     try:
@@ -279,7 +536,14 @@ def ado_fetch_ticket_text(work_item_id: int) -> str:
             for it in c.json().get("comments", []):
                 txt = it.get("text", "")
                 if txt:
-                    comments_text.append(_strip_html(txt))
+                    # Also check for images in comments
+                    comment_images = _extract_images_from_html(txt)
+                    comment_text = _strip_html(txt)
+                    if comment_images:
+                        for img_url in comment_images[:2]:
+                            img_desc = _describe_image_via_vision(img_url)
+                            comment_text += f"\n[Image: {img_desc}]"
+                    comments_text.append(comment_text)
     except Exception as e:
         print(f"[ADO][WARN] comments fetch failed: {e}")
 
@@ -695,6 +959,60 @@ def compare_and_ingest_internal() -> Tuple[int, int]:
 # RAG “brain” – augmentation + reranking
 # ---------------------------------------------------------------------
 
+def _normalize_question(question: str) -> str:
+    """Normalize question to a canonical form to improve recall."""
+    if not question:
+        return ""
+    q = question.lower()
+    q = re.sub(r"[^a-z0-9\s\-]", " ", q)
+    q = re.sub(r"\s+", " ", q).strip()
+    return q
+
+
+def _is_ta9_question(question: str) -> bool:
+    if not question:
+        return False
+    q = question.lower()
+    ta9_terms = [
+        "ta9", "intsight", "int-sight", "intsight", "platform", "system",
+        "features", "capabilities", "modules", "use cases", "overview",
+        "dashboard", "admin studio", "data model", "dm"
+    ]
+    return any(t in q for t in ta9_terms)
+
+
+def _is_foundational_question(question: str) -> bool:
+    """Detect if question is about foundational product concepts that should always be answered."""
+    if not question:
+        return False
+    q = question.lower()
+    foundational_terms = [
+        "what is", "what are", "explain", "define", "how does", "how do",
+        "data model", "entity", "detection", "dashboard", "admin studio",
+        "module", "feature", "capability", "system", "platform",
+        "link analysis", "timeline", "geospatial", "visualization",
+        "criteria", "field", "dm", "configuration"
+    ]
+    return any(t in q for t in foundational_terms)
+
+
+def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
+    """Generate a small set of semantically-equivalent queries for multi-retrieval."""
+    variants = []
+    base = question.strip()
+    if base:
+        variants.append(base)
+    normalized = _normalize_question(question)
+    if normalized and normalized not in variants:
+        variants.append(normalized)
+    if ta9_mode:
+        ta9_boost = (
+            "TA9 / IntSight platform features, capabilities, modules, "
+            "system overview, dashboards, admin studio, data model"
+        )
+        variants.append(f"{base}\n\n{ta9_boost}" if base else ta9_boost)
+    return variants[:3]
+
 def augment_question(question: str) -> str:
     """
     Add synonyms / hints so embeddings are more likely to match
@@ -771,6 +1089,9 @@ def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
     Heuristic lexical + domain score.
     Higher score = more relevant.
     """
+    # Safety: handle None doc from ChromaDB
+    if doc is None:
+        doc = ""
     q = question.lower()
     d = doc.lower()
     source = str(meta.get("source", "")).lower()
@@ -815,6 +1136,98 @@ def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
     return score
 
 
+def _content_similarity(text1: str, text2: str, threshold: float = 0.7) -> float:
+    """
+    Calculate similarity between two texts based on overlapping tokens.
+    Returns a value between 0 and 1.
+    """
+    if not text1 or not text2:
+        return 0.0
+    
+    tokens1 = set([t.lower() for t in text1.split() if len(t) > 3])
+    tokens2 = set([t.lower() for t in text2.split() if len(t) > 3])
+    
+    if not tokens1 or not tokens2:
+        return 0.0
+    
+    intersection = len(tokens1 & tokens2)
+    union = len(tokens1 | tokens2)
+    
+    return intersection / union if union > 0 else 0.0
+
+
+def _smart_deduplicate_and_diversify(
+    docs: List[str],
+    metas: List[dict],
+    distances: Optional[List[float]] = None,
+    ids: Optional[List[str]] = None,
+    similarity_threshold: float = 0.65,
+    max_chunks_per_source: int = 2,
+) -> Tuple[List[str], List[dict], List[float], List[str]]:
+    """
+    Deduplicate results by:
+    1. Removing near-duplicate documents (content similarity > threshold)
+    2. Limiting consecutive chunks from same source
+    3. Preferring diverse sources for better context
+    
+    Returns deduplicated and diversified lists.
+    """
+    if not docs:
+        return docs, metas, distances or [], ids or []
+    
+    print(f"[DEDUP] Starting deduplication: {len(docs)} docs, similarity_threshold={similarity_threshold}")
+    
+    selected_items = []
+    seen_contents = []  # Track content we've already selected
+    source_chunk_count = {}  # Track how many chunks from each source
+    
+    for idx, (doc, meta, dist, id_val) in enumerate(zip(
+        docs, metas, distances or [None]*len(docs), ids or [None]*len(docs)
+    )):
+        if not doc:
+            continue
+        
+        source = meta.get("source", "unknown") if meta else "unknown"
+        chunk_num = meta.get("chunk", 0) if meta else 0
+        source_key = source.split()[0]  # Get base source name (e.g., "ado:learn:123" → "ado:learn:123")
+        
+        # Check if we've already included max chunks from this source
+        if source_key in source_chunk_count and source_chunk_count[source_key] >= max_chunks_per_source:
+            print(f"[DEDUP] Skipping doc idx={idx} source={source} (already have {max_chunks_per_source} chunks from this source)")
+            continue
+        
+        # Check for content similarity with already selected docs
+        is_duplicate = False
+        for seen_doc in seen_contents:
+            similarity = _content_similarity(doc, seen_doc, threshold=similarity_threshold)
+            if similarity > similarity_threshold:
+                print(f"[DEDUP] Skipping doc idx={idx} source={source} (similarity={similarity:.2f} > threshold={similarity_threshold})")
+                is_duplicate = True
+                break
+        
+        if is_duplicate:
+            continue
+        
+        # This doc is acceptable
+        selected_items.append({
+            "doc": doc,
+            "meta": meta or {},
+            "dist": dist,
+            "id": id_val,
+            "source": source,
+        })
+        seen_contents.append(doc)
+        source_chunk_count[source_key] = source_chunk_count.get(source_key, 0) + 1
+    
+    dedup_docs = [item["doc"] for item in selected_items]
+    dedup_metas = [item["meta"] for item in selected_items]
+    dedup_distances = [item["dist"] for item in selected_items if item["dist"] is not None]
+    dedup_ids = [item["id"] for item in selected_items if item["id"] is not None]
+    
+    print(f"[DEDUP] After deduplication: {len(dedup_docs)} docs (removed {len(docs) - len(dedup_docs)} duplicates/chunks)")
+    return dedup_docs, dedup_metas, dedup_distances, dedup_ids
+
+
 def rerank_results(
     question: str,
     docs: List[str],
@@ -829,6 +1242,10 @@ def rerank_results(
     print(f"[RERANK] Reranking {len(docs)} docs for question='{question[:120]}...'")
     items = []
     for idx, (d, m) in enumerate(zip(docs, metas)):
+        # Safety: skip None documents
+        if d is None:
+            print(f"[RERANK] Skipping None doc at idx={idx}")
+            continue
         s = lexical_boost_score(question, d, m)
         dist = None if distances is None or idx >= len(distances) else distances[idx]
         idv = None if ids is None or idx >= len(ids) else ids[idx]
@@ -839,7 +1256,13 @@ def rerank_results(
         # Still print a summary of results
         for it in items[:10]:
             print(f"[RERANK] src={it['meta'].get('source')} chunk={it['meta'].get('chunk')} id={it['id']} dist={it['dist']}")
-        return docs, metas, distances or [], ids or []
+        
+        # Even with 0 score, apply deduplication
+        reranked_docs = [it["doc"] for it in items]
+        reranked_metas = [it["meta"] for it in items]
+        reranked_distances = [it["dist"] for it in items]
+        reranked_ids = [it["id"] for it in items]
+        return _smart_deduplicate_and_diversify(reranked_docs, reranked_metas, reranked_distances, reranked_ids)
 
     items.sort(key=lambda x: (-x["score"], x["idx"]))
 
@@ -851,7 +1274,108 @@ def rerank_results(
     reranked_metas = [it["meta"] for it in items]
     reranked_distances = [it["dist"] for it in items]
     reranked_ids = [it["id"] for it in items]
-    return reranked_docs, reranked_metas, reranked_distances, reranked_ids
+    
+    # Apply comprehensive deduplication and diversification
+    return _smart_deduplicate_and_diversify(reranked_docs, reranked_metas, reranked_distances, reranked_ids)
+
+
+def _lexical_overlap_ratio(question: str, doc: str) -> float:
+    if not question or not doc:
+        return 0.0
+    # Extra safety: handle None explicitly
+    if doc is None or question is None:
+        return 0.0
+    q_tokens = {t.lower() for t in str(question).split() if len(t) > 3}
+    d_tokens = {t.lower() for t in str(doc).split() if len(t) > 3}
+    if not q_tokens or not d_tokens:
+        return 0.0
+    inter = len(q_tokens & d_tokens)
+    return inter / max(1, len(q_tokens))
+
+
+def _is_context_relevant(
+    question: str,
+    docs: List[str],
+    distances: Optional[List[float]],
+    max_distance: float = 0.45,
+    min_overlap: float = 0.08,
+) -> bool:
+    """
+    Lightweight answerability gate:
+    - Require at least one doc with acceptable semantic distance
+    - Require minimal lexical overlap to avoid unrelated KB answers
+    """
+    if not docs:
+        return False
+    best_dist = None
+    if distances:
+        best_dist = min(distances)
+    if best_dist is not None and best_dist > max_distance:
+        return False
+    # Filter out None docs before checking overlap
+    top_docs = [d for d in docs[:3] if d is not None]
+    if not top_docs:
+        return False
+    max_overlap = max((_lexical_overlap_ratio(question, d) for d in top_docs), default=0.0)
+    return max_overlap >= min_overlap
+
+
+def _generate_contextual_rejection(question: str, docs: List[str] = None) -> str:
+    """
+    Generate an intelligent, question-aware rejection response using the LLM.
+    Instead of returning a canned message, ask the LLM to:
+    1. Acknowledge what the user asked
+    2. Explain why it doesn't relate to available resources
+    3. Ask for clarification in a way that mirrors their intent
+    
+    This ensures each rejection feels unique and personalized.
+    """
+    if not OPENAI_API_KEY:
+        # Fallback to simple rejection if no LLM available
+        return (
+            "I don't see a clear connection between that question and the knowledge base. "
+            "Could you clarify how it relates to the ticket, or ask a more specific support question?"
+        )
+    
+    try:
+        # Extract key phrases from the question to acknowledge what they asked
+        question_phrases = []
+        if "how" in question.lower():
+            question_phrases.append("understand how something works")
+        elif "why" in question.lower():
+            question_phrases.append("understand why something happened")
+        elif "what" in question.lower():
+            question_phrases.append("learn what something is")
+        elif "can" in question.lower() or "does" in question.lower():
+            question_phrases.append("know if something is possible")
+        else:
+            question_phrases.append("solve a problem")
+        
+        # Build a prompt that generates a contextual rejection
+        rejection_prompt = (
+            "You are a helpful technical support assistant. A user asked a question, but it doesn't "
+            "relate to the technical knowledge base or selected ticket.\n\n"
+            f"User's question: {question}\n\n"
+            "Your task: Generate a SHORT, natural response (1-2 sentences) that:\n"
+            "1. Shows you understood what they're asking about (acknowledge their intent)\n"
+            "2. Explains why the knowledge base can't help with this specific question\n"
+            "3. Ask them to clarify how it relates to the selected ticket or ask a more specific technical question\n\n"
+            "Keep it conversational and helpful, not robotic. Be brief.\n"
+            "Response:"
+        )
+        
+        rejection = call_llm(rejection_prompt)
+        return rejection.strip() if rejection else (
+            "I don't see a clear connection between your question and the knowledge base. "
+            "Could you clarify what technical issue you're trying to solve?"
+        )
+    except Exception as e:
+        print(f"[REJECTION][WARN] Failed to generate contextual rejection: {e}")
+        # Fallback to a simple rejection
+        return (
+            "I don't see a clear connection between your question and the knowledge base. "
+            "Could you provide more context about what you're trying to accomplish?"
+        )
 
 
 # ---------------------------------------------------------------------
@@ -876,6 +1400,20 @@ class ChatResponse(BaseModel):
 class IngestResponse(BaseModel):
     added_chunks: int
     total_chunks: int
+    message: Optional[str] = None
+
+
+class AdoLearnIngestRequest(BaseModel):
+    async_run: Optional[bool] = False
+    limit: Optional[int] = None
+    force: Optional[bool] = False
+
+
+class AdoLearnIngestResponse(BaseModel):
+    added_chunks: int
+    total_chunks: int
+    tickets_processed: int
+    tickets_skipped: int
     message: Optional[str] = None
 
 
@@ -906,6 +1444,58 @@ def azure_tickets(tag: str = "CC"):
         return {"items": items}
     except Exception as exc:
         print(f"[API][ADO][ERROR] {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------
+# Debug/Inspect Endpoint
+# ---------------------------------------------------------------------
+
+@app.get("/debug/inspect_vectors")
+def inspect_vectors(source_pattern: str = "ado:learn:", limit: int = 10):
+    """
+    Inspect stored vectors and their documents.
+    Use source_pattern to filter (e.g., 'ado:learn:' for tickets, or a specific file name).
+    """
+    print(f"[API][DEBUG] /debug/inspect_vectors source_pattern={source_pattern} limit={limit}")
+    try:
+        # Get all items (up to limit) matching the pattern
+        results = collection.get(
+            include=["documents", "metadatas"],
+            limit=min(limit * 100, 10000),  # Fetch more to filter
+        )
+        
+        docs = results.get("documents", [])
+        metas = results.get("metadatas", [])
+        ids = results.get("ids", [])
+        
+        # Filter by source pattern
+        filtered = []
+        for i, (doc, meta) in enumerate(zip(docs, metas)):
+            source = meta.get("source", "") if meta else ""
+            if source_pattern in source:
+                filtered.append({
+                    "id": ids[i] if i < len(ids) else None,
+                    "source": source,
+                    "chunk": meta.get("chunk", 0) if meta else 0,
+                    "ticket_id": meta.get("ticket_id") if meta else None,
+                    "title": meta.get("title") if meta else None,
+                    "type": meta.get("type") if meta else None,
+                    "state": meta.get("state") if meta else None,
+                    "document_preview": doc[:500] if doc else "",
+                    "document_length": len(doc) if doc else 0,
+                    "full_document": doc,
+                })
+                if len(filtered) >= limit:
+                    break
+        
+        return {
+            "total_matching": len(filtered),
+            "items": filtered,
+        }
+    except Exception as exc:
+        print(f"[API][DEBUG][ERROR] {exc}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -964,6 +1554,157 @@ def compare_and_ingest(async_run: bool = False, background_tasks: BackgroundTask
 
 
 # ---------------------------------------------------------------------
+# Azure DevOps Learning Tickets Ingest Endpoint
+# ---------------------------------------------------------------------
+
+def ingest_learning_tickets_internal(limit: Optional[int] = None, force: bool = False) -> Tuple[int, int, int, int]:
+    if not (ADO_ORG and ADO_PROJECT and ADO_PAT):
+        raise RuntimeError("Azure DevOps is not configured. Set ADO_ORG, ADO_PROJECT, ADO_PAT env vars.")
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured; cannot generate ticket reports.")
+
+    ids = ado_list_learning_tickets(limit=limit)
+    if not ids:
+        return 0, collection.count(), 0, 0
+
+    existing_sources = set(get_ingested_sources()) if not force else set()
+    added_chunks = 0
+    tickets_processed = 0
+    tickets_skipped = 0
+
+    for idx, ticket_id in enumerate(ids, start=1):
+        source = f"ado:learn:{ticket_id}"
+        if source in existing_sources:
+            print(f"[ADO][LEARN] Skipping already ingested ticket {ticket_id}")
+            tickets_skipped += 1
+            continue
+
+        print(f"[ADO][LEARN] [{idx}/{len(ids)}] Processing ticket {ticket_id}")
+        try:
+            ticket = ado_fetch_ticket_full(ticket_id)
+            report = generate_professional_ticket_report(ticket)
+        except Exception as e:
+            print(f"[ADO][LEARN][ERROR] Failed to build report for ticket {ticket_id}: {e}")
+            traceback.print_exc()
+            tickets_skipped += 1
+            continue
+
+        chunks = chunk_text(report)
+        if not chunks:
+            print(f"[ADO][LEARN][WARN] No chunks for ticket {ticket_id} → skipping")
+            tickets_skipped += 1
+            continue
+
+        fields = ticket.get("fields", {})
+        meta_title = _first_field(fields, ["System.Title"]) or ""
+        meta_type = _first_field(fields, ["System.WorkItemType"]) or ""
+        meta_state = _first_field(fields, ["System.State"]) or ""
+
+        ids_to_add: List[str] = []
+        docs: List[str] = []
+        metas: List[dict] = []
+        embeds: List[List[float]] = []
+
+        for i, ch in enumerate(chunks):
+            try:
+                emb = embed_text(ch)
+            except Exception as e:
+                print(f"[ADO][LEARN][ERROR] Embedding failed ticket={ticket_id} chunk={i}: {e}")
+                traceback.print_exc()
+                continue
+            ids_to_add.append(str(uuid.uuid4()))
+            docs.append(ch)
+            metas.append(
+                {
+                    "source": source,
+                    "chunk": i,
+                    "ticket_id": ticket_id,
+                    "title": meta_title,
+                    "type": meta_type,
+                    "state": meta_state,
+                    "query": LEARN_QUERY_NAME,
+                }
+            )
+            embeds.append(emb)
+
+        if not ids_to_add:
+            print(f"[ADO][LEARN][WARN] No successful chunks for ticket {ticket_id} → skipping add()")
+            tickets_skipped += 1
+            continue
+
+        try:
+            collection.add(ids=ids_to_add, documents=docs, metadatas=metas, embeddings=embeds)
+            added_chunks += len(ids_to_add)
+            tickets_processed += 1
+            print(f"[ADO][LEARN] Added {len(ids_to_add)} chunks for ticket {ticket_id}")
+        except Exception as e:
+            print(f"[ADO][LEARN][ERROR] Failed to add chunks for ticket {ticket_id}: {e}")
+            traceback.print_exc()
+            tickets_skipped += 1
+
+    total_chunks = collection.count()
+    return added_chunks, total_chunks, tickets_processed, tickets_skipped
+
+
+@app.post("/azure/learn_tickets/ingest", response_model=AdoLearnIngestResponse)
+def ingest_learning_tickets(req: AdoLearnIngestRequest, background_tasks: BackgroundTasks = None):
+    """
+    Run the Azure DevOps 'ai_learn_tickets_query' style WIQL, generate
+    professional ticket reports, and store them in the Chroma collection.
+    """
+    if req.async_run:
+        print("[API][ADO][LEARN] async_run=True → scheduling background task")
+
+        def _bg_job():
+            try:
+                a, t, p, s = ingest_learning_tickets_internal(limit=req.limit, force=bool(req.force))
+                print(
+                    f"[API][ADO][LEARN][ASYNC] DONE: added_chunks={a}, total_chunks={t}, processed={p}, skipped={s}"
+                )
+            except Exception as e:
+                print(f"[API][ADO][LEARN][ASYNC][ERROR] {e}")
+                traceback.print_exc()
+
+        if background_tasks is not None:
+            background_tasks.add_task(_bg_job)
+        else:
+            asyncio.create_task(asyncio.to_thread(_bg_job))
+
+        try:
+            current_total = collection.count()
+        except Exception:
+            current_total = 0
+        return AdoLearnIngestResponse(
+            added_chunks=0,
+            total_chunks=current_total,
+            tickets_processed=0,
+            tickets_skipped=0,
+            message="api worked! learning tickets ingest started in background; check logs for progress",
+        )
+
+    try:
+        added, total, processed, skipped = ingest_learning_tickets_internal(
+            limit=req.limit, force=bool(req.force)
+        )
+        msg = (
+            f"Processed {processed} tickets, skipped {skipped}, added {added} chunks."
+            if processed or skipped
+            else "No tickets matched the query."
+        )
+        return AdoLearnIngestResponse(
+            added_chunks=added,
+            total_chunks=total,
+            tickets_processed=processed,
+            tickets_skipped=skipped,
+            message=msg,
+        )
+    except Exception as exc:
+        print(f"[API][ADO][LEARN][ERROR] {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------
 # Chat Endpoint
 # ---------------------------------------------------------------------
 
@@ -999,45 +1740,92 @@ def chat(req: ChatRequest):
         print("[API][CHAT] force_reingest=True → calling ingest_wiki_files(force=True)")
         ingest_wiki_files(force=True)
 
-    augmented_question = augment_question(question)
+    ta9_mode = _is_ta9_question(question)
+    is_foundational = _is_foundational_question(question)
+    query_variants = _build_query_variants(question, ta9_mode)
+    ticket_context_hint = None
+    if selected_ticket_text:
+        # Keep a short hint to enrich similarity search without overwhelming the question
+        ticket_context_hint = (selected_ticket_text[:800] or "").strip()
+
+    emb_results = []
+
+    primary_emb = None
+    agg_ids: List[str] = []
+    agg_distances: List[float] = []
+    agg_docs: List[str] = []
+    agg_metas: List[dict] = []
 
     try:
-        q_emb = embed_text(augmented_question)
-        # Log a short preview of the query embedding used for vector search
-        q_preview = ",".join([f"{x:.6f}" for x in q_emb[:EMBED_PREVIEW_COUNT]])
-        q_norm = math.sqrt(sum([x * x for x in q_emb]))
-        q_hash = hashlib.sha256(
-            ",".join([f"{x:.6f}" for x in q_emb[:16]]).encode("utf-8")
-        ).hexdigest()[:12]
-        print(f"[API][CHAT] Query embedding preview=[{q_preview}] len={len(q_emb)} norm={q_norm:.6f} hash={q_hash}")
-        if LOG_FULL_EMBEDDINGS:
-            print(f"[API][CHAT][EMBED_FULL] {q_emb}")
+        for idx, qv in enumerate(query_variants):
+            augmented_qv = augment_question(qv)
+            q_emb = embed_text(augmented_qv)
+            if idx == 0:
+                primary_emb = q_emb
+                # Log a short preview of the query embedding used for vector search
+                q_preview = ",".join([f"{x:.6f}" for x in q_emb[:EMBED_PREVIEW_COUNT]])
+                q_norm = math.sqrt(sum([x * x for x in q_emb]))
+                q_hash = hashlib.sha256(
+                    ",".join([f"{x:.6f}" for x in q_emb[:16]]).encode("utf-8")
+                ).hexdigest()[:12]
+                print(f"[API][CHAT] Query embedding preview=[{q_preview}] len={len(q_emb)} norm={q_norm:.6f} hash={q_hash}")
+                if LOG_FULL_EMBEDDINGS:
+                    print(f"[API][CHAT] Query embeddings FULL={q_emb}")
+
+            # More candidates improves recall a lot
+            effective_top_k = max(req.top_k, 50)
+            per_query_k = max(20, min(50, effective_top_k // max(1, len(query_variants))))
+            print(f"[API][CHAT] effective_top_k={effective_top_k} per_query_k={per_query_k} variant_idx={idx}")
+
+            # Primary search: question-focused
+            results = collection.query(
+                query_embeddings=[q_emb],
+                n_results=per_query_k,
+                include=["distances", "documents", "metadatas", "embeddings"],
+            )
+
+            ids = results.get("ids", [[]])[0]
+            distances = results.get("distances", [[]])[0]
+            docs = results.get("documents", [[]])[0]
+            metas = results.get("metadatas", [[]])[0]
+
+            agg_ids.extend(ids or [])
+            agg_distances.extend(distances or [])
+            agg_docs.extend(docs or [])
+            agg_metas.extend(metas or [])
     except Exception as exc:
-        print(f"[API][CHAT][ERROR] Embedding failed: {exc}")
+        print(f"[API][CHAT][ERROR] Embedding or vector search failed: {exc}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Embedding failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Embedding/vector search failed: {exc}")
 
-    # More candidates improves recall a lot
-    effective_top_k = max(req.top_k, 50)
-    print(f"[API][CHAT] effective_top_k={effective_top_k}")
+    ids = agg_ids
+    distances = agg_distances
+    docs = agg_docs
+    metas = agg_metas
 
-    try:
-        # Request ids, distances and (if available) embeddings for richer logging
-        results = collection.query(
-            query_embeddings=[q_emb],
-            n_results=effective_top_k,
-            include=["distances", "documents", "metadatas", "embeddings"],
-        )
-    except Exception as exc:
-        print(f"[API][CHAT][ERROR] Vector search failed: {exc}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Vector search failed: {exc}")
+    # Secondary search: ticket-aware similarity without overriding the question
+    if ticket_context_hint:
+        try:
+            similar_query = question + "\n\nRelated ticket context:\n" + ticket_context_hint
+            sim_emb = embed_text(similar_query)
+            sim_results = collection.query(
+                query_embeddings=[sim_emb],
+                n_results=max(20, req.top_k * 4),
+                include=["distances", "documents", "metadatas", "ids"],
+            )
+            sim_ids = sim_results.get("ids", [[]])[0]
+            sim_distances = sim_results.get("distances", [[]])[0]
+            sim_docs = sim_results.get("documents", [[]])[0]
+            sim_metas = sim_results.get("metadatas", [[]])[0]
 
-    ids = results.get("ids", [[]])[0]
-    distances = results.get("distances", [[]])[0]
-    docs = results.get("documents", [[]])[0]
-    metas = results.get("metadatas", [[]])[0]
-    emb_results = results.get("embeddings", [[]])[0]
+            if sim_docs:
+                docs = docs + sim_docs
+                metas = metas + sim_metas
+                ids = ids + sim_ids
+                distances = distances + sim_distances
+                print(f"[API][CHAT] Added {len(sim_docs)} ticket-similar docs to candidates")
+        except Exception as e:
+            print(f"[API][CHAT][WARN] Similar-ticket search failed: {e}")
 
     print(f"[API][CHAT] Vector search returned {len(docs)} docs")
     # Log top matches briefly (id, dist, source, chunk, snippet)
@@ -1047,76 +1835,18 @@ def chat(req: ChatRequest):
         did = ids[i] if i < len(ids) else None
         dist = distances[i] if i < len(distances) else None
         snippet = (d[:200].replace("\n", " ") + "...") if d else ""
-        emb_preview = None
-        emb_norm = None
-        emb_hash = None
-        try:
-            if i < len(emb_results):  # avoid truthiness checks on numpy arrays
-                emb = emb_results[i]
-                if emb is not None and len(emb) > 0:
-                    emb_preview = ",".join([f"{x:.6f}" for x in emb[:EMBED_PREVIEW_COUNT]])
-                    emb_norm = math.sqrt(sum([x * x for x in emb]))
-                    emb_hash = hashlib.sha256(
-                        ",".join([f"{x:.6f}" for x in emb[:16]]).encode("utf-8")
-                    ).hexdigest()[:12]
-        except Exception:
-            pass
-        print(
-            f"[API][CHAT] Match[{i+1}] id={did} dist={dist} source={m.get('source')} chunk={m.get('chunk')} snippet='{snippet}' emb_preview={emb_preview} norm={emb_norm} hash={emb_hash}"
-        )
-
-    # --------- NEW: fallback when embeddings miss ----------
-    # Sometimes embeddings don't pull the right file. If we got nothing,
-    # do a lightweight keyword search on documents content.
-    if not docs:
-        print("[API][CHAT][FALLBACK] No docs from vector search → trying keyword fallback")
-        keywords = [t for t in question.lower().replace("\n", " ").split() if len(t) >= 5]
-        keywords = list(dict.fromkeys(keywords))[:6]  # unique, limit
-        print(f"[API][CHAT][FALLBACK] keywords={keywords}")
-
-        fallback_docs: List[str] = []
-        fallback_metas: List[dict] = []
-        fallback_ids: List[str] = []
-        fallback_distances: List[float] = []
-
-        for kw in keywords:
-            try:
-                fb = collection.query(
-                    query_texts=[kw],
-                    n_results=10,
-                    include=["distances", "documents", "metadatas"],
-                )
-                fb_docs = fb.get("documents", [[]])[0]
-                fb_metas = fb.get("metadatas", [[]])[0]
-                fb_ids = fb.get("ids", [[]])[0]
-                fb_dists = fb.get("distances", [[]])[0]
-                for idx, (d, m) in enumerate(zip(fb_docs, fb_metas)):
-                    if d and m:
-                        fallback_docs.append(d)
-                        fallback_metas.append(m)
-                        if idx < len(fb_ids):
-                            fallback_ids.append(fb_ids[idx])
-                        if idx < len(fb_dists):
-                            fallback_distances.append(fb_dists[idx])
-            except Exception as e:
-                print(f"[API][CHAT][FALLBACK][WARN] failed query_texts for kw='{kw}': {e}")
-
-        if fallback_docs:
-            print(f"[API][CHAT][FALLBACK] Got {len(fallback_docs)} fallback docs")
-            docs = fallback_docs
-            metas = fallback_metas
-            ids = fallback_ids
-            distances = fallback_distances
-        else:
-            print("[API][CHAT][FALLBACK] Still no docs after fallback")
+        m_safe = m or {}
+        dist_str = f"{dist:.4f}" if dist is not None else "N/A"
+        print(f"[API][CHAT] Result {i}: id={did} dist={dist_str} source={m_safe.get('source', 'N/A')} chunk={m_safe.get('chunk', 'N/A')} snippet='{snippet[:100]}'")
 
     # No forced root-file injection: all files treated equally
 
     # Also include memory snippets related to the question
     # Gather memory docs (generic + ticket-specific) but do not pin them; they will be reranked
     try:
+        mem_query_emb = primary_emb or embed_text(question)
         mem = memory_collection.query(
-            query_embeddings=[q_emb],
+            query_embeddings=[mem_query_emb],
             n_results=6,
             include=["documents", "metadatas", "ids", "distances"],
         )
@@ -1141,6 +1871,28 @@ def chat(req: ChatRequest):
 
     docs, metas, distances, ids = rerank_results(question, docs, metas, distances=distances, ids=ids)
 
+    # Answerability gate: refuse to answer if context does not match the question
+    # BUT: be much more permissive when ticket is selected OR for foundational/TA9 questions
+    # Most relaxed: ticket selected + any question = answer from ticket context
+    if selected_ticket_text:
+        max_dist = 0.85  # VERY permissive when ticket is primary context
+        min_overlap = 0.0  # Don't require lexical overlap - ticket context is king
+    elif ta9_mode or is_foundational:
+        max_dist = 0.70  # Very permissive for product questions
+        min_overlap = 0.01  # Minimal lexical overlap required
+    else:
+        max_dist = 0.45
+        min_overlap = 0.08
+    
+    if not _is_context_relevant(question, docs, distances, max_distance=max_dist, min_overlap=min_overlap):
+        # For ticket-based, foundational/TA9 questions, even with weak context, answer from context
+        if selected_ticket_text or ta9_mode or is_foundational:
+            print(f"[API][CHAT] Weak context but permissive mode enabled (ticket={bool(selected_ticket_text)}, ta9={ta9_mode}, foundational={is_foundational})")
+            # Don't reject - fall through to answer with weak context
+        else:
+            rejection_msg = _generate_contextual_rejection(question, docs)
+            return ChatResponse(answer=rejection_msg, sources=[])
+
     context_blocks: List[str] = []
     source_strings: List[str] = []
 
@@ -1148,14 +1900,7 @@ def chat(req: ChatRequest):
     MAX_CONTEXT_DOCS = 12
     print(f"[API][CHAT] Building context with MAX_CONTEXT_DOCS={MAX_CONTEXT_DOCS}")
 
-    # Build context blocks, pinning the selected ticket first if present
-    if selected_ticket_text:
-        src = f"azure-devops:{selected_ticket_id} (selected ticket)"
-        source_strings.append(src)
-        snippet = selected_ticket_text[:200].replace("\n", " ")
-        print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
-        context_blocks.append(f"Source: {src}\n{selected_ticket_text}")
-
+    # Build context blocks: prioritize retrieved knowledge, then add selected ticket as supplemental context
     remaining_slots = MAX_CONTEXT_DOCS - (1 if selected_ticket_text else 0)
     for i, (doc, meta) in enumerate(list(zip(docs, metas))[:remaining_slots]):
         id_val = ids[i] if i < len(ids) else None
@@ -1166,110 +1911,59 @@ def chat(req: ChatRequest):
         print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
         context_blocks.append(f"Source: {src}\n{doc}")
 
+    if selected_ticket_text:
+        src = f"azure-devops:{selected_ticket_id} (selected ticket)"
+        source_strings.append(src)
+        snippet = selected_ticket_text[:200].replace("\n", " ")
+        print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
+        context_blocks.append(f"Source: {src}\n{selected_ticket_text}")
+
     context_text = "\n\n---\n\n".join(context_blocks)
 
-    # Prompt templates adjusted for customer support use cases
-    is_followup = bool(req.is_followup)
-
-    unstructured_prompt = (
-        "You are a TA9 / IntSight customer support assistant."
-        " Respond with an unstructured, direct, and highly actionable answer."
-        " Be assertive and confident; maximize helpfulness with concrete steps,"
-        " copy-pastable commands, and pragmatic recommendations."
-        " Avoid rigid sections or headings unless they add clear value."
-        " Use fenced code blocks ONLY for commands or code."
-        " State assumptions or uncertainties briefly if relevant, and do not hallucinate facts."
-        " Keep a professional tone.\n\n"
+    # Enhanced prompt that handles potentially redundant context intelligently
+    foundational_instruction = (
+        "10. FOUNDATIONAL QUESTIONS: If asked about core product concepts (data models, entities, features, Federated Search, Cases, Link Analysis etc.), "
+        "provide a clear explanation even if the context is weak. Explain the concept, then connect it to the product. "
+        "Never refuse to answer foundational product questions - help the user understand.\n\n"
+        if is_foundational or ta9_mode
+        else ""
     )
-
-    ticket_first_prompt = (
-        "You are a TA9 / IntSight customer support assistant handling a selected Azure DevOps ticket.\n\n"
-        "The support engineer has asked you a SPECIFIC QUESTION and also provided a ticket for context.\n"
-        "Provide a professional response using EXACTLY this format with delimiters. "
-        "Output each section in order with NO extra content:\n\n"
-
-        "---ANSWER_START---\n"
-        "Answer the support engineer's SPECIFIC QUESTION directly. Focus ONLY on what they asked. "
-        "Be concise, accurate, and specific. Include relevant technical details, commands, or steps. "
-        "Do NOT try to resolve the ticket here—just answer their question. No greetings.\n"
-        "---ANSWER_END---\n\n"
-
-        "---CUSTOMER_REPLY_START---\n"
-        "Now write what to post to the CUSTOMER in the ticket. Start with 'Hi <name>,' if the name is known; "
-        "otherwise start with 'Hi there,'. Address the ticket issue with clear next steps and any commands. "
-        "Keep it brief, professional, and actionable. "
-        "End with a professional closing like 'Please let me know if you need any further assistance.' or "
-        "'Feel free to reach out if you have any questions.' DO NOT use casual sign-offs like 'Best,' or 'Thanks,'.\n"
-        "---CUSTOMER_REPLY_END---\n\n"
-
-        "---BACKGROUND_START---\n"
-        "Explain the ticket context in natural paragraphs: the customer's environment, what they're trying to achieve, "
-        "and what the current problem is. This helps understand the situation better.\n"
-        "---BACKGROUND_END---\n\n"
-
-        "---DIAGNOSIS_START---\n"
-        "Provide your analysis of the ticket issue: what's happening and why. Explain the root cause clearly. "
-        "Write in flowing paragraphs—no bullet points or lists.\n"
-        "---DIAGNOSIS_END---\n\n"
-
-        "---ACTIONS_START---\n"
-        "What the customer should do to resolve the ticket. Include exact commands in code blocks. "
-        "Explain each step clearly. Also mention what information or logs we need from them to move forward.\n"
-        "---ACTIONS_END---\n\n"
-
-        "Be precise. Use natural flowing paragraphs. No numbered lists or dashes at sentence starts."
+    
+    ta9_instruction = (
+        "11. If the question is about TA9/IntSight features or platform capabilities, "
+        "provide a comprehensive, structured answer with key features, modules, and examples. "
+        "Use bullet points and be more explanatory.\n\n"
+        if ta9_mode
+        else ""
     )
-
-    ticket_followup_prompt = (
-        "You are a TA9 / IntSight customer support assistant."
-        " Answer the user's SPECIFIC QUESTION directly and concisely."
-        " The ticket context is provided for background reference only—do NOT try to resolve the entire ticket unless asked."
-        " Focus on what the user is actually asking about."
-        " Be assertive and confident; give concrete steps and copy-pastable commands when relevant."
-        " Use fenced code blocks ONLY for commands or code."
-        " Keep your answer brief and to the point—avoid unnecessary ticket summaries or introductions."
-        " Do not reference any other ticket numbers; if mentioning a number, it must match the selected ticket ID."
-        " State uncertainties briefly and avoid hallucinations. Keep a professional tone.\n\n"
-    )
-
-    ticket_focus_rules = ""
-    if has_ticket:
-        ticket_label = f"ID {selected_ticket_id}" if selected_ticket_id is not None else "selected ticket"
-        other_number_rule = (
-            "- Do not reference any other ticket numbers; if a number appears, ensure it matches the selected ticket ID.\n"
-            if selected_ticket_id is not None
-            else "- Do not reference any other ticket numbers; the exact ticket ID was not provided in the request.\n"
-        )
-        ticket_focus_rules = (
-            f"A SELECTED AZURE DEVOPS TICKET IS PROVIDED ({ticket_label}). Follow these rules:\n"
-            "- Focus primarily on the selected ticket's content.\n"
-            f"{other_number_rule}"
-            "- If information is missing in the ticket, state the gaps clearly and avoid guessing.\n\n"
-        )
-
-    # Choose prompt style:
-    # - No ticket: always unstructured
-    # - Ticket selected: structured for first reply (is_followup=False), unstructured for follow-ups (is_followup=True)
-    # Frontend controls is_followup flag based on its own tracking
-    use_structured_first = False
-    if not has_ticket:
-        prompt_intro = unstructured_prompt
-    else:
-        if is_followup:
-            prompt_intro = ticket_followup_prompt
-        else:
-            prompt_intro = ticket_first_prompt
-            use_structured_first = True
 
     prompt = (
-        prompt_intro + ticket_focus_rules +
-        f"Context:\n{context_text}\n\n" +
-        f"Question: {question}\n\n" +
+        "You are a TA9 / IntSight customer support assistant with deep technical knowledge. "
+        "Your role is to provide clear, accurate, and helpful answers that keep users engaged.\n\n"
+        "IMPORTANT INSTRUCTIONS:\n"
+        "1. Prioritize user understanding over document perfection. If asked about foundational concepts, explain them clearly.\n"
+        + (
+            "2. TICKET CONTEXT: A ticket has been selected. Use the ticket information as PRIMARY context to understand the user's issue and provide relevant solutions.\n"
+            if selected_ticket_text
+            else "2. Use context from the knowledge base to answer the question accurately.\n"
+        )
+        + "3. If the user asks for similar tickets, identify and compare the most similar cases from context.\n"
+        "4. Use fenced code blocks (```bash, ```python, ```sql, etc.) for any commands or code snippets.\n"
+        "5. If the context contains redundant or overlapping information, synthesize it into a single coherent answer.\n"
+        "6. Do NOT simply repeat information from different sources - intelligently merge related points.\n"
+        "7. For product-related questions, you can use general product knowledge even if context is weak, "
+        "but always try to reference the context when available.\n"
+        "8. Keep a professional, helpful tone that encourages follow-up questions.\n"
+        "9. If multiple sources provide similar information, cite the most authoritative or recent source.\n"
+        f"{foundational_instruction}"
+        f"{ta9_instruction}"
+        f"Context from knowledge base and ticket:\n{context_text}\n\n"
+        f"Question: {question}\n\n"
         "Answer:"
     )
 
     try:
-        answer = call_llm(prompt)
+        answer = call_llm(prompt, temperature=0.35 if ta9_mode else 0.2)
     except Exception as exc:
         print(f"[API][CHAT][ERROR] LLM call failed: {exc}")
         traceback.print_exc()
