@@ -1,6 +1,6 @@
 services:
   wiki_rag_api:
-    image: wiki-rag-api:7.5
+    image: wiki-rag-api:8.7
     networks:
       - shared-ai-net
     environment:
@@ -16,7 +16,6 @@ services:
       WIKI_DIR: ${WIKI_DIR}
       CHROMA_DIR: ${CHROMA_DIR}
     volumes:
-      - /root/stacks/wiki_rag/wiki_files:/app/wiki_files:ro
       - /root/stacks/wiki_rag/chroma_db:/app/chroma_db
     deploy:
       replicas: 1

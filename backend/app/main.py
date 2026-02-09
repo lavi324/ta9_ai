@@ -23,6 +23,28 @@ from html import unescape
 import subprocess
 import tempfile
 import shutil
+import json
+import mimetypes
+from io import BytesIO
+
+# Try to import optional dependencies
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
+try:
+    import openpyxl
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
+
+try:
+    import csv
+    HAS_CSV = True
+except ImportError:
+    HAS_CSV = False
 
 load_dotenv()
 
@@ -262,10 +284,12 @@ def _describe_image_via_vision(image_url: str) -> str:
     """
     Use OpenAI vision to describe an image.
     Returns a text description of the image.
+    Supports both HTTP(S) URLs and data URIs (base64 encoded images).
     """
     try:
-        # Only attempt if it's a valid URL
-        if not (image_url.startswith("http://") or image_url.startswith("https://")):
+        # Accept both URLs and data URIs
+        if not (image_url.startswith("http://") or image_url.startswith("https://") or image_url.startswith("data:image/")):
+            print(f"[VISION][WARN] Invalid image URL format: {image_url[:60]}...")
             return f"[Local image: {image_url}]"
         
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
@@ -280,7 +304,7 @@ def _describe_image_via_vision(image_url: str) -> str:
                     ],
                 }
             ],
-            "max_tokens": 150,
+            "max_tokens": 300,
         }
         resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=30)
         if resp.status_code == 200:
@@ -289,11 +313,11 @@ def _describe_image_via_vision(image_url: str) -> str:
             print(f"[VISION] Described image {image_url[:60]}... -> {description[:100]}...")
             return description
         else:
-            print(f"[VISION][WARN] Vision call failed for {image_url}: {resp.status_code}")
-            return f"[Image: {image_url}]"
+            print(f"[VISION][WARN] Vision call failed for {image_url}: {resp.status_code} {resp.text[:200]}")
+            return f"[Image analysis unavailable]"
     except Exception as e:
-        print(f"[VISION][WARN] Failed to describe image {image_url}: {e}")
-        return f"[Image: {image_url}]"
+        print(f"[VISION][WARN] Failed to describe image {image_url[:60]}...: {e}")
+        return f"[Image analysis unavailable]"
 
 
 def _strip_html(text: str) -> str:
@@ -303,6 +327,273 @@ def _strip_html(text: str) -> str:
         return " ".join(txt.split())
     except Exception:
         return text or ""
+
+
+# ---------------------------------------------------------------------
+# File Processing Functions (for uploaded files in chat)
+# ---------------------------------------------------------------------
+
+def process_uploaded_file(file_data: Dict[str, str], describe_image_func=None) -> str:
+    """
+    Process an uploaded file (base64 encoded) and extract its content.
+    Supports: images (via OCR/vision), Excel, CSV, PDF, text, Word docs.
+    
+    Args:
+        file_data: Dict with keys 'name', 'type', 'data' (base64 encoded)
+        describe_image_func: Optional function to describe images via Vision API
+    
+    Returns:
+        Extracted text content
+    """
+    try:
+        file_name = file_data.get("name", "unknown")
+        file_type = file_data.get("type", "")
+        file_b64 = file_data.get("data", "")
+        
+        if not file_b64:
+            return f"[ERROR] Empty file: {file_name}"
+        
+        file_ext = file_name.split(".")[-1].lower()
+        
+        # Decode base64
+        try:
+            file_bytes = base64.b64decode(file_b64)
+        except Exception as e:
+            print(f"[FILE] Failed to decode base64 for {file_name}: {e}")
+            return f"[ERROR] Failed to decode file: {file_name}"
+        
+        print(f"[FILE] Processing {file_name} (ext={file_ext}, size={len(file_bytes)} bytes)")
+        
+        # Route to appropriate handler
+        image_exts = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg", "ico", "heic", "heif"}
+        excel_exts = {"xlsx", "xls", "xlsm", "xltx", "xltm"}
+
+        if file_ext in image_exts or (file_type and file_type.startswith("image/")):
+            return _process_image_file(file_name, file_b64, file_type, describe_image_func)
+        elif file_ext in excel_exts:
+            return _process_excel_file(file_name, file_bytes)
+        elif file_ext == "csv":
+            return _process_csv_file(file_name, file_bytes)
+        elif file_ext == "pdf":
+            return _process_pdf_file(file_name, file_bytes)
+        elif file_ext == "txt":
+            return _process_text_file(file_name, file_bytes)
+        elif file_ext in ["doc", "docx"]:
+            return _process_word_file(file_name, file_bytes)
+        else:
+            return f"[WARNING] Unsupported file type: {file_name} (.{file_ext})"
+    
+    except Exception as e:
+        print(f"[FILE] Error processing file: {e}")
+        return f"[ERROR] Failed to process file: {str(e)}"
+
+
+def _process_image_file(file_name: str, file_b64: str, file_type: Optional[str] = None, describe_func=None) -> str:
+    """Process image file using OpenAI Vision API or fallback."""
+    try:
+        if not describe_func:
+            return f"[Image file {file_name} - processing not available]"
+
+        # Decode base64 to bytes for potential conversion
+        try:
+            file_bytes = base64.b64decode(file_b64)
+        except Exception as e:
+            print(f"[FILE] Failed to decode base64 for image {file_name}: {e}")
+            return f"[Image file {file_name} - invalid base64 data]"
+
+        # Determine mime type
+        mime_type = None
+        if file_type and file_type.startswith("image/"):
+            mime_type = file_type
+        if not mime_type:
+            mime_type = mimetypes.guess_type(file_name)[0]
+        if not mime_type:
+            mime_type = "image/jpeg"
+
+        # If unsupported by vision, try convert to JPEG via PIL
+        vision_supported = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+        if mime_type not in vision_supported:
+            if HAS_PIL:
+                try:
+                    img = Image.open(BytesIO(file_bytes))
+                    if img.mode not in ("RGB", "L"):
+                        img = img.convert("RGB")
+                    buf = BytesIO()
+                    img.save(buf, format="JPEG")
+                    jpeg_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                    data_uri = f"data:image/jpeg;base64,{jpeg_b64}"
+                except Exception as e:
+                    print(f"[FILE] Failed to convert image {file_name} to JPEG: {e}")
+                    return f"[Image file {file_name} - unsupported format for analysis]"
+            else:
+                return f"[Image file {file_name} - unsupported format for analysis]"
+        else:
+            data_uri = f"data:{mime_type};base64,{file_b64}"
+
+        image_description = describe_func(data_uri)
+        return f"[Image Content from {file_name}]\n{image_description}"
+    except Exception as e:
+        print(f"[FILE] Vision API failed for {file_name}: {e}")
+        return f"[Image file {file_name} - analysis failed: {e}]"
+
+
+def _process_text_file(file_name: str, file_bytes: bytes) -> str:
+    """Extract text from text file."""
+    try:
+        content = file_bytes.decode("utf-8", errors="ignore")
+        return f"**File: {file_name}**\n\n{content}"
+    except Exception as e:
+        print(f"[FILE] Failed to read text file {file_name}: {e}")
+        return f"[ERROR] Failed to read text file: {file_name}"
+
+
+def _process_excel_file(file_name: str, file_bytes: bytes) -> str:
+    """Extract text from Excel file."""
+    try:
+        if not HAS_OPENPYXL:
+            return f"**File: {file_name}** [Excel support not installed - openpyxl required]"
+        
+        excel_file = BytesIO(file_bytes)
+        wb = openpyxl.load_workbook(excel_file)
+        
+        content_lines = [f"**File: {file_name}**\n"]
+        
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            content_lines.append(f"\n**Sheet: {sheet_name}**\n")
+            
+            row_count = 0
+            for row in ws.iter_rows(max_row=1000):
+                row_data = []
+                for cell in row:
+                    val = cell.value
+                    row_data.append(str(val) if val is not None else "")
+                
+                if any(row_data):
+                    content_lines.append(" | ".join(row_data))
+                    row_count += 1
+            
+            if row_count == 1000:
+                content_lines.append("\n... (file too large, showing first 1000 rows)")
+        
+        return "\n".join(content_lines)
+    
+    except Exception as e:
+        print(f"[FILE] Failed to process Excel file {file_name}: {e}")
+        return f"**File: {file_name}** [Error reading Excel: {str(e)}]"
+
+
+def _process_csv_file(file_name: str, file_bytes: bytes) -> str:
+    """Extract text from CSV file."""
+    try:
+        csv_text = file_bytes.decode("utf-8", errors="ignore")
+        reader = csv.reader(csv_text.splitlines())
+        
+        content_lines = [f"**File: {file_name}**\n"]
+        
+        row_count = 0
+        for row in reader:
+            if row_count >= 500:
+                content_lines.append("\n... (file too large, showing first 500 rows)")
+                break
+            
+            if any(row):
+                content_lines.append(" | ".join(row))
+                row_count += 1
+        
+        return "\n".join(content_lines)
+    
+    except Exception as e:
+        print(f"[FILE] Failed to process CSV file {file_name}: {e}")
+        return f"**File: {file_name}** [Error reading CSV: {str(e)}]"
+
+
+def _process_pdf_file(file_name: str, file_bytes: bytes) -> str:
+    """Extract text from PDF file."""
+    try:
+        import PyPDF2
+        pdf_file = BytesIO(file_bytes)
+        reader = PyPDF2.PdfReader(pdf_file)
+        
+        content_lines = [f"**File: {file_name}** ({len(reader.pages)} pages)\n"]
+        
+        for page_idx, page in enumerate(reader.pages[:10]):
+            text = page.extract_text()
+            if text:
+                content_lines.append(f"\n--- Page {page_idx + 1} ---\n{text}")
+        
+        if len(reader.pages) > 10:
+            content_lines.append(f"\n... (showing first 10 pages of {len(reader.pages)} total)")
+        
+        return "\n".join(content_lines)
+    
+    except ImportError:
+        print(f"[FILE] PyPDF2 not installed, cannot process PDF: {file_name}")
+        return f"**File: {file_name}** [PDF support not installed - PyPDF2 required]"
+    except Exception as e:
+        print(f"[FILE] Failed to process PDF file {file_name}: {e}")
+        return f"**File: {file_name}** [Error reading PDF: {str(e)}]"
+
+
+def _process_word_file(file_name: str, file_bytes: bytes) -> str:
+    """Extract text from Word document."""
+    try:
+        from docx import Document
+        docx_file = BytesIO(file_bytes)
+        doc = Document(docx_file)
+        
+        content_lines = [f"**File: {file_name}**\n"]
+        
+        for para in doc.paragraphs:
+            if para.text.strip():
+                content_lines.append(para.text)
+        
+        for table_idx, table in enumerate(doc.tables):
+            content_lines.append(f"\n**Table {table_idx + 1}:**")
+            for row in table.rows:
+                row_data = [cell.text for cell in row.cells]
+                content_lines.append(" | ".join(row_data))
+        
+        return "\n".join(content_lines)
+    
+    except ImportError:
+        print(f"[FILE] python-docx not installed, cannot process Word doc: {file_name}")
+        return f"**File: {file_name}** [Word support not installed - python-docx required]"
+    except Exception as e:
+        print(f"[FILE] Failed to process Word file {file_name}: {e}")
+        return f"**File: {file_name}** [Error reading Word doc: {str(e)}]"
+
+
+def build_file_context(files: Optional[List[Dict[str, str]]], describe_image_func=None) -> str:
+    """
+    Process all uploaded files and build a context string to include in LLM prompt.
+    
+    Args:
+        files: List of file dicts with 'name', 'type', 'data' keys
+        describe_image_func: Optional function to describe images
+    
+    Returns:
+        Combined text from all files, or empty string if no files.
+    """
+    if not files:
+        return ""
+    
+    print(f"[FILE] Processing {len(files)} uploaded files")
+    
+    file_contents = []
+    for file_data in files:
+        content = process_uploaded_file(file_data, describe_image_func)
+        file_contents.append(content)
+    
+    combined = "\n\n---FILE SEPARATOR---\n\n".join(file_contents)
+    print(f"[FILE] Extracted content from {len(files)} files, total length={len(combined)}")
+    return combined
+
+
+# ---------------------------------------------------------------------
+# ADO Helpers (continued)
+# ---------------------------------------------------------------------
+
 
 
 def _first_field(fields: dict, keys: List[str]) -> str:
@@ -811,13 +1102,15 @@ def ingest_wiki_files(
 def _git_clone_wiki(tmp_root: Optional[str] = None) -> str:
     if not (ADO_ORG and ADO_PROJECT and ADO_PAT):
         raise RuntimeError("ADO env not configured (ADO_ORG, ADO_PROJECT, ADO_PAT)")
-    wiki_name = os.getenv("ADO_WIKI_NAME", f"{ADO_PROJECT}.wiki")
-    remote = f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}/_git/{wiki_name}"
+    
+    # Clone the source repository (not wiki) to access "AI Knowledge Files"
+    repo_name = os.getenv("ADO_REPO_NAME", "Support")
+    remote = f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}/_git/{repo_name}"
     b64 = base64.b64encode(f":{ADO_PAT}".encode("utf-8")).decode("utf-8")
 
     base_dir = tempfile.mkdtemp(prefix="wiki_rag_git_", dir=tmp_root)
     dest = os.path.join(base_dir, "repo")
-    print(f"[GIT] Cloning wiki '{wiki_name}' into {dest}")
+    print(f"[GIT] Cloning repository '{repo_name}' into {dest}")
     cmd = [
         "git",
         "-c",
@@ -837,9 +1130,69 @@ def _git_clone_wiki(tmp_root: Optional[str] = None) -> str:
     return dest
 
 
+def _describe_local_image_via_vision(file_path: str) -> Optional[str]:
+    """
+    Use OpenAI vision to describe a local image file (supports .png, .jpg, .jpeg, .gif, .webp).
+    Converts file to base64 data URI and sends to vision API.
+    Returns a text description of the image, or None if processing fails.
+    """
+    if not HAS_PIL:
+        print(f"[VISION] PIL not installed; skipping image analysis for {file_path}")
+        return None
+    
+    try:
+        # Determine mime type
+        ext = os.path.splitext(file_path)[1].lower()
+        mime_map = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }
+        mime_type = mime_map.get(ext)
+        if not mime_type:
+            print(f"[VISION] Unsupported image format: {ext}")
+            return None
+        
+        # Read and encode to base64
+        with open(file_path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode("utf-8")
+        
+        data_uri = f"data:{mime_type};base64,{image_data}"
+        
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+        body = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Briefly describe what you see in this image. Focus on any technical content, errors, UI elements, code, diagrams, or relevant details."},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                    ],
+                }
+            ],
+            "max_tokens": 200,
+        }
+        print(f"[VISION] Processing image file: {file_path}")
+        resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            description = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            print(f"[VISION] Image description ({os.path.basename(file_path)}): {description[:150]}...")
+            return description
+        else:
+            print(f"[VISION][WARN] Vision call failed for {file_path}: {resp.status_code}")
+            return None
+    except Exception as e:
+        print(f"[VISION][WARN] Failed to describe image {file_path}: {e}")
+        return None
+
+
 def compare_and_ingest_internal() -> Tuple[int, int]:
-    """Clone the Azure DevOps wiki repo and ingest only missing .md files."""
-    print("[COMPARE_INGEST] Starting compare-and-ingest via git clone")
+    """Clone the Azure DevOps repo and ingest files from AI Knowledge Files directory."""
+    print("[COMPARE_INGEST] Starting compare-and-ingest from Azure DevOps repo")
 
     # If ADO not configured, fallback to local filesystem ingest
     if not (ADO_ORG and ADO_PROJECT and ADO_PAT):
@@ -851,19 +1204,44 @@ def compare_and_ingest_internal() -> Tuple[int, int]:
     try:
         repo_dir = _git_clone_wiki()
         print(f"[GIT] Clone completed: {repo_dir}")
-        # Collect all .md files from repo
+        
+        # Navigate to AI Knowledge Files directory
+        ai_knowledge_path = os.path.join(repo_dir, "AI Knowledge Files")
+        
+        if not os.path.exists(ai_knowledge_path):
+            print(f"[COMPARE_INGEST][ERROR] AI Knowledge Files directory not found at {ai_knowledge_path}")
+            return 0, collection.count()
+        
+        print(f"[COMPARE_INGEST] Found AI Knowledge Files at {ai_knowledge_path}")
+        
+        # Get files from the two target directories (both markdown and images)
+        target_dirs = ["new_files_for_ai_knowledge", "TA9-WIKI"]
         md_files: List[str] = []
-        for p in pathlib.Path(repo_dir).rglob("*.md"):
-            if p.is_file():
-                rel = os.path.relpath(str(p), repo_dir)
-                md_files.append(rel)
-        print(f"[GIT] Found {len(md_files)} markdown files in wiki repo")
+        image_files: List[str] = []
+        image_extensions = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+        
+        for target_dir in target_dirs:
+            dir_path = os.path.join(ai_knowledge_path, target_dir)
+            if os.path.exists(dir_path):
+                print(f"[COMPARE_INGEST] Scanning {target_dir} directory...")
+                for p in pathlib.Path(dir_path).rglob("*"):
+                    if p.is_file():
+                        rel = os.path.relpath(str(p), ai_knowledge_path)
+                        if p.suffix.lower() == ".md":
+                            md_files.append(rel)
+                        elif p.suffix.lower() in image_extensions:
+                            image_files.append(rel)
+            else:
+                print(f"[COMPARE_INGEST][WARN] Directory {target_dir} not found")
+        
+        print(f"[GIT] Found {len(md_files)} markdown files and {len(image_files)} image files in AI Knowledge Files")
 
-        if not md_files:
+        all_files = md_files + image_files
+        if not all_files:
             return 0, collection.count()
 
         existing_sources = set(get_ingested_sources())
-        to_ingest = [f for f in md_files if f not in existing_sources]
+        to_ingest = [f for f in all_files if f not in existing_sources]
         print(f"[COMPARE_INGEST] Files to ingest (missing) = {len(to_ingest)}")
 
         if not to_ingest:
@@ -875,15 +1253,29 @@ def compare_and_ingest_internal() -> Tuple[int, int]:
         skipped_errors: List[str] = []
         
         for idx, rel in enumerate(to_ingest, start=1):
-            abs_path = os.path.join(repo_dir, rel)
-            print(f"[COMPARE_INGEST] [{idx}/{len(to_ingest)}] Ingesting file: {rel}")
-            try:
-                with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
-                    text = f.read()
-            except Exception as e:
-                print(f"[COMPARE_INGEST][ERROR] Failed to read {rel}: {e}")
-                skipped_errors.append(rel)
-                continue
+            abs_path = os.path.join(ai_knowledge_path, rel)
+            is_image = rel.lower().endswith(image_extensions)
+            print(f"[COMPARE_INGEST] [{idx}/{len(to_ingest)}] Ingesting {'image' if is_image else 'markdown'} file: {rel}")
+            
+            text = None
+            if is_image:
+                # Process image file using vision API
+                text = _describe_local_image_via_vision(abs_path)
+                if not text:
+                    print(f"[COMPARE_INGEST] Failed to extract content from image {rel}")
+                    skipped_errors.append(rel)
+                    continue
+                # Prepend file name to image description for context
+                text = f"[Image: {os.path.basename(rel)}]\n\n{text}"
+            else:
+                # Process markdown file
+                try:
+                    with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
+                        text = f.read()
+                except Exception as e:
+                    print(f"[COMPARE_INGEST][ERROR] Failed to read {rel}: {e}")
+                    skipped_errors.append(rel)
+                    continue
 
             if not text.strip():
                 print(f"[COMPARE_INGEST] Empty file {rel} → skipping")
@@ -908,7 +1300,7 @@ def compare_and_ingest_internal() -> Tuple[int, int]:
                     continue
                 ids.append(str(uuid.uuid4()))
                 docs.append(ch)
-                metas.append({"source": rel, "chunk": i})
+                metas.append({"source": rel, "chunk": i, "file_type": "image" if is_image else "markdown"})
                 embeds.append(emb)
 
             if not ids:
@@ -926,7 +1318,9 @@ def compare_and_ingest_internal() -> Tuple[int, int]:
         
         # Print summary
         print(f"[COMPARE_INGEST] ===== SUMMARY =====")
-        print(f"[COMPARE_INGEST] Total files in wiki repo: {len(md_files)}")
+        print(f"[COMPARE_INGEST] Markdown files in AI Knowledge Files: {len(md_files)}")
+        print(f"[COMPARE_INGEST] Image files in AI Knowledge Files: {len(image_files)}")
+        print(f"[COMPARE_INGEST] Total files in AI Knowledge Files: {len(all_files)}")
         print(f"[COMPARE_INGEST] Already ingested: {len(existing_sources)}")
         print(f"[COMPARE_INGEST] Missing files found: {len(to_ingest)}")
         print(f"[COMPARE_INGEST] Successfully ingested: {added_chunks} chunks")
@@ -1323,58 +1717,38 @@ def _is_context_relevant(
 def _generate_contextual_rejection(question: str, docs: List[str] = None) -> str:
     """
     Generate an intelligent, question-aware rejection response using the LLM.
-    Instead of returning a canned message, ask the LLM to:
-    1. Acknowledge what the user asked
-    2. Explain why it doesn't relate to available resources
-    3. Ask for clarification in a way that mirrors their intent
-    
-    This ensures each rejection feels unique and personalized.
+    Makes the rejection feel natural and contextual rather than robotic.
     """
     if not OPENAI_API_KEY:
-        # Fallback to simple rejection if no LLM available
         return (
-            "I don't see a clear connection between that question and the knowledge base. "
-            "Could you clarify how it relates to the ticket, or ask a more specific support question?"
+            "I don't have enough information in the knowledge base to answer that. "
+            "Could you provide more context or ask about a specific technical issue?"
         )
     
     try:
-        # Extract key phrases from the question to acknowledge what they asked
-        question_phrases = []
-        if "how" in question.lower():
-            question_phrases.append("understand how something works")
-        elif "why" in question.lower():
-            question_phrases.append("understand why something happened")
-        elif "what" in question.lower():
-            question_phrases.append("learn what something is")
-        elif "can" in question.lower() or "does" in question.lower():
-            question_phrases.append("know if something is possible")
-        else:
-            question_phrases.append("solve a problem")
-        
-        # Build a prompt that generates a contextual rejection
+        # Build a prompt that generates a flexible, natural rejection
         rejection_prompt = (
-            "You are a helpful technical support assistant. A user asked a question, but it doesn't "
-            "relate to the technical knowledge base or selected ticket.\n\n"
+            "You are a helpful technical support assistant. The user asked a question, but there isn't "
+            "relevant information in the knowledge base to answer it properly.\n\n"
             f"User's question: {question}\n\n"
-            "Your task: Generate a SHORT, natural response (1-2 sentences) that:\n"
-            "1. Shows you understood what they're asking about (acknowledge their intent)\n"
-            "2. Explains why the knowledge base can't help with this specific question\n"
-            "3. Ask them to clarify how it relates to the selected ticket or ask a more specific technical question\n\n"
-            "Keep it conversational and helpful, not robotic. Be brief.\n"
+            "Generate a SHORT (1-2 sentences), friendly response that:\n"
+            "- Acknowledges what they're asking about\n"
+            "- Explains you don't have specific information on this topic\n"
+            "- Suggests they provide more context or ask about technical documentation/issues\n\n"
+            "Be conversational and helpful. Don't mention \"viewing images\" or \"can't view\" - just focus on not having information.\n"
             "Response:"
         )
         
-        rejection = call_llm(rejection_prompt)
+        rejection = call_llm(rejection_prompt, temperature=0.3)
         return rejection.strip() if rejection else (
-            "I don't see a clear connection between your question and the knowledge base. "
-            "Could you clarify what technical issue you're trying to solve?"
+            "I don't have specific information about that in the knowledge base. "
+            "Could you provide more details or ask about a technical issue I can help with?"
         )
     except Exception as e:
         print(f"[REJECTION][WARN] Failed to generate contextual rejection: {e}")
-        # Fallback to a simple rejection
         return (
-            "I don't see a clear connection between your question and the knowledge base. "
-            "Could you provide more context about what you're trying to accomplish?"
+            "I don't have information about that in the knowledge base. "
+            "Could you provide more context about the technical issue you're facing?"
         )
 
 
@@ -1390,6 +1764,8 @@ class ChatRequest(BaseModel):
     teach: Optional[bool] = False
     # If a ticket is selected, set to True for follow-up messages after the first structured reply
     is_followup: Optional[bool] = False
+    # File uploads with content
+    files: Optional[List[Dict[str, str]]] = None  # List of {name, type, data} where data is base64
 
 
 class ChatResponse(BaseModel):
@@ -1710,8 +2086,19 @@ def ingest_learning_tickets(req: AdoLearnIngestRequest, background_tasks: Backgr
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
-    print(f"[API][CHAT] /chat called question='{req.question[:200]}' top_k={req.top_k} force_reingest={req.force_reingest}")
+    print(f"[API][CHAT] /chat called question='{req.question[:200]}' top_k={req.top_k} force_reingest={req.force_reingest} files={len(req.files) if req.files else 0}")
     question = (req.question or "").strip()
+
+    # Process uploaded files early to include their content in context
+    file_context = ""
+    if req.files:
+        try:
+            file_context = build_file_context(req.files, describe_image_func=_describe_image_via_vision)
+            if file_context:
+                print(f"[API][CHAT] Extracted file context: {len(file_context)} characters")
+        except Exception as e:
+            print(f"[API][CHAT][WARN] File processing failed: {e}")
+            file_context = ""
 
     # Parse ticket selection early so we can allow an empty initial message to trigger the first structured reply
     selected_ticket_id: Optional[int] = None
@@ -1872,9 +2259,12 @@ def chat(req: ChatRequest):
     docs, metas, distances, ids = rerank_results(question, docs, metas, distances=distances, ids=ids)
 
     # Answerability gate: refuse to answer if context does not match the question
-    # BUT: be much more permissive when ticket is selected OR for foundational/TA9 questions
-    # Most relaxed: ticket selected + any question = answer from ticket context
-    if selected_ticket_text:
+    # BUT: be much more permissive when files are attached, ticket is selected, or for foundational/TA9 questions
+    # Most relaxed: file attached or ticket selected + any question = answer from that context
+    if file_context:
+        max_dist = 1.0  # Skip relevance gating when user provides files
+        min_overlap = 0.0
+    elif selected_ticket_text:
         max_dist = 0.85  # VERY permissive when ticket is primary context
         min_overlap = 0.0  # Don't require lexical overlap - ticket context is king
     elif ta9_mode or is_foundational:
@@ -1885,10 +2275,13 @@ def chat(req: ChatRequest):
         min_overlap = 0.08
     
     if not _is_context_relevant(question, docs, distances, max_distance=max_dist, min_overlap=min_overlap):
-        # For ticket-based, foundational/TA9 questions, even with weak context, answer from context
-        if selected_ticket_text or ta9_mode or is_foundational:
-            print(f"[API][CHAT] Weak context but permissive mode enabled (ticket={bool(selected_ticket_text)}, ta9={ta9_mode}, foundational={is_foundational})")
-            # Don't reject - fall through to answer with weak context
+        # For file-based, ticket-based, foundational/TA9 questions, even with weak context, answer from context
+        if file_context or selected_ticket_text or ta9_mode or is_foundational:
+            print(
+                "[API][CHAT] Weak context but permissive mode enabled "
+                f"(files={bool(file_context)}, ticket={bool(selected_ticket_text)}, ta9={ta9_mode}, foundational={is_foundational})"
+            )
+            # Don't reject - fall through to answer with file/ticket/weak context
         else:
             rejection_msg = _generate_contextual_rejection(question, docs)
             return ChatResponse(answer=rejection_msg, sources=[])
@@ -1931,33 +2324,71 @@ def chat(req: ChatRequest):
     
     ta9_instruction = (
         "11. If the question is about TA9/IntSight features or platform capabilities, "
-        "provide a comprehensive, structured answer with key features, modules, and examples. "
-        "Use bullet points and be more explanatory.\n\n"
+        "provide a comprehensive, detailed answer with key features, modules, and examples. "
+        "Use bullet points when helpful and be explanatory.\n\n"
         if ta9_mode
         else ""
     )
 
+    # Build context sections with proper priority
+    # When files are attached, they should be PRIMARY source of truth
+    context_sections = []
+    
+    if file_context:
+        # Files come FIRST and are marked as primary
+        context_sections.append(
+            f"=== USER-PROVIDED FILES (PRIMARY SOURCE) ===\n"
+            f"The user has attached files. Answer their question using this content as the main source.\n\n"
+            f"{file_context}\n"
+        )
+    
+    if selected_ticket_text:
+        # Ticket context is secondary if files exist, primary otherwise
+        priority_label = "REFERENCE" if file_context else "PRIMARY"
+        context_sections.append(
+            f"=== SELECTED TICKET ({priority_label}) ===\n"
+            f"{selected_ticket_text}\n"
+        )
+    
+    # Only include RAG context if files are NOT attached or if context is highly relevant
+    # When user attaches files, they want analysis of those files, not wiki docs
+    should_include_rag_context = True
+    if file_context:
+        # Files attached: only include RAG context if it's highly relevant (very short distance)
+        # Check if best doc has good relevance
+        best_distance = distances[0] if distances else 1.0
+        should_include_rag_context = best_distance < 0.5  # Very strict: only highly relevant docs
+        if not should_include_rag_context:
+            print(f"[API][CHAT] Skipping RAG context: best_distance={best_distance} (>= 0.5 threshold). User has file context, prioritizing that.")
+    
+    if context_text and should_include_rag_context:
+        # Wiki context is always supplemental
+        priority_label = "REFERENCE" if (file_context or selected_ticket_text) else "PRIMARY"
+        context_sections.append(
+            f"=== KNOWLEDGE BASE ({priority_label}) ===\n"
+            f"{context_text}\n"
+        )
+    
+    combined_context = "\n\n".join(context_sections)
+
     prompt = (
         "You are a TA9 / IntSight customer support assistant with deep technical knowledge. "
-        "Your role is to provide clear, accurate, and helpful answers that keep users engaged.\n\n"
-        "IMPORTANT INSTRUCTIONS:\n"
-        "1. Prioritize user understanding over document perfection. If asked about foundational concepts, explain them clearly.\n"
-        + (
-            "2. TICKET CONTEXT: A ticket has been selected. Use the ticket information as PRIMARY context to understand the user's issue and provide relevant solutions.\n"
-            if selected_ticket_text
-            else "2. Use context from the knowledge base to answer the question accurately.\n"
-        )
-        + "3. If the user asks for similar tickets, identify and compare the most similar cases from context.\n"
-        "4. Use fenced code blocks (```bash, ```python, ```sql, etc.) for any commands or code snippets.\n"
-        "5. If the context contains redundant or overlapping information, synthesize it into a single coherent answer.\n"
-        "6. Do NOT simply repeat information from different sources - intelligently merge related points.\n"
-        "7. For product-related questions, you can use general product knowledge even if context is weak, "
-        "but always try to reference the context when available.\n"
-        "8. Keep a professional, helpful tone that encourages follow-up questions.\n"
-        "9. If multiple sources provide similar information, cite the most authoritative or recent source.\n"
+        "Your role is to provide clear, accurate, and helpful answers in a natural, conversational way.\n\n"
+        "INSTRUCTIONS:\n"
+        "1. When the user attaches files (images, documents), those files are your PRIMARY source - answer directly from them.\n"
+        "2. When you see [Image Content from ...] sections, that means the image has been analyzed - describe what you see in the analysis naturally.\n"
+        "3. For images: Simply describe what's shown in the provided analysis. Be direct and conversational.\n"
+        "4. When a ticket is selected, use it to understand the user's issue and provide relevant solutions.\n"
+        "5. Use knowledge base context to supplement your answer or provide additional related information.\n"
+        "6. Use fenced code blocks (```bash, ```python, ```sql, etc.) for any commands or code snippets.\n"
+        "7. If the context contains redundant or overlapping information, synthesize it into a single coherent answer.\n"
+        "8. Do NOT repeat information from different sources - intelligently merge related points.\n"
+        "9. For product-related questions, you can use general product knowledge even if context is weak.\n"
+        "10. Keep a professional, helpful tone that encourages follow-up questions.\n"
+        "11. Answer naturally and conversationally - avoid rigid structured formats unless specifically requested.\n"
         f"{foundational_instruction}"
-        f"{ta9_instruction}"
-        f"Context from knowledge base and ticket:\n{context_text}\n\n"
+        f"{ta9_instruction}\n"
+        f"{combined_context}\n\n"
         f"Question: {question}\n\n"
         "Answer:"
     )

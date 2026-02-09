@@ -1,1 +1,0 @@
-journalctl --since "16:00" -u loader.service

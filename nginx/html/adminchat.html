@@ -7,6 +7,7 @@
   <link rel="icon" type="image/png" href="/adminchat/ta9_logo.png">
   <!-- Markdown renderer to convert headings/bullets/code to HTML -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <style>
     * {
       box-sizing: border-box;
@@ -55,6 +56,7 @@
     .logo {
       height: 50px;
       width: auto;
+      cursor: pointer;
     }
 
     .title {
@@ -157,22 +159,36 @@
 
     .input-dock {
       position: fixed;
-      left: 24px;
-      right: 24px;
-      bottom: 18px;
-      max-width: 1400px;
-      margin: 0 auto;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: 20px;
+      width: 95%;
+      max-width: 900px;
     }
 
     .input-row {
       display: flex;
-      align-items: center;
+      align-items: flex-end;
       gap: 10px;
       background: #fff;
-      border: 1px solid #e0e7ef;
-      border-radius: 10px;
-      padding: 8px;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+      border: 1px solid #d1d5db;
+      border-radius: 28px;
+      padding: 14px 14px 14px 18px;
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+      transition: all 0.2s ease;
+      min-height: 56px;
+    }
+
+    .input-row:focus-within {
+      border-color: #9ca3af;
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.15);
+    }
+
+    .textarea-wrapper {
+      flex: 1;
+      display: flex;
+      align-items: flex-end;
+      position: relative;
     }
 
     .input-row textarea {
@@ -180,10 +196,291 @@
       border: none;
       outline: none;
       resize: none;
-      font-size: 14px;
-      min-height: 120px;
+      font-size: 17px;
+      line-height: 28px;
+      min-height: 28px;
       max-height: 300px;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      overflow-y: hidden;
+      color: #000;
+    }
+
+    .input-row textarea::placeholder {
+      color: #8e8ea0;
+    }
+
+    .file-upload-btn {
+      background: transparent;
+      color: #8e8ea0;
+      border: none;
+      border-radius: 50%;
+      width: 36px;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 26px;
+      font-weight: 300;
+      transition: all 0.15s ease;
+      padding: 0;
+      flex-shrink: 0;
+      margin-right: 4px;
+    }
+
+    .file-upload-btn:hover {
+      background: #ececf1;
+      color: #565869;
+    }
+
+    .file-preview {
+      background: #f8f9fb;
+      border: 1px solid #d4dae3;
+      border-radius: 8px;
       padding: 12px;
+      margin-top: 8px;
+      position: relative;
+    }
+
+    .file-preview.hidden {
+      display: none;
+    }
+
+    .file-preview-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .preview-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #0c3d6b;
+    }
+
+    .preview-close-btn {
+      background: none;
+      border: none;
+      color: #6b7784;
+      font-size: 20px;
+      cursor: pointer;
+      padding: 0;
+      width: 24px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+    }
+
+    .preview-close-btn:hover {
+      color: #e74855;
+    }
+
+    .file-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .file-item {
+      background: #fff;
+      border: 1px solid #e0e7ef;
+      border-radius: 6px;
+      padding: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      color: #304050;
+    }
+
+    .file-item-name {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .file-item-icon {
+      font-size: 16px;
+      min-width: 20px;
+    }
+
+    .file-item-text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .file-item-meta {
+      font-size: 11px;
+      color: #6b7280;
+      margin-top: 2px;
+    }
+
+    .file-item-remove {
+      background: none;
+      border: none;
+      color: #e74855;
+      cursor: pointer;
+      font-size: 14px;
+      padding: 0;
+      min-width: 20px;
+      transition: all 0.2s ease;
+    }
+
+    .file-item-remove.hidden {
+      display: none;
+    }
+
+    .file-item-preview {
+      background: #eef2ff;
+      border: 1px solid #c7d2fe;
+      color: #3730a3;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+
+    .file-item-preview:hover {
+      background: #e0e7ff;
+      border-color: #a5b4fc;
+    }
+
+    .file-item-remove:hover {
+      transform: scale(1.2);
+    }
+
+    .image-preview-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.55);
+      backdrop-filter: blur(4px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 2000;
+      padding: 20px;
+    }
+
+    .image-preview-modal.hidden {
+      display: none;
+    }
+
+    .image-preview-content {
+      background: #ffffff;
+      border-radius: 16px;
+      max-width: 92vw;
+      max-height: 92vh;
+      padding: 18px;
+      box-shadow: 0 20px 60px rgba(15, 23, 42, 0.35);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      border: 1px solid #e5e7eb;
+    }
+
+    .image-preview-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 14px;
+      color: #0f172a;
+    }
+
+    .image-preview-title {
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 70vw;
+    }
+
+    .image-preview-meta {
+      font-size: 12px;
+      color: #6b7280;
+      margin-left: 8px;
+      white-space: nowrap;
+    }
+
+    .image-preview-close {
+      background: #111827;
+      border: none;
+      border-radius: 10px;
+      padding: 6px 12px;
+      cursor: pointer;
+      font-size: 12px;
+      color: #ffffff;
+      transition: transform 0.15s ease, opacity 0.15s ease;
+    }
+
+    .image-preview-close:hover {
+      transform: translateY(-1px);
+      opacity: 0.9;
+    }
+
+    .image-preview-img {
+      width: 88vw;
+      height: 78vh;
+      max-width: 88vw;
+      max-height: 78vh;
+      object-fit: contain;
+      border-radius: 12px;
+      border: 1px solid #e5e7eb;
+      background: #f8fafc;
+      box-shadow: inset 0 0 0 1px #f1f5f9;
+    }
+
+    .file-preview-body {
+      width: 88vw;
+      height: 78vh;
+      max-width: 88vw;
+      max-height: 78vh;
+      border-radius: 12px;
+      border: 1px solid #e5e7eb;
+      background: #f8fafc;
+      overflow: auto;
+      padding: 16px;
+    }
+
+
+    .file-preview-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      background: #ffffff;
+    }
+
+    .file-preview-table th,
+    .file-preview-table td {
+      border: 1px solid #e2e8f0;
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: top;
+      max-width: 280px;
+      word-break: break-word;
+    }
+
+    .file-preview-table th {
+      background: #f1f5f9;
+      font-weight: 600;
+    }
+
+    .file-preview-text {
+      white-space: pre-wrap;
+      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+      font-size: 12px;
+      color: #0f172a;
     }
 
     .card {
@@ -584,27 +881,36 @@
     }
 
     .btn-primary {
-      background: #0c3d6b;
+      background: #10a37f;
       color: #fff;
       border: none;
-      border-radius: 8px;
-      padding: 12px 24px;
-      font-size: 14px;
-      font-weight: 500;
+      border-radius: 50%;
+      width: 36px;
+      height: 36px;
+      min-width: 36px;
+      min-height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
       cursor: pointer;
-      min-width: 90px;
-      transition: all 0.2s ease;
+      transition: all 0.15s ease;
+      flex-shrink: 0;
+      padding: 0;
     }
 
     .btn-primary:hover:not(:disabled) {
-      background: #0a2f52;
-      transform: translateY(-1px);
-      box-shadow: 0 4px 12px rgba(12, 61, 107, 0.25);
+      background: #0e9070;
     }
 
     .btn-primary:disabled {
-      opacity: 0.6;
-      cursor: default;
+      background: #d1d5db;
+      cursor: not-allowed;
+      opacity: 0.4;
+    }
+
+    .btn-primary svg {
+      width: 20px;
+      height: 20px;
     }
 
     .hidden { display: none; }
@@ -654,10 +960,47 @@
 
     <div class="input-dock">
       <form id="chat-form" class="input-row">
-        <textarea id="question" placeholder="Ask me anything..." rows="1"></textarea>
-        <button id="send-btn" type="submit" class="btn-primary">Ask</button>
-        <button id="stop-btn" type="button" class="btn-primary hidden" style="background: #e74c3c;">Stop</button>
+        <button id="upload-file-btn" type="button" class="file-upload-btn" title="Upload files (images, Excel, PDF, etc.)">
+          <span>+</span>
+        </button>
+        <input id="file-input" type="file" multiple accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff,.svg,.ico,.heic,.heif,.pdf,.xlsx,.xls,.xlsm,.xltx,.xltm,.csv,.txt,.doc,.docx" style="display: none;">
+        <div class="textarea-wrapper">
+          <textarea id="question" placeholder="Message AI Assistant..." rows="1"></textarea>
+        </div>
+        <button id="send-btn" type="submit" class="btn-primary" title="Send message">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M7 11L12 6L17 11M12 18V7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <button id="stop-btn" type="button" class="btn-primary hidden" style="background: #ef4444;" title="Stop generating">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor"/>
+          </svg>
+        </button>
       </form>
+      <div id="file-preview" class="file-preview hidden">
+        <div class="file-preview-header">
+          <span class="preview-title">Attached Files</span>
+          <button id="clear-files-btn" type="button" class="preview-close-btn">×</button>
+        </div>
+        <div id="file-list" class="file-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="image-preview-modal" class="image-preview-modal hidden" aria-hidden="true">
+    <div class="image-preview-content">
+      <div class="image-preview-header">
+        <div style="display:flex; align-items:center; gap:8px; min-width:0;">
+          <span id="image-preview-title" class="image-preview-title"></span>
+          <span id="image-preview-meta" class="image-preview-meta"></span>
+        </div>
+        <button id="image-preview-close" type="button" class="image-preview-close">Close</button>
+      </div>
+      <img id="image-preview-img" class="image-preview-img" alt="Image preview" />
+      <div id="file-preview-body" class="file-preview-body hidden">
+        <div id="file-preview-content"></div>
+      </div>
     </div>
   </div>
 
@@ -672,11 +1015,411 @@
     const answerSection = document.getElementById('answer-section');
     const ticketSelect = document.getElementById('ticket-select');
     const clearTicketBtn = document.getElementById('clear-ticket');
+    
+    // File upload elements
+    const uploadFileBtn = document.getElementById('upload-file-btn');
+    const fileInput = document.getElementById('file-input');
+    const filePreview = document.getElementById('file-preview');
+    const fileList = document.getElementById('file-list');
+    const clearFilesBtn = document.getElementById('clear-files-btn');
+    const imagePreviewModal = document.getElementById('image-preview-modal');
+    const imagePreviewImg = document.getElementById('image-preview-img');
+    const imagePreviewTitle = document.getElementById('image-preview-title');
+    const imagePreviewMeta = document.getElementById('image-preview-meta');
+    const imagePreviewClose = document.getElementById('image-preview-close');
+    const logoImg = document.querySelector('.logo');
+    const filePreviewBody = document.getElementById('file-preview-body');
+    const filePreviewContent = document.getElementById('file-preview-content');
 
     let currentController = null;
     let ticketFirstQuestionAsked = {}; // Track if first question was asked for each ticket URL
     let lastSelectedTicket = null; // Track the last selected ticket to detect changes
     let thinkingInterval = null; // Track thinking animation interval
+    let attachedFiles = []; // Store file data
+
+    if (logoImg) {
+      logoImg.addEventListener('click', () => {
+        window.location.reload();
+      });
+    }
+
+    function formatFileSize(bytes) {
+      if (!bytes && bytes !== 0) return '';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let size = bytes;
+      let unitIndex = 0;
+      while (size >= 1024 && unitIndex < units.length - 1) {
+        size /= 1024;
+        unitIndex++;
+      }
+      return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+    }
+
+    function getFileFormat(fileItem) {
+      const name = fileItem && fileItem.name ? fileItem.name : '';
+      const ext = name.includes('.') ? name.split('.').pop().toUpperCase() : '';
+      return ext || (fileItem && fileItem.type ? fileItem.type.split('/')[1]?.toUpperCase() : '');
+    }
+
+    function openImagePreview(fileItem) {
+      if (!fileItem || !fileItem.type || !fileItem.type.startsWith('image/')) return;
+      imagePreviewTitle.textContent = fileItem.name || 'Image preview';
+      const fmt = getFileFormat(fileItem);
+      const size = formatFileSize(fileItem.size);
+      imagePreviewMeta.textContent = [fmt, size].filter(Boolean).join(' • ');
+      imagePreviewImg.src = `data:${fileItem.type};base64,${fileItem.data}`;
+      imagePreviewImg.classList.remove('hidden');
+      filePreviewBody.classList.add('hidden');
+      imagePreviewModal.classList.remove('hidden');
+      imagePreviewModal.setAttribute('aria-hidden', 'false');
+    }
+
+    function openFilePreview(fileItem) {
+      if (!fileItem) return;
+      if (fileItem.type && fileItem.type.startsWith('image/')) {
+        openImagePreview(fileItem);
+        return;
+      }
+
+      imagePreviewTitle.textContent = fileItem.name || 'File preview';
+      const fmt = getFileFormat(fileItem);
+      const size = formatFileSize(fileItem.size);
+      imagePreviewMeta.textContent = [fmt, size].filter(Boolean).join(' • ');
+
+      imagePreviewImg.classList.add('hidden');
+      filePreviewBody.classList.remove('hidden');
+      filePreviewContent.innerHTML = '';
+      const fileExt = (fileItem.name || '').split('.').pop().toLowerCase();
+      const isText = ['txt', 'log', 'md'].includes(fileExt);
+      const isCsv = fileExt === 'csv';
+      const isExcel = ['xlsx', 'xls'].includes(fileExt);
+
+      if (isText) {
+        try {
+          const text = atob(fileItem.data);
+          const previewText = text.length > 50000 ? text.slice(0, 50000) + '\n\n... (truncated)' : text;
+          const textEl = document.createElement('div');
+          textEl.className = 'file-preview-text';
+          textEl.textContent = previewText;
+          filePreviewContent.appendChild(textEl);
+        } catch (err) {
+          filePreviewContent.textContent = 'Unable to decode text preview.';
+        }
+        showModal();
+        return;
+      }
+
+      if (isCsv) {
+        if (typeof XLSX === 'undefined') {
+          try {
+            const text = atob(fileItem.data);
+            const previewText = text.length > 50000 ? text.slice(0, 50000) + '\n\n... (truncated)' : text;
+            const textEl = document.createElement('div');
+            textEl.className = 'file-preview-text';
+            textEl.textContent = previewText;
+            filePreviewContent.appendChild(textEl);
+          } catch (err) {
+            filePreviewContent.textContent = 'Unable to decode CSV preview.';
+          }
+          showModal();
+          return;
+        }
+
+        try {
+          const csvText = atob(fileItem.data);
+          const workbook = XLSX.read(csvText, { type: 'string' });
+          const sheetName = workbook.SheetNames[0];
+          const sheet = workbook.Sheets[sheetName];
+          const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true });
+
+          const table = document.createElement('table');
+          table.className = 'file-preview-table';
+
+          const maxRows = Math.min(rows.length, 50);
+          const maxCols = rows.reduce((m, r) => Math.max(m, r.length || 0), 0);
+          const capCols = Math.min(maxCols, 20);
+
+          const headerRow = document.createElement('tr');
+          for (let c = 0; c < capCols; c++) {
+            const th = document.createElement('th');
+            th.textContent = rows[0] && rows[0][c] !== undefined ? String(rows[0][c]) : `Column ${c + 1}`;
+            headerRow.appendChild(th);
+          }
+          table.appendChild(headerRow);
+
+          for (let r = 1; r < maxRows; r++) {
+            const tr = document.createElement('tr');
+            for (let c = 0; c < capCols; c++) {
+              const td = document.createElement('td');
+              const cell = rows[r] && rows[r][c] !== undefined ? rows[r][c] : '';
+              td.textContent = String(cell);
+              tr.appendChild(td);
+            }
+            table.appendChild(tr);
+          }
+
+          filePreviewContent.appendChild(table);
+        } catch (err) {
+          filePreviewContent.textContent = 'Unable to parse CSV preview.';
+        }
+        showModal();
+        return;
+      }
+
+      if (isExcel) {
+        if (typeof XLSX === 'undefined') {
+          filePreviewContent.textContent = 'Excel preview not available (XLSX library missing).';
+          showModal();
+          return;
+        }
+
+        try {
+          const binary = atob(fileItem.data);
+          const len = binary.length;
+          const bytes = new Uint8Array(len);
+          for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+          const workbook = XLSX.read(bytes, { type: 'array' });
+          const sheetName = workbook.SheetNames[0];
+          const sheet = workbook.Sheets[sheetName];
+          const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true });
+
+          const table = document.createElement('table');
+          table.className = 'file-preview-table';
+
+          const maxRows = Math.min(rows.length, 50);
+          const maxCols = rows.reduce((m, r) => Math.max(m, r.length || 0), 0);
+          const capCols = Math.min(maxCols, 20);
+
+          const headerRow = document.createElement('tr');
+          for (let c = 0; c < capCols; c++) {
+            const th = document.createElement('th');
+            th.textContent = rows[0] && rows[0][c] !== undefined ? String(rows[0][c]) : `Column ${c + 1}`;
+            headerRow.appendChild(th);
+          }
+          table.appendChild(headerRow);
+
+          for (let r = 1; r < maxRows; r++) {
+            const tr = document.createElement('tr');
+            for (let c = 0; c < capCols; c++) {
+              const td = document.createElement('td');
+              const cell = rows[r] && rows[r][c] !== undefined ? rows[r][c] : '';
+              td.textContent = String(cell);
+              tr.appendChild(td);
+            }
+            table.appendChild(tr);
+          }
+
+          filePreviewContent.appendChild(table);
+        } catch (err) {
+          filePreviewContent.textContent = 'Unable to parse Excel preview.';
+        }
+        showModal();
+        return;
+      }
+
+      filePreviewContent.textContent = 'Preview not available for this file type. Use Download to view.';
+      showModal();
+    }
+
+    function showModal() {
+      imagePreviewModal.classList.remove('hidden');
+      imagePreviewModal.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeImagePreview() {
+      imagePreviewModal.classList.add('hidden');
+      imagePreviewModal.setAttribute('aria-hidden', 'true');
+      imagePreviewImg.src = '';
+      imagePreviewImg.classList.remove('hidden');
+      imagePreviewTitle.textContent = '';
+      imagePreviewMeta.textContent = '';
+      filePreviewContent.innerHTML = '';
+      filePreviewBody.classList.add('hidden');
+    }
+
+    imagePreviewClose.addEventListener('click', closeImagePreview);
+    imagePreviewModal.addEventListener('click', (e) => {
+      if (e.target === imagePreviewModal) {
+        closeImagePreview();
+      }
+    });
+
+    // Add pasted screenshots/images directly into attachments
+    questionInput.addEventListener('paste', async (e) => {
+      try {
+        const items = (e.clipboardData && e.clipboardData.items) ? Array.from(e.clipboardData.items) : [];
+        const imageItems = items.filter(it => it.kind === 'file' && it.type && it.type.startsWith('image/'));
+        if (!imageItems.length) return;
+
+        e.preventDefault();
+
+        for (const item of imageItems) {
+          const file = item.getAsFile();
+          if (!file) continue;
+
+          const ext = (file.type && file.type.split('/')[1]) ? file.type.split('/')[1] : 'png';
+          const safeExt = ['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(ext) ? ext : 'png';
+          const fileName = `pasted_screenshot_${Date.now()}.${safeExt}`;
+
+          try {
+            const fileData = await readFileAsBase64(file);
+            attachedFiles.push({
+              name: fileName,
+              size: String(file.size),
+              type: file.type || `image/${safeExt}`,
+              data: fileData
+            });
+            addFileToPreview(fileName);
+          } catch (err) {
+            console.error('Error reading pasted image:', err);
+            alert('Failed to read pasted image.');
+          }
+        }
+
+        updateFilePreviewVisibility();
+      } catch (err) {
+        console.error('Paste handler error:', err);
+      }
+    });
+
+    // Get file icon based on file type
+    function getFileIcon(fileName) {
+      const ext = fileName.split('.').pop().toLowerCase();
+      const icons = {
+        'pdf': '📄',
+        'xlsx': '📊',
+        'xls': '📊',
+        'csv': '📊',
+        'png': '🖼️',
+        'jpg': '🖼️',
+        'jpeg': '🖼️',
+        'gif': '🖼️',
+        'txt': '📝',
+        'doc': '📄',
+        'docx': '📄'
+      };
+      return icons[ext] || '📎';
+    }
+
+    // Handle file input change
+    fileInput.addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files);
+      for (const file of files) {
+        // Check if file already added
+        if (attachedFiles.some(f => f.name === file.name && f.size === file.size)) {
+          continue;
+        }
+        
+        try {
+          const fileData = await readFileAsBase64(file);
+          attachedFiles.push({
+            name: file.name,
+            size: String(file.size),
+            type: file.type,
+            data: fileData
+          });
+          addFileToPreview(file.name);
+        } catch (err) {
+          console.error('Error reading file:', err);
+          alert(`Failed to read file: ${file.name}`);
+        }
+      }
+      fileInput.value = ''; // Reset input
+      updateFilePreviewVisibility();
+    });
+
+    // Read file as base64
+    function readFileAsBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          resolve(reader.result.split(',')[1]); // Get base64 part
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    // Add file to preview list
+    function addFileToPreview(fileName) {
+      const fileData = attachedFiles.find(f => f.name === fileName);
+      const sizeText = fileData ? formatFileSize(fileData.size) : '';
+      const fmtText = fileData ? getFileFormat(fileData) : '';
+      const metaText = [fmtText, sizeText].filter(Boolean).join(' • ');
+      const isImage = !!(fileData && fileData.type && fileData.type.startsWith('image/'));
+
+      const fileItem = document.createElement('div');
+      fileItem.className = 'file-item';
+      fileItem.innerHTML = `
+        <div class="file-item-name">
+          <span class="file-item-icon">${getFileIcon(fileName)}</span>
+          <div style="display:flex; flex-direction:column; min-width:0;">
+            <span class="file-item-text" title="${fileName}">${fileName}</span>
+            <span class="file-item-meta">${metaText}</span>
+          </div>
+        </div>
+        <div style="display:flex; align-items:center; gap:6px;">
+          <button type="button" class="file-item-preview" data-filename="${fileName}">Preview</button>
+          <button type="button" class="file-item-remove" data-filename="${fileName}">×</button>
+        </div>
+      `;
+
+      fileItem.addEventListener('click', (e) => {
+        const previewClicked = e.target && e.target.classList && e.target.classList.contains('file-item-preview');
+        if (!previewClicked) return;
+        const currentFileData = attachedFiles.find(f => f.name === fileName);
+        openFilePreview(currentFileData);
+      });
+      
+      const removeBtn = fileItem.querySelector('.file-item-remove');
+      removeBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        attachedFiles = attachedFiles.filter(f => f.name !== fileName);
+        fileItem.remove();
+        updateFilePreviewVisibility();
+      });
+      
+      fileList.appendChild(fileItem);
+    }
+
+    // Update file preview visibility
+    function updateFilePreviewVisibility() {
+      if (attachedFiles.length > 0) {
+        filePreview.classList.remove('hidden');
+      } else {
+        filePreview.classList.add('hidden');
+      }
+      
+      // Show/hide remove buttons based on file count
+      updateRemoveButtonsVisibility();
+    }
+
+    // Show remove buttons only when there are 2 or more files
+    function updateRemoveButtonsVisibility() {
+      const removeButtons = fileList.querySelectorAll('.file-item-remove');
+      removeButtons.forEach(btn => {
+        if (attachedFiles.length > 1) {
+          btn.classList.remove('hidden');
+        } else {
+          btn.classList.add('hidden');
+        }
+      });
+    }
+
+    // Upload button click handler
+    uploadFileBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      fileInput.click();
+    });
+
+    // Clear all files
+    clearFilesBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      attachedFiles = [];
+      fileList.innerHTML = '';
+      updateFilePreviewVisibility();
+      fileInput.value = '';
+    });
 
     // Animate "Thinking..." text
     function startThinkingAnimation(element) {
@@ -692,6 +1435,124 @@
       if (thinkingInterval) {
         clearInterval(thinkingInterval);
         thinkingInterval = null;
+      }
+    }
+
+    // Enhance code blocks with copy button
+    function enhanceCodeBlocks(container) {
+      const codeBlocks = container.querySelectorAll('pre code');
+      codeBlocks.forEach((codeBlock, index) => {
+        const pre = codeBlock.parentElement;
+        
+        // Skip if already enhanced
+        if (pre.querySelector('.code-header')) return;
+        
+        // Detect language from class name (marked.js adds language-xxx)
+        let language = 'code';
+        const classes = codeBlock.className.split(' ');
+        for (const cls of classes) {
+          if (cls.startsWith('language-')) {
+            language = cls.replace('language-', '');
+            break;
+          }
+        }
+        
+        // Create header
+        const header = document.createElement('div');
+        header.className = 'code-header';
+        
+        const langLabel = document.createElement('span');
+        langLabel.className = 'code-language';
+        langLabel.textContent = language;
+        
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'copy-code-btn';
+        copyBtn.innerHTML = '📋 Copy code';
+        copyBtn.onclick = async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const code = codeBlock.textContent;
+          
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            try {
+              await navigator.clipboard.writeText(code);
+              const originalText = copyBtn.innerHTML;
+              copyBtn.innerHTML = '✓ Copied!';
+              copyBtn.classList.add('copied');
+              setTimeout(() => {
+                copyBtn.innerHTML = originalText;
+                copyBtn.classList.remove('copied');
+              }, 2000);
+              return;
+            } catch (err) {
+              console.log('Clipboard API failed, trying fallback:', err);
+            }
+          }
+          
+          const textarea = document.createElement('textarea');
+          textarea.value = code;
+          document.body.appendChild(textarea);
+          textarea.select();
+          try {
+            document.execCommand('copy');
+            const originalText = copyBtn.innerHTML;
+            copyBtn.innerHTML = '✓ Copied!';
+            copyBtn.classList.add('copied');
+            setTimeout(() => {
+              copyBtn.innerHTML = originalText;
+              copyBtn.classList.remove('copied');
+            }, 2000);
+          } catch (err) {
+            console.error('Fallback copy failed:', err);
+          }
+          document.body.removeChild(textarea);
+        };
+        
+        header.appendChild(langLabel);
+        header.appendChild(copyBtn);
+        pre.insertBefore(header, codeBlock);
+      });
+    }
+
+    // Render markdown answer
+    function renderAnswer(markdown, targetBox) {
+      try {
+        let html = marked.parse(markdown);
+        
+        const hasStructuredSections = /^(Ticket type:|Title:|Product:|Service:)/m.test(markdown);
+        
+        if (hasStructuredSections) {
+          const parts = markdown.split(/^-----$/m);
+          if (parts.length >= 2) {
+            const responsePart = parts[0].trim();
+            const customerPart = parts.slice(1).join('\n-----\n').trim();
+            
+            const responseHtml = marked.parse(responsePart);
+            const responseDiv = document.createElement('div');
+            responseDiv.className = 'response-box';
+            responseDiv.innerHTML = responseHtml;
+            enhanceCodeBlocks(responseDiv);
+            targetBox.appendChild(responseDiv);
+            
+            if (customerPart) {
+              const customerHtml = marked.parse(customerPart);
+              const customerDiv = document.createElement('div');
+              customerDiv.className = 'customer-box';
+              customerDiv.innerHTML = customerHtml;
+              enhanceCodeBlocks(customerDiv);
+              targetBox.appendChild(customerDiv);
+            }
+            
+            return;
+          }
+        }
+        
+        targetBox.innerHTML = html;
+        enhanceCodeBlocks(targetBox);
+      } catch (e) {
+        console.error('Error rendering markdown:', e);
+        targetBox.innerHTML = '<p>' + markdown.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</p>';
       }
     }
 
@@ -924,6 +1785,24 @@
       }
     });
 
+    // Auto-grow textarea height as user types
+    questionInput.addEventListener('input', (e) => {
+      e.target.style.height = 'auto';
+      e.target.style.height = Math.min(e.target.scrollHeight, 300) + 'px';
+      
+      // Show scrollbar only if content exceeds max height
+      if (e.target.scrollHeight > 300) {
+        e.target.style.overflowY = 'auto';
+      } else {
+        e.target.style.overflowY = 'hidden';
+      }
+    });
+
+    // Reset textarea height after submission
+    form.addEventListener('submit', () => {
+      questionInput.style.height = 'auto';
+    });
+
     // Initial load
     loadTickets().then(updateClearVisibility);
 
@@ -986,15 +1865,29 @@
       currentController = new AbortController();
 
       try {
+        const requestBody = {
+          question: question,
+          top_k: 5,
+          ticket_url: ticketSelect.value || null,
+          is_followup: !!(ticketSelect.value && ticketFirstQuestionAsked[ticketSelect.value])
+        };
+        
+        // Add attached files if any (copy array before clearing)
+        if (attachedFiles.length > 0) {
+          requestBody.files = [...attachedFiles];
+        }
+        
+        // Clear attached files AFTER copying them to request
+        const hadFiles = attachedFiles.length > 0;
+        attachedFiles = [];
+        fileList.innerHTML = '';
+        filePreview.classList.add('hidden');
+        fileInput.value = '';
+
         const resp = await fetch('/adminchat/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            question: question,
-            top_k: 5,
-            ticket_url: ticketSelect.value || null,
-            is_followup: !!(ticketSelect.value && ticketFirstQuestionAsked[ticketSelect.value])
-          }),
+          body: JSON.stringify(requestBody),
           signal: currentController.signal
         });
 
