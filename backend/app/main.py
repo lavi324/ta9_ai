@@ -62,6 +62,9 @@ EMBED_PREVIEW_COUNT = int(os.getenv("EMBED_PREVIEW_COUNT", "8"))
 # SINGLE ROOT DIRECTORY: all .md files are under /app/wiki_files
 WIKI_ROOT = os.getenv("WIKI_DIR", "/app/wiki_files")
 
+# Directory exposed for "Add Knowledge" server file listing
+KNOWLEDGE_DIR = os.getenv("KNOWLEDGE_DIR", WIKI_ROOT)
+
 CHROMA_DIR = os.getenv("CHROMA_DIR", "/app/chroma_db")
 
 CHUNK_SIZE = 1000
@@ -588,6 +591,73 @@ def build_file_context(files: Optional[List[Dict[str, str]]], describe_image_fun
     combined = "\n\n---FILE SEPARATOR---\n\n".join(file_contents)
     print(f"[FILE] Extracted content from {len(files)} files, total length={len(combined)}")
     return combined
+
+
+def _safe_resolve_path(root_dir: str, rel_path: str) -> str:
+    """Resolve a relative path safely within root_dir."""
+    root_abs = os.path.abspath(root_dir)
+    candidate = os.path.abspath(os.path.join(root_abs, rel_path))
+    if not candidate.startswith(root_abs + os.sep) and candidate != root_abs:
+        raise RuntimeError("Invalid path outside knowledge directory")
+    return candidate
+
+
+def _list_server_files(root_dir: str) -> List[dict]:
+    """List files under the knowledge directory for server-file selection."""
+    allowed_exts = {
+        ".md", ".txt", ".pdf", ".doc", ".docx", ".csv",
+        ".xlsx", ".xls", ".xlsm", ".xltx", ".xltm",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"
+    }
+    files = []
+    root_abs = os.path.abspath(root_dir)
+    for base, _, names in os.walk(root_abs):
+        for name in names:
+            ext = os.path.splitext(name)[1].lower()
+            if allowed_exts and ext not in allowed_exts:
+                continue
+            abs_path = os.path.join(base, name)
+            rel_path = os.path.relpath(abs_path, root_abs)
+            try:
+                stat = os.stat(abs_path)
+                files.append({
+                    "path": rel_path.replace("\\", "/"),
+                    "size": stat.st_size,
+                    "modified": int(stat.st_mtime),
+                })
+            except Exception:
+                continue
+    files.sort(key=lambda x: x["path"].lower())
+    return files
+
+
+def _process_local_file(file_path: str) -> str:
+    """Process a local file path into text for ingestion."""
+    file_name = os.path.basename(file_path)
+    ext = os.path.splitext(file_name)[1].lower().lstrip(".")
+    try:
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+    except Exception as e:
+        return f"[ERROR] Failed to read file {file_name}: {e}"
+
+    image_exts = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"}
+    excel_exts = {"xlsx", "xls", "xlsm", "xltx", "xltm"}
+
+    if ext in image_exts:
+        desc = _describe_local_image_via_vision(file_path)
+        if not desc:
+            return f"[Image file {file_name} - analysis unavailable]"
+        return f"[Image Content from {file_name}]\n{desc}"
+    if ext in excel_exts:
+        return _process_excel_file(file_name, file_bytes)
+    if ext == "csv":
+        return _process_csv_file(file_name, file_bytes)
+    if ext == "pdf":
+        return _process_pdf_file(file_name, file_bytes)
+    if ext in {"doc", "docx"}:
+        return _process_word_file(file_name, file_bytes)
+    return _process_text_file(file_name, file_bytes)
 
 
 # ---------------------------------------------------------------------
@@ -1390,6 +1460,20 @@ def _is_foundational_question(question: str) -> bool:
     return any(t in q for t in foundational_terms)
 
 
+def _has_ta9_context(text: str) -> bool:
+    """Heuristic check to ensure uploaded content relates to TA9/IntSight."""
+    if not text:
+        return False
+    t = text.lower()
+    ta9_terms = [
+        "ta9", "intsight", "int-sight", "admin studio", "data model",
+        "dashboard", "link analysis", "federated search", "cases",
+        "entities", "geospatial", "timeline", "detection", "criteria",
+        "platform", "system", "modules", "capabilities"
+    ]
+    return any(term in t for term in ta9_terms)
+
+
 def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
     """Generate a small set of semantically-equivalent queries for multi-retrieval."""
     variants = []
@@ -1526,6 +1610,10 @@ def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
     for tok in set(q_tokens):
         if tok in d:
             score += 0.5
+
+    # Priority boost for user-added knowledge
+    if meta and meta.get("priority") == "user_upload":
+        score += 8.0
 
     return score
 
@@ -1768,6 +1856,13 @@ class ChatRequest(BaseModel):
     files: Optional[List[Dict[str, str]]] = None  # List of {name, type, data} where data is base64
 
 
+class KnowledgeAddRequest(BaseModel):
+    mode: str  # "server_file" or "content"
+    path: Optional[str] = None
+    text: Optional[str] = None
+    files: Optional[List[Dict[str, str]]] = None
+
+
 class ChatResponse(BaseModel):
     answer: str
     sources: List[str]
@@ -1820,6 +1915,100 @@ def azure_tickets(tag: str = "CC"):
         return {"items": items}
     except Exception as exc:
         print(f"[API][ADO][ERROR] {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/knowledge/files")
+def knowledge_files():
+    """List server files available for knowledge ingestion."""
+    try:
+        files = _list_server_files(KNOWLEDGE_DIR)
+        return {"files": files, "root": KNOWLEDGE_DIR}
+    except Exception as exc:
+        print(f"[API][KNOWLEDGE][ERROR] list files failed: {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/knowledge/add")
+def knowledge_add(req: KnowledgeAddRequest):
+    """Add a knowledge item from server file or user-provided content."""
+    try:
+        mode = (req.mode or "").strip().lower()
+        content_text = ""
+        source_name = ""
+
+        if mode == "server_file":
+            if not req.path:
+                raise HTTPException(status_code=400, detail="path is required for server_file")
+            abs_path = _safe_resolve_path(KNOWLEDGE_DIR, req.path)
+            content_text = _process_local_file(abs_path)
+            source_name = f"user:upload:{req.path}"
+        elif mode == "content":
+            text_part = (req.text or "").strip()
+            file_part = ""
+            if req.files:
+                file_part = build_file_context(req.files, describe_image_func=_describe_image_via_vision)
+            content_text = "\n\n".join([p for p in [text_part, file_part] if p])
+            source_name = f"user:content:{uuid.uuid4()}"
+        else:
+            raise HTTPException(status_code=400, detail="mode must be server_file or content")
+
+        if not content_text.strip():
+            raise HTTPException(status_code=400, detail="No content to ingest")
+
+        # TA9 context validation
+        if not _has_ta9_context(content_text):
+            return {
+                "approved": False,
+                "message": "Content rejected: no TA9/IntSight context detected.",
+            }
+
+        # Chunk + embed + add to collection with priority metadata
+        chunks = chunk_text(content_text)
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No chunks generated from content")
+
+        ids: List[str] = []
+        docs: List[str] = []
+        metas: List[dict] = []
+        embeds: List[List[float]] = []
+        uploaded_at = datetime.utcnow().isoformat() + "Z"
+
+        for i, ch in enumerate(chunks):
+            try:
+                emb = embed_text(ch)
+            except Exception as e:
+                print(f"[KNOWLEDGE][ERROR] Embedding failed chunk={i}: {e}")
+                traceback.print_exc()
+                continue
+            ids.append(str(uuid.uuid4()))
+            docs.append(ch)
+            metas.append({
+                "source": source_name,
+                "chunk": i,
+                "priority": "user_upload",
+                "uploaded_at": uploaded_at,
+                "mode": mode,
+                "path": req.path,
+            })
+            embeds.append(emb)
+
+        if not ids:
+            raise HTTPException(status_code=500, detail="Failed to embed any chunks")
+
+        collection.add(ids=ids, documents=docs, metadatas=metas, embeddings=embeds)
+        return {
+            "approved": True,
+            "message": "Knowledge added successfully and prioritized.",
+            "chunks_added": len(ids),
+            "source": source_name,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[API][KNOWLEDGE][ERROR] add failed: {exc}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
 

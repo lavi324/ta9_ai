@@ -179,6 +179,170 @@
       min-height: 56px;
     }
 
+    .knowledge-menu-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+    }
+
+    .knowledge-btn {
+      background: #0c3d6b;
+      color: #ffffff;
+      border: none;
+      border-radius: 999px;
+      padding: 10px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+      box-shadow: 0 6px 14px rgba(12, 61, 107, 0.2);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+    }
+
+    .knowledge-btn:hover {
+      background: #0a2f53;
+      transform: translateY(-1px);
+    }
+
+    .knowledge-menu {
+      position: absolute;
+      left: 0;
+      bottom: 52px;
+      background: #ffffff;
+      border: 1px solid #d6e1ef;
+      border-radius: 12px;
+      box-shadow: 0 12px 30px rgba(12, 29, 55, 0.18);
+      min-width: 220px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      z-index: 1200;
+    }
+
+    .knowledge-menu button {
+      background: #f3f6fb;
+      border: 1px solid #d6e1ef;
+      border-radius: 10px;
+      padding: 10px 12px;
+      text-align: left;
+      font-size: 13px;
+      color: #10243f;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .knowledge-menu button:hover {
+      background: #e8f0fb;
+      border-color: #0c3d6b;
+      color: #0c3d6b;
+    }
+
+    .knowledge-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.45);
+      backdrop-filter: blur(4px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 2000;
+      padding: 20px;
+    }
+
+    .knowledge-modal {
+      background: #ffffff;
+      border-radius: 18px;
+      padding: 22px;
+      width: min(720px, 92vw);
+      box-shadow: 0 30px 80px rgba(12, 29, 55, 0.3);
+      border: 1px solid #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .knowledge-modal h3 {
+      font-size: 18px;
+      color: #0c1d37;
+      margin: 0;
+    }
+
+    .knowledge-modal .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    .knowledge-list {
+      max-height: 280px;
+      overflow-y: auto;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      background: #f8fafc;
+    }
+
+    .knowledge-item {
+      background: #ffffff;
+      border: 1px solid #dfe7f2;
+      border-radius: 10px;
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+      transition: border 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .knowledge-item:hover {
+      border-color: #0c3d6b;
+      box-shadow: 0 6px 14px rgba(12, 61, 107, 0.12);
+    }
+
+    .knowledge-item small {
+      color: #6b7280;
+    }
+
+    .knowledge-textarea {
+      width: 100%;
+      min-height: 160px;
+      border-radius: 12px;
+      border: 1px solid #d6e1ef;
+      padding: 12px;
+      font-size: 14px;
+      line-height: 1.6;
+      resize: vertical;
+    }
+
+    .knowledge-toast {
+      position: fixed;
+      top: 24px;
+      right: 24px;
+      background: #0c3d6b;
+      color: #ffffff;
+      padding: 12px 16px;
+      border-radius: 12px;
+      box-shadow: 0 12px 30px rgba(12, 29, 55, 0.3);
+      z-index: 3000;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      max-width: 320px;
+    }
+
+    .knowledge-toast.error {
+      background: #b42318;
+    }
+
     .input-row:focus-within {
       border-color: #9ca3af;
       box-shadow: 0 0 10px rgba(0, 0, 0, 0.15);
@@ -960,6 +1124,13 @@
 
     <div class="input-dock">
       <form id="chat-form" class="input-row">
+        <div class="knowledge-menu-wrap">
+          <button id="knowledge-btn" type="button" class="knowledge-btn">Add Knowledge ▾</button>
+          <div id="knowledge-menu" class="knowledge-menu hidden">
+            <button id="knowledge-upload-option" type="button">Upload a file</button>
+            <button id="knowledge-content-option" type="button">Add Content</button>
+          </div>
+        </div>
         <button id="upload-file-btn" type="button" class="file-upload-btn" title="Upload files (images, Excel, PDF, etc.)">
           <span>+</span>
         </button>
@@ -1004,6 +1175,34 @@
     </div>
   </div>
 
+  <div id="knowledge-file-backdrop" class="knowledge-modal-backdrop hidden" aria-hidden="true">
+    <div class="knowledge-modal">
+      <h3>Select a server file</h3>
+      <input id="knowledge-search" type="text" placeholder="Search files..." class="knowledge-textarea" style="min-height:44px;" />
+      <div id="knowledge-file-list" class="knowledge-list"></div>
+      <div class="modal-actions">
+        <button id="knowledge-file-cancel" type="button" class="ghost-btn">Cancel</button>
+        <button id="knowledge-file-add" type="button" class="btn-primary" style="border-radius:10px; width:auto; padding:10px 16px;">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="knowledge-content-backdrop" class="knowledge-modal-backdrop hidden" aria-hidden="true">
+    <div class="knowledge-modal">
+      <h3>Add TA9 knowledge</h3>
+      <textarea id="knowledge-content-text" class="knowledge-textarea" placeholder="Write or paste content here..."></textarea>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <button id="knowledge-content-upload" type="button" class="ghost-btn">Add images</button>
+        <input id="knowledge-content-file" type="file" multiple accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff" style="display:none;">
+        <span id="knowledge-content-meta" style="font-size:12px; color:#6b7280;"></span>
+      </div>
+      <div class="modal-actions">
+        <button id="knowledge-content-cancel" type="button" class="ghost-btn">Cancel</button>
+        <button id="knowledge-content-add" type="button" class="btn-primary" style="border-radius:10px; width:auto; padding:10px 16px;">Add</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const answerBox = document.getElementById('answer-box');
     const form = document.getElementById('chat-form');
@@ -1030,16 +1229,122 @@
     const logoImg = document.querySelector('.logo');
     const filePreviewBody = document.getElementById('file-preview-body');
     const filePreviewContent = document.getElementById('file-preview-content');
+    const knowledgeBtn = document.getElementById('knowledge-btn');
+    const knowledgeMenu = document.getElementById('knowledge-menu');
+    const knowledgeUploadOption = document.getElementById('knowledge-upload-option');
+    const knowledgeContentOption = document.getElementById('knowledge-content-option');
+    const knowledgeFileBackdrop = document.getElementById('knowledge-file-backdrop');
+    const knowledgeFileList = document.getElementById('knowledge-file-list');
+    const knowledgeFileCancel = document.getElementById('knowledge-file-cancel');
+    const knowledgeFileAdd = document.getElementById('knowledge-file-add');
+    const knowledgeSearch = document.getElementById('knowledge-search');
+    const knowledgeContentBackdrop = document.getElementById('knowledge-content-backdrop');
+    const knowledgeContentText = document.getElementById('knowledge-content-text');
+    const knowledgeContentUpload = document.getElementById('knowledge-content-upload');
+    const knowledgeContentFile = document.getElementById('knowledge-content-file');
+    const knowledgeContentAdd = document.getElementById('knowledge-content-add');
+    const knowledgeContentCancel = document.getElementById('knowledge-content-cancel');
+    const knowledgeContentMeta = document.getElementById('knowledge-content-meta');
 
     let currentController = null;
     let ticketFirstQuestionAsked = {}; // Track if first question was asked for each ticket URL
     let lastSelectedTicket = null; // Track the last selected ticket to detect changes
     let thinkingInterval = null; // Track thinking animation interval
     let attachedFiles = []; // Store file data
+    let knowledgeFiles = [];
+    let selectedKnowledgePath = null;
+    let knowledgeImages = [];
 
     if (logoImg) {
       logoImg.addEventListener('click', () => {
         window.location.reload();
+      });
+    }
+
+    function showKnowledgeToast(message, isError) {
+      const toast = document.createElement('div');
+      toast.className = 'knowledge-toast' + (isError ? ' error' : '');
+      toast.textContent = message;
+      document.body.appendChild(toast);
+      setTimeout(() => {
+        toast.remove();
+      }, 3500);
+    }
+
+    function toggleKnowledgeMenu(show) {
+      if (show) {
+        knowledgeMenu.classList.remove('hidden');
+      } else {
+        knowledgeMenu.classList.add('hidden');
+      }
+    }
+
+    function openKnowledgeFileModal() {
+      knowledgeFileBackdrop.classList.remove('hidden');
+      knowledgeFileBackdrop.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeKnowledgeFileModal() {
+      knowledgeFileBackdrop.classList.add('hidden');
+      knowledgeFileBackdrop.setAttribute('aria-hidden', 'true');
+      selectedKnowledgePath = null;
+    }
+
+    function openKnowledgeContentModal() {
+      knowledgeContentBackdrop.classList.remove('hidden');
+      knowledgeContentBackdrop.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeKnowledgeContentModal() {
+      knowledgeContentBackdrop.classList.add('hidden');
+      knowledgeContentBackdrop.setAttribute('aria-hidden', 'true');
+      knowledgeContentText.value = '';
+      knowledgeImages = [];
+      knowledgeContentMeta.textContent = '';
+      knowledgeContentFile.value = '';
+    }
+
+    async function loadKnowledgeFiles() {
+      try {
+        const resp = await fetch('/adminchat/api/knowledge/files');
+        if (!resp.ok) {
+          throw new Error('Failed to load server files');
+        }
+        const data = await resp.json();
+        knowledgeFiles = (data && data.files) || [];
+        renderKnowledgeFileList(knowledgeFiles);
+      } catch (err) {
+        console.error('Knowledge files load error:', err);
+        showKnowledgeToast('Failed to load server files.', true);
+      }
+    }
+
+    function renderKnowledgeFileList(files) {
+      knowledgeFileList.innerHTML = '';
+      if (!files.length) {
+        const empty = document.createElement('div');
+        empty.style.padding = '10px';
+        empty.style.color = '#6b7280';
+        empty.textContent = 'No files found in the knowledge directory.';
+        knowledgeFileList.appendChild(empty);
+        return;
+      }
+      files.forEach((file) => {
+        const item = document.createElement('div');
+        item.className = 'knowledge-item';
+        item.innerHTML = `
+          <input type="radio" name="knowledge-file" style="accent-color:#0c3d6b;" />
+          <div style="display:flex; flex-direction:column; gap:2px;">
+            <strong style="font-size:13px;">${file.path}</strong>
+            <small>${formatFileSize(file.size || 0)}</small>
+          </div>
+        `;
+        item.addEventListener('click', () => {
+          selectedKnowledgePath = file.path;
+          knowledgeFileList.querySelectorAll('input[type="radio"]').forEach(r => r.checked = false);
+          item.querySelector('input').checked = true;
+        });
+        knowledgeFileList.appendChild(item);
       });
     }
 
@@ -1339,6 +1644,139 @@
         reader.readAsDataURL(file);
       });
     }
+
+    knowledgeBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const isHidden = knowledgeMenu.classList.contains('hidden');
+      toggleKnowledgeMenu(isHidden);
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!knowledgeMenu.contains(e.target) && !knowledgeBtn.contains(e.target)) {
+        toggleKnowledgeMenu(false);
+      }
+    });
+
+    knowledgeUploadOption.addEventListener('click', async () => {
+      toggleKnowledgeMenu(false);
+      await loadKnowledgeFiles();
+      openKnowledgeFileModal();
+    });
+
+    knowledgeContentOption.addEventListener('click', () => {
+      toggleKnowledgeMenu(false);
+      openKnowledgeContentModal();
+    });
+
+    knowledgeFileCancel.addEventListener('click', closeKnowledgeFileModal);
+    knowledgeFileBackdrop.addEventListener('click', (e) => {
+      if (e.target === knowledgeFileBackdrop) closeKnowledgeFileModal();
+    });
+
+    knowledgeContentCancel.addEventListener('click', closeKnowledgeContentModal);
+    knowledgeContentBackdrop.addEventListener('click', (e) => {
+      if (e.target === knowledgeContentBackdrop) closeKnowledgeContentModal();
+    });
+
+    knowledgeSearch.addEventListener('input', (e) => {
+      const term = e.target.value.toLowerCase().trim();
+      const filtered = knowledgeFiles.filter(f => f.path.toLowerCase().includes(term));
+      renderKnowledgeFileList(filtered);
+    });
+
+    knowledgeFileAdd.addEventListener('click', async () => {
+      if (!selectedKnowledgePath) {
+        showKnowledgeToast('Please select a file.', true);
+        return;
+      }
+      try {
+        const resp = await fetch('/adminchat/api/knowledge/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'server_file', path: selectedKnowledgePath })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error(data && data.detail ? data.detail : 'Upload failed');
+        }
+        if (data.approved) {
+          showKnowledgeToast(data.message || 'Knowledge added.', false);
+          closeKnowledgeFileModal();
+        } else {
+          showKnowledgeToast(data.message || 'Content rejected.', true);
+        }
+      } catch (err) {
+        console.error('Knowledge add error:', err);
+        showKnowledgeToast('Failed to add knowledge.', true);
+      }
+    });
+
+    knowledgeContentUpload.addEventListener('click', () => {
+      knowledgeContentFile.click();
+    });
+
+    knowledgeContentFile.addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files || []);
+      for (const file of files) {
+        if (!file.type.startsWith('image/')) continue;
+        const data = await readFileAsBase64(file);
+        knowledgeImages.push({
+          name: file.name,
+          size: String(file.size),
+          type: file.type,
+          data
+        });
+      }
+      knowledgeContentMeta.textContent = knowledgeImages.length ? `${knowledgeImages.length} image(s) attached` : '';
+      knowledgeContentFile.value = '';
+    });
+
+    knowledgeContentText.addEventListener('paste', async (e) => {
+      const items = (e.clipboardData && e.clipboardData.items) ? Array.from(e.clipboardData.items) : [];
+      const imageItems = items.filter(it => it.kind === 'file' && it.type && it.type.startsWith('image/'));
+      if (!imageItems.length) return;
+      e.preventDefault();
+      for (const item of imageItems) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        const data = await readFileAsBase64(file);
+        knowledgeImages.push({
+          name: `pasted_${Date.now()}.png`,
+          size: String(file.size),
+          type: file.type || 'image/png',
+          data
+        });
+      }
+      knowledgeContentMeta.textContent = knowledgeImages.length ? `${knowledgeImages.length} image(s) attached` : '';
+    });
+
+    knowledgeContentAdd.addEventListener('click', async () => {
+      const text = knowledgeContentText.value.trim();
+      if (!text && !knowledgeImages.length) {
+        showKnowledgeToast('Add some text or images first.', true);
+        return;
+      }
+      try {
+        const resp = await fetch('/adminchat/api/knowledge/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'content', text, files: knowledgeImages })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error(data && data.detail ? data.detail : 'Upload failed');
+        }
+        if (data.approved) {
+          showKnowledgeToast(data.message || 'Knowledge added.', false);
+          closeKnowledgeContentModal();
+        } else {
+          showKnowledgeToast(data.message || 'Content rejected.', true);
+        }
+      } catch (err) {
+        console.error('Knowledge content error:', err);
+        showKnowledgeToast('Failed to add knowledge.', true);
+      }
+    });
 
     // Add file to preview list
     function addFileToPreview(fileName) {
