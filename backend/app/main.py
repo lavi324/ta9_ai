@@ -1461,17 +1461,73 @@ def _is_foundational_question(question: str) -> bool:
 
 
 def _has_ta9_context(text: str) -> bool:
-    """Heuristic check to ensure uploaded content relates to TA9/IntSight."""
+    """Strict heuristic gate: only strong TA9/IntSight signals count."""
     if not text:
         return False
     t = text.lower()
-    ta9_terms = [
-        "ta9", "intsight", "int-sight", "admin studio", "data model",
-        "dashboard", "link analysis", "federated search", "cases",
-        "entities", "geospatial", "timeline", "detection", "criteria",
-        "platform", "system", "modules", "capabilities"
+    strong_terms = [
+        "ta9", "intsight", "int-sight", "admin studio", "federated search",
+        "link analysis", "geospatial", "detection", "entity profile", "case management",
+        "data model", "investigation graph", "watchlist", "alert rule"
     ]
-    return any(term in t for term in ta9_terms)
+    matched = [term for term in strong_terms if term in t]
+    return len(matched) >= 1
+
+
+def _validate_ta9_knowledge_content(content_text: str) -> Tuple[bool, str]:
+    """Strict validation for TA9 knowledge ingestion with explicit rejection reason."""
+    text = (content_text or "").strip()
+    if not text:
+        return False, "The content is empty. Please provide TA9-related details before adding knowledge."
+
+    fallback_reason = (
+        "The content was rejected because it is not specific to TA9/IntSight. "
+        "Please include concrete TA9 entities such as modules, fields, workflows, errors, "
+        "or product procedures instead of general information."
+    )
+
+    # Hard heuristic gate (strict)
+    has_strong_ta9_signal = _has_ta9_context(text)
+    if not has_strong_ta9_signal and not OPENAI_API_KEY:
+        return False, fallback_reason
+
+    # LLM gate for meaningfulness and domain relevance (authoritative verdict)
+    if OPENAI_API_KEY:
+        prompt = (
+            "You are a strict validator for TA9/IntSight RAG ingestion. "
+            "Decide whether the submitted content is meaningful and domain-relevant for TA9.\n\n"
+            "Approval criteria (ALL required):\n"
+            "1) Clearly tied to TA9/IntSight domain or features.\n"
+            "2) Contains concrete, factual, technical/helpful details (not generic narrative).\n"
+            "3) Useful for support retrieval (steps, fields, modules, behavior, constraints, errors, entities, or procedures).\n\n"
+            "If not approved, explain briefly what is missing.\n"
+            "Return ONLY valid JSON with this exact schema:\n"
+            "{\"approved\": true|false, \"reason\": \"short reason\"}\n\n"
+            f"Content to validate:\n{text}"
+        )
+        try:
+            verdict_raw = (call_llm(prompt, temperature=0.0) or "").strip()
+            verdict_text = verdict_raw
+            if verdict_text.startswith("```"):
+                verdict_text = re.sub(r"^```(?:json)?\s*", "", verdict_text)
+                verdict_text = re.sub(r"\s*```$", "", verdict_text).strip()
+            parsed = json.loads(verdict_text)
+            approved = bool(parsed.get("approved", False))
+            reason = str(parsed.get("reason") or "").strip()
+            if approved:
+                # Keep strict posture: if LLM approves but no strong TA9 signal at all, reject.
+                if not has_strong_ta9_signal:
+                    return False, (
+                        "The content appears structured but does not include explicit TA9/IntSight identifiers. "
+                        "Please mention TA9 modules, entities, workflows, or product-specific terms."
+                    )
+                return True, "Approved"
+            return False, reason or fallback_reason
+        except Exception as e:
+            print(f"[KNOWLEDGE][WARN] LLM validation parse/exec failed: {e}")
+            return (False, fallback_reason) if not has_strong_ta9_signal else (True, "Approved")
+
+    return (True, "Approved") if has_strong_ta9_signal else (False, fallback_reason)
 
 
 def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
@@ -1493,128 +1549,63 @@ def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
 
 def augment_question(question: str) -> str:
     """
-    Add synonyms / hints so embeddings are more likely to match
-    the right wiki pages, especially for internal jargon.
+    Minimal augmentation: only expand very short questions with common synonyms.
+    Keep general-purpose for any domain.
     """
-    q_low = question.lower()
-    extras: List[str] = []
-
-    # --- Ops / DevOps / Infra (NEW) ---
-    if any(k in q_low for k in ["wildfly", "jboss", "standalone.xml", "domain.xml", "deployment", "redeploy", "undeploy"]):
-        extras.append(
-            "WildFly, JBoss, redeploy, deployment, undeploy, "
-            "jboss-cli, management console, standalone.xml, domain mode"
-        )
-
-    if any(k in q_low for k in ["nginx", "reverse proxy", "proxy_pass", "ingress", "load balancer"]):
-        extras.append(
-            "nginx, reverse proxy, proxy_pass, ingress, load balancer"
-        )
-
-    if any(k in q_low for k in ["docker", "swarm", "stack", "service", "container", "compose"]):
-        extras.append(
-            "docker, docker swarm, stack deploy, docker service, container logs"
-        )
-
-    if any(k in q_low for k in ["systemctl", "service", "restart", "reload", "daemon", "linux", "bash"]):
-        extras.append(
-            "systemctl, restart service, reload, linux administration, bash scripts"
-        )
-
-    # --- Your existing Image / Criteria domain ---
-    if "image" in q_low or "picture" in q_low or "photo" in q_low:
-        extras.append(
-            "image upload, image field, upload image, screenshot, picture, "
-            "configure image field in data model, admin studio image configuration"
-        )
-
-    if "criteria" in q_low or "field" in q_low:
-        extras.append(
-            "criteria = data model field, detection field, condition field, "
-            "configure detection image field in data model"
-        )
-
-    if "dm" in q_low or "data model" in q_low:
-        extras.append(
-            "DM = data model, data model configuration, model fields, "
-            "admin studio data model editor"
-        )
-
-    if "intsight" in q_low or "ta9" in q_low:
-        extras.append(
-            "IntSight platform overview, TA9 company overview, flagship system, "
-            "big data intelligence system"
-        )
-
-    # --- Helpful business keywords (NEW) ---
-    if "deloitte" in q_low:
-        extras.append(
-            "Deloitte dashboard, Deloitte project overview, Deloitte data collection process, Deloitte PRD"
-        )
-
-    if not extras:
-        print("[AUGMENT] No extra synonyms added")
+    if not question or len(question.split()) > 15:
+        # Only augment genuinely short queries
         return question
-
-    print(f"[AUGMENT] Extras added: {extras}")
-    augmented = question + "\n\nExpanded synonyms & internal context:\n" + " ".join(extras)
-    print(f"[AUGMENT] Augmented question from len={len(question)} to len={len(augmented)}")
+    
+    q_low = question.lower()
+    synonyms: List[str] = []
+    
+    # Minimal, general augmentation for short queries
+    if "how" in q_low or "add" in q_low or "create" in q_low:
+        synonyms.extend(["how to", "instructions", "steps", "procedure", "create", "add", "setup", "configure"])
+    
+    if "what" in q_low:
+        synonyms.extend(["definition", "explanation", "description", "overview"])
+    
+    if "help" in q_low or "issue" in q_low or "problem" in q_low:
+        synonyms.extend(["troubleshooting", "solution", "fix", "resolve", "error"])
+    
+    if not synonyms:
+        return question
+    
+    augmented = question + "\n" + " ".join(set(synonyms))
     return augmented
 
 
 def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
     """
-    Heuristic lexical + domain score.
-    Higher score = more relevant.
+    Simple, general-purpose lexical score.
+    Avoid domain-specific biases; reward token overlap and user-added content.
     """
-    # Safety: handle None doc from ChromaDB
     if doc is None:
         doc = ""
+    
     q = question.lower()
     d = doc.lower()
     source = str(meta.get("source", "")).lower()
-
     score = 0.0
-
-    concepts = [
-        (["image", "picture", "photo", "screenshot"], ["image", "picture", "photo", "screenshot"], 5.0),
-        (["criteria", "criterion", "field"], ["criteria", "criterion", "field", "condition"], 4.0),
-        (["4.x", "4x"], ["4.x", "4x"], 3.0),
-        (["detection"], ["detection"], 3.0),
-        (["dm", "data model"], ["data model", "dm", "model"], 2.5),
-        (["admin studio", "admin"], ["admin studio", "developer environment", "configuration"], 2.0),
-
-        # NEW: ops/devops boosts
-        (["wildfly", "jboss", "redeploy", "deployment"], ["wildfly", "jboss", "redeploy", "deploy", "deployment"], 3.5),
-        (["nginx", "proxy", "reverse"], ["nginx", "proxy", "reverse"], 2.5),
-        (["docker", "swarm", "stack", "service"], ["docker", "swarm", "stack", "service"], 2.5),
-        (["deloitte"], ["deloitte"], 4.0),
-    ]
-
-    for q_terms, d_terms, w in concepts:
-        if any(t in q for t in q_terms) and any(t in d for t in d_terms):
-            score += w
-
-    if "image" in q and "criteria" in q and "add-an-image-to-criteria" in source:
-        score += 10.0
-
-    # No root-doc boost to keep all files treated equally
-
-    # Small source-name boost if query tokens appear in filename
-    for tok in set([t for t in q.replace("\n", " ").split() if len(t) > 3]):
+    
+    # Basic lexical overlap reward
+    q_tokens = set([t for t in q.replace("\n", " ").split() if len(t) > 3])
+    matched = sum(1 for t in q_tokens if t in d)
+    if matched > 0:
+        score += min(3.0, matched * 0.5)
+    
+    # Source name match
+    for tok in q_tokens:
         if tok in source:
-            score += 0.7
-
-    # Light lexical overlap
-    q_tokens = [t for t in q.replace("\n", " ").split() if len(t) > 3]
-    for tok in set(q_tokens):
-        if tok in d:
-            score += 0.5
-
-    # Priority boost for user-added knowledge
-    if meta and meta.get("priority") == "user_upload":
-        score += 8.0
-
+            score += 1.0
+    
+    # User-added content priority
+    if meta and meta.get("priority") in ["user_upload", "user_upload_high"]:
+        score += 2.0
+    if meta and meta.get("supersedes"):
+        score += 1.0
+    
     return score
 
 
@@ -1644,13 +1635,14 @@ def _smart_deduplicate_and_diversify(
     distances: Optional[List[float]] = None,
     ids: Optional[List[str]] = None,
     similarity_threshold: float = 0.65,
-    max_chunks_per_source: int = 2,
+    max_chunks_per_source: int = 5,
 ) -> Tuple[List[str], List[dict], List[float], List[str]]:
     """
-    Deduplicate results by:
-    1. Removing near-duplicate documents (content similarity > threshold)
-    2. Limiting consecutive chunks from same source
-    3. Preferring diverse sources for better context
+    Intelligent deduplication:
+    1. Removes near-duplicate documents (content similarity > threshold)
+    2. Limits chunks per source while allowing more for comprehensive topics
+    3. Prefers diverse sources for better context
+    4. Adaptive thresholds based on document characteristics
     
     Returns deduplicated and diversified lists.
     """
@@ -1670,20 +1662,33 @@ def _smart_deduplicate_and_diversify(
             continue
         
         source = meta.get("source", "unknown") if meta else "unknown"
-        chunk_num = meta.get("chunk", 0) if meta else 0
-        source_key = source.split()[0]  # Get base source name (e.g., "ado:learn:123" → "ado:learn:123")
+        col = meta.get("collection", "unknown") if meta else "unknown"
+        source_key = source  # Use full source as key
+        
+        # Memory collection gets priority: allow more chunks from memory sources
+        max_allowed = 5 if col == "user_knowledge" else max_chunks_per_source
         
         # Check if we've already included max chunks from this source
-        if source_key in source_chunk_count and source_chunk_count[source_key] >= max_chunks_per_source:
-            print(f"[DEDUP] Skipping doc idx={idx} source={source} (already have {max_chunks_per_source} chunks from this source)")
+        if source_key in source_chunk_count and source_chunk_count[source_key] >= max_allowed:
+            print(f"[DEDUP] Skipping doc {idx} (source={source_key} reached max={max_allowed})")
             continue
         
         # Check for content similarity with already selected docs
         is_duplicate = False
+        doc_len = len(doc.split())
+        
         for seen_doc in seen_contents:
-            similarity = _content_similarity(doc, seen_doc, threshold=similarity_threshold)
-            if similarity > similarity_threshold:
-                print(f"[DEDUP] Skipping doc idx={idx} source={source} (similarity={similarity:.2f} > threshold={similarity_threshold})")
+            seen_len = len(seen_doc.split())
+            # For very short docs (<50 words), use stricter threshold; for long docs, more lenient
+            adaptive_threshold = similarity_threshold
+            if doc_len < 50 or seen_len < 50:
+                adaptive_threshold = 0.75  # Stricter for short snippets
+            elif doc_len > 500 or seen_len > 500:
+                adaptive_threshold = 0.60  # More lenient for comprehensive docs
+            
+            sim = _content_similarity(doc, seen_doc, threshold=adaptive_threshold)
+            if sim > adaptive_threshold:
+                print(f"[DEDUP] Skipping doc {idx} (similarity={sim:.3f} > {adaptive_threshold:.3f})")
                 is_duplicate = True
                 break
         
@@ -1722,22 +1727,43 @@ def rerank_results(
         return docs, metas, distances or [], ids or []
 
     print(f"[RERANK] Reranking {len(docs)} docs for question='{question[:120]}...'")
+    
+    # Detect short query for adaptive reranking
+    is_short_query = _is_short_query(question)
+    
     items = []
     for idx, (d, m) in enumerate(zip(docs, metas)):
         # Safety: skip None documents
         if d is None:
             print(f"[RERANK] Skipping None doc at idx={idx}")
             continue
+        meta = m or {}
+        source = str(meta.get("source", ""))
+        is_memory = (
+            meta.get("collection") == "user_knowledge"
+            or source.startswith("user:")
+            or source.startswith("memory:")
+        )
         s = lexical_boost_score(question, d, m)
         dist = None if distances is None or idx >= len(distances) else distances[idx]
         idv = None if ids is None or idx >= len(ids) else ids[idx]
-        items.append({"doc": d, "meta": m, "score": s, "idx": idx, "dist": dist, "id": idv})
+        items.append({
+            "doc": d,
+            "meta": meta,
+            "score": s,
+            "idx": idx,
+            "dist": dist,
+            "id": idv,
+            "is_memory": 1 if is_memory else 0,
+        })
 
     if all(it["score"] == 0 for it in items):
-        print("[RERANK] All scores=0 → keeping original vector order")
+        print("[RERANK] All scores=0 → keeping vector order with memory priority")
         # Still print a summary of results
         for it in items[:10]:
             print(f"[RERANK] src={it['meta'].get('source')} chunk={it['meta'].get('chunk')} id={it['id']} dist={it['dist']}")
+
+        items.sort(key=lambda x: (-x["is_memory"] * (1.5 if is_short_query else 1.0), x["idx"]))
         
         # Even with 0 score, apply deduplication
         reranked_docs = [it["doc"] for it in items]
@@ -1746,7 +1772,7 @@ def rerank_results(
         reranked_ids = [it["id"] for it in items]
         return _smart_deduplicate_and_diversify(reranked_docs, reranked_metas, reranked_distances, reranked_ids)
 
-    items.sort(key=lambda x: (-x["score"], x["idx"]))
+    items.sort(key=lambda x: (-x["is_memory"] * (1.5 if is_short_query else 1.0), -x["score"], x["idx"]))
 
     print("[RERANK] Top 10 after rerank (score, dist, id, source, chunk):")
     for it in items[:10]:
@@ -1775,31 +1801,51 @@ def _lexical_overlap_ratio(question: str, doc: str) -> float:
     return inter / max(1, len(q_tokens))
 
 
+def _is_short_query(question: str) -> bool:
+    """Detect if query is short (likely needs lenient matching)."""
+    word_count = len(question.strip().split())
+    return word_count <= 8
+
+
 def _is_context_relevant(
     question: str,
     docs: List[str],
     distances: Optional[List[float]],
-    max_distance: float = 0.45,
-    min_overlap: float = 0.08,
+    max_distance: float = 0.50,
+    min_overlap: float = 0.05,
 ) -> bool:
     """
-    Lightweight answerability gate:
-    - Require at least one doc with acceptable semantic distance
-    - Require minimal lexical overlap to avoid unrelated KB answers
+    Intelligent answerability gate with adaptive thresholds.
+    Pure query-length based: short queries get lenient thresholds universally.
     """
     if not docs:
         return False
+    
+    # Only query length matters - no domain-specific checks
+    is_short = _is_short_query(question)
+    
+    # For short queries, be much more lenient (this fixes "add new department" issue)
+    if is_short:
+        effective_max_distance = 0.60  # Very lenient for short queries
+        effective_min_overlap = 0.01   # Accept 1% word overlap
+    else:
+        effective_max_distance = max_distance
+        effective_min_overlap = min_overlap
+    
+    # Check semantic distance
     best_dist = None
     if distances:
         best_dist = min(distances)
-    if best_dist is not None and best_dist > max_distance:
+    if best_dist is not None and best_dist > effective_max_distance:
         return False
-    # Filter out None docs before checking overlap
-    top_docs = [d for d in docs[:3] if d is not None]
+    
+    # Check lexical overlap
+    top_docs = [d for d in docs[:5] if d is not None]
     if not top_docs:
         return False
+    
     max_overlap = max((_lexical_overlap_ratio(question, d) for d in top_docs), default=0.0)
-    return max_overlap >= min_overlap
+    return max_overlap >= effective_min_overlap
 
 
 def _generate_contextual_rejection(question: str, docs: List[str] = None) -> str:
@@ -1857,8 +1903,7 @@ class ChatRequest(BaseModel):
 
 
 class KnowledgeAddRequest(BaseModel):
-    mode: str  # "server_file" or "content"
-    path: Optional[str] = None
+    mode: str  # "content"
     text: Optional[str] = None
     files: Optional[List[Dict[str, str]]] = None
 
@@ -1900,6 +1945,7 @@ def health():
         "chroma_empty": collection_empty(),
         "wiki_root": WIKI_ROOT,
         "collection_name": COLLECTION_NAME,
+        "memory_collection_name": MEMORY_COLLECTION_NAME,
         "embedding_backend": "openai",
         "embedding_model": OPENAI_EMBEDDING_MODEL,
     }
@@ -1919,33 +1965,17 @@ def azure_tickets(tag: str = "CC"):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/knowledge/files")
-def knowledge_files():
-    """List server files available for knowledge ingestion."""
-    try:
-        files = _list_server_files(KNOWLEDGE_DIR)
-        return {"files": files, "root": KNOWLEDGE_DIR}
-    except Exception as exc:
-        print(f"[API][KNOWLEDGE][ERROR] list files failed: {exc}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
 @app.post("/knowledge/add")
 def knowledge_add(req: KnowledgeAddRequest):
-    """Add a knowledge item from server file or user-provided content."""
+    """Add a knowledge item from user-provided content."""
     try:
         mode = (req.mode or "").strip().lower()
         content_text = ""
         source_name = ""
+        target_collection = memory_collection
+        collection_label = "user_knowledge"
 
-        if mode == "server_file":
-            if not req.path:
-                raise HTTPException(status_code=400, detail="path is required for server_file")
-            abs_path = _safe_resolve_path(KNOWLEDGE_DIR, req.path)
-            content_text = _process_local_file(abs_path)
-            source_name = f"user:upload:{req.path}"
-        elif mode == "content":
+        if mode == "content":
             text_part = (req.text or "").strip()
             file_part = ""
             if req.files:
@@ -1953,16 +1983,20 @@ def knowledge_add(req: KnowledgeAddRequest):
             content_text = "\n\n".join([p for p in [text_part, file_part] if p])
             source_name = f"user:content:{uuid.uuid4()}"
         else:
-            raise HTTPException(status_code=400, detail="mode must be server_file or content")
+            raise HTTPException(status_code=400, detail="mode must be content")
 
         if not content_text.strip():
             raise HTTPException(status_code=400, detail="No content to ingest")
 
-        # TA9 context validation
-        if not _has_ta9_context(content_text):
+        similar_sources = _find_similar_knowledge_sources(content_text)
+        priority = "user_upload_high" if similar_sources else "user_upload"
+
+        # Strict TA9 meaningfulness validation
+        is_valid_ta9_content, rejection_reason = _validate_ta9_knowledge_content(content_text)
+        if not is_valid_ta9_content:
             return {
                 "approved": False,
-                "message": "Content rejected: no TA9/IntSight context detected.",
+                "message": rejection_reason,
             }
 
         # Chunk + embed + add to collection with priority metadata
@@ -1983,32 +2017,144 @@ def knowledge_add(req: KnowledgeAddRequest):
                 print(f"[KNOWLEDGE][ERROR] Embedding failed chunk={i}: {e}")
                 traceback.print_exc()
                 continue
-            ids.append(str(uuid.uuid4()))
-            docs.append(ch)
-            metas.append({
+            metadata = {
                 "source": source_name,
                 "chunk": i,
-                "priority": "user_upload",
+                "priority": priority,
                 "uploaded_at": uploaded_at,
                 "mode": mode,
-                "path": req.path,
-            })
+                "path": "",
+                "collection": collection_label,
+            }
+            if similar_sources:
+                metadata["supersedes"] = similar_sources
+            ids.append(str(uuid.uuid4()))
+            docs.append(ch)
+            metas.append(metadata)
             embeds.append(emb)
 
         if not ids:
             raise HTTPException(status_code=500, detail="Failed to embed any chunks")
 
-        collection.add(ids=ids, documents=docs, metadatas=metas, embeddings=embeds)
+        target_collection.add(ids=ids, documents=docs, metadatas=metas, embeddings=embeds)
         return {
             "approved": True,
             "message": "Knowledge added successfully and prioritized.",
             "chunks_added": len(ids),
             "source": source_name,
+            "priority": priority,
+            "supersedes": similar_sources,
         }
     except HTTPException:
         raise
     except Exception as exc:
         print(f"[API][KNOWLEDGE][ERROR] add failed: {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+def _prepare_rag_content(raw_text: str) -> str:
+    """Normalize and structure knowledge content for better RAG ingestion."""
+    if not raw_text.strip():
+        return ""
+    if not OPENAI_API_KEY:
+        return raw_text
+
+    prep_prompt = (
+        "You are a strict TA9 knowledge normalizer."
+        "then rewrite it into clean, structured text for retrieval. "
+        "Use ONLY information explicitly present in the input. "
+        "Do NOT infer, assume, enrich, generalize, or add domain details that are not written in the source. "
+        "Do NOT invent product names, categories, industries, procedures, tags, or entities.\n\n"
+        "Output English plain text with these sections in order, each on its own line header:\n"
+        "Title:\n"
+        "Summary:\n"
+        "Key Details:\n"
+        "Steps or Procedures (if any):\n"
+        "Entities/Fields:\n"
+        "Tags:\n\n"
+        "Guidelines:\n"
+        "- Title: short, specific, based only on source text.\n"
+        "- Summary: 2-4 sentences, source-faithful only.\n"
+        "- Key Details: bullet list of facts explicitly present in source.\n"
+        "- Steps or Procedures: numbered steps only if applicable.\n"
+        "- Entities/Fields: list only entities/fields explicitly named in source.\n"
+        "- Tags: only source-grounded terms; no invented tags.\n"
+        "- If a section has no explicit source data, write: Not provided in source.\n\n"
+        "Input:\n" + raw_text
+    )
+    try:
+        prepared = call_llm(prep_prompt, temperature=0.1)
+        prepared = (prepared or "").strip()
+        return prepared if prepared else raw_text
+    except Exception as e:
+        print(f"[KNOWLEDGE][WARN] RAG prep failed: {e}")
+        return raw_text
+
+
+def _find_similar_knowledge_sources(text: str, limit: int = 5, max_distance: float = 0.28) -> List[str]:
+    """Find existing knowledge sources that are highly similar to the provided text."""
+    if not text.strip():
+        return []
+    if not OPENAI_API_KEY:
+        return []
+    try:
+        emb = embed_text(text)
+        similar_sources: List[str] = []
+        for col in (memory_collection, collection):
+            results = col.query(query_embeddings=[emb], n_results=limit, include=["metadatas", "distances"])
+            metas = results.get("metadatas", [[]])[0] if results else []
+            distances = results.get("distances", [[]])[0] if results else []
+            for meta, dist in zip(metas or [], distances or []):
+                if dist is not None and dist <= max_distance:
+                    source = meta.get("source") if meta else None
+                    if source:
+                        similar_sources.append(str(source))
+        seen = set()
+        deduped = []
+        for src in similar_sources:
+            if src in seen:
+                continue
+            seen.add(src)
+            deduped.append(src)
+        return deduped
+    except Exception as e:
+        print(f"[KNOWLEDGE][WARN] Similarity check failed: {e}")
+        return []
+
+
+@app.post("/knowledge/prepare")
+def knowledge_prepare(req: KnowledgeAddRequest):
+    """Prepare user content for RAG and return the normalized text."""
+    try:
+        text_part = (req.text or "").strip()
+        file_part = ""
+        if req.files:
+            file_part = build_file_context(req.files, describe_image_func=_describe_image_via_vision)
+
+        raw_content = "\n\n".join([p for p in [text_part, file_part] if p])
+        if not raw_content.strip():
+            raise HTTPException(status_code=400, detail="No content to prepare")
+
+        is_valid_ta9_content, rejection_reason = _validate_ta9_knowledge_content(raw_content)
+        if not is_valid_ta9_content:
+            return {
+                "approved": False,
+                "message": rejection_reason,
+                "prepared_text": raw_content,
+            }
+
+        prepared_content = _prepare_rag_content(raw_content)
+        final_content = prepared_content if prepared_content.strip() else raw_content
+        return {
+            "approved": True,
+            "message": "Knowledge prepared for RAG.",
+            "prepared_text": final_content,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[API][KNOWLEDGE][ERROR] prepare failed: {exc}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -2353,22 +2499,30 @@ def chat(req: ChatRequest):
             per_query_k = max(20, min(50, effective_top_k // max(1, len(query_variants))))
             print(f"[API][CHAT] effective_top_k={effective_top_k} per_query_k={per_query_k} variant_idx={idx}")
 
-            # Primary search: question-focused
-            results = collection.query(
-                query_embeddings=[q_emb],
-                n_results=per_query_k,
-                include=["distances", "documents", "metadatas", "embeddings"],
-            )
+            # Primary search: question-focused (user knowledge first, then wiki)
+            for col, col_label in ((memory_collection, "user_knowledge"), (collection, "wiki")):
+                results = col.query(
+                    query_embeddings=[q_emb],
+                    n_results=per_query_k,
+                    include=["distances", "documents", "metadatas", "embeddings"],
+                )
 
-            ids = results.get("ids", [[]])[0]
-            distances = results.get("distances", [[]])[0]
-            docs = results.get("documents", [[]])[0]
-            metas = results.get("metadatas", [[]])[0]
+                ids = results.get("ids", [[]])[0]
+                distances = results.get("distances", [[]])[0]
+                docs = results.get("documents", [[]])[0]
+                metas = results.get("metadatas", [[]])[0]
 
-            agg_ids.extend(ids or [])
-            agg_distances.extend(distances or [])
-            agg_docs.extend(docs or [])
-            agg_metas.extend(metas or [])
+                normalized_metas = []
+                for meta in metas or []:
+                    meta = meta or {}
+                    if "collection" not in meta:
+                        meta = {**meta, "collection": col_label}
+                    normalized_metas.append(meta)
+
+                agg_ids.extend(ids or [])
+                agg_distances.extend(distances or [])
+                agg_docs.extend(docs or [])
+                agg_metas.extend(normalized_metas)
     except Exception as exc:
         print(f"[API][CHAT][ERROR] Embedding or vector search failed: {exc}")
         traceback.print_exc()
@@ -2384,22 +2538,30 @@ def chat(req: ChatRequest):
         try:
             similar_query = question + "\n\nRelated ticket context:\n" + ticket_context_hint
             sim_emb = embed_text(similar_query)
-            sim_results = collection.query(
-                query_embeddings=[sim_emb],
-                n_results=max(20, req.top_k * 4),
-                include=["distances", "documents", "metadatas", "ids"],
-            )
-            sim_ids = sim_results.get("ids", [[]])[0]
-            sim_distances = sim_results.get("distances", [[]])[0]
-            sim_docs = sim_results.get("documents", [[]])[0]
-            sim_metas = sim_results.get("metadatas", [[]])[0]
+            for col, col_label in ((memory_collection, "user_knowledge"), (collection, "wiki")):
+                sim_results = col.query(
+                    query_embeddings=[sim_emb],
+                    n_results=max(20, req.top_k * 4),
+                    include=["distances", "documents", "metadatas"],
+                )
+                sim_ids = sim_results.get("ids", [[]])[0]
+                sim_distances = sim_results.get("distances", [[]])[0]
+                sim_docs = sim_results.get("documents", [[]])[0]
+                sim_metas = sim_results.get("metadatas", [[]])[0]
 
-            if sim_docs:
-                docs = docs + sim_docs
-                metas = metas + sim_metas
-                ids = ids + sim_ids
-                distances = distances + sim_distances
-                print(f"[API][CHAT] Added {len(sim_docs)} ticket-similar docs to candidates")
+                normalized_metas = []
+                for meta in sim_metas or []:
+                    meta = meta or {}
+                    if "collection" not in meta:
+                        meta = {**meta, "collection": col_label}
+                    normalized_metas.append(meta)
+
+                if sim_docs:
+                    docs = docs + sim_docs
+                    metas = metas + normalized_metas
+                    ids = ids + sim_ids
+                    distances = distances + sim_distances
+                    print(f"[API][CHAT] Added {len(sim_docs)} ticket-similar docs to candidates")
         except Exception as e:
             print(f"[API][CHAT][WARN] Similar-ticket search failed: {e}")
 
@@ -2424,15 +2586,18 @@ def chat(req: ChatRequest):
         mem = memory_collection.query(
             query_embeddings=[mem_query_emb],
             n_results=6,
-            include=["documents", "metadatas", "ids", "distances"],
+            include=["documents", "metadatas", "distances"],
         )
         mem_docs = mem.get("documents", [[]])[0]
         mem_metas = mem.get("metadatas", [[]])[0]
         if mem_docs:
             print(f"[API][CHAT] Collected {len(mem_docs)} memory docs for context candidates")
             for d, m in zip(mem_docs, mem_metas):
+                meta = m or {"source": "memory", "chunk": 0}
+                if "collection" not in meta:
+                    meta = {**meta, "collection": "user_knowledge"}
                 docs.insert(0, d)
-                metas.insert(0, m or {"source": "memory", "chunk": 0})
+                metas.insert(0, meta)
     except Exception as e:
         print(f"[API][CHAT][WARN] memory query failed: {e}")
 
@@ -2447,6 +2612,26 @@ def chat(req: ChatRequest):
 
     docs, metas, distances, ids = rerank_results(question, docs, metas, distances=distances, ids=ids)
 
+    top_meta = metas[0] if metas else {}
+    top_doc = docs[0] if docs else ""
+    top_source = str((top_meta or {}).get("source", ""))
+    top_collection = str((top_meta or {}).get("collection", ""))
+    top_overlap = _lexical_overlap_ratio(question, top_doc) if top_doc else 0.0
+    has_user_priority_hit = (
+        top_collection == "user_knowledge"
+        or top_source.startswith("user:")
+        or top_source.startswith("memory:")
+    )
+
+    force_accept_context = False
+    top_user_hits = 0
+    for meta in metas[:5]:
+        m = meta or {}
+        src = str(m.get("source", ""))
+        col = str(m.get("collection", ""))
+        if col == "user_knowledge" or src.startswith("user:") or src.startswith("memory:"):
+            top_user_hits += 1
+
     # Answerability gate: refuse to answer if context does not match the question
     # BUT: be much more permissive when files are attached, ticket is selected, or for foundational/TA9 questions
     # Most relaxed: file attached or ticket selected + any question = answer from that context
@@ -2456,6 +2641,14 @@ def chat(req: ChatRequest):
     elif selected_ticket_text:
         max_dist = 0.85  # VERY permissive when ticket is primary context
         min_overlap = 0.0  # Don't require lexical overlap - ticket context is king
+    elif top_user_hits > 0:
+        max_dist = 1.60
+        min_overlap = 0.0
+        force_accept_context = True
+        print(
+            f"[API][CHAT] User-knowledge unrestricted mode: top_user_hits={top_user_hits} "
+            f"top_source={top_source} overlap={top_overlap:.3f}"
+        )
     elif ta9_mode or is_foundational:
         max_dist = 0.70  # Very permissive for product questions
         min_overlap = 0.01  # Minimal lexical overlap required
@@ -2465,10 +2658,10 @@ def chat(req: ChatRequest):
     
     if not _is_context_relevant(question, docs, distances, max_distance=max_dist, min_overlap=min_overlap):
         # For file-based, ticket-based, foundational/TA9 questions, even with weak context, answer from context
-        if file_context or selected_ticket_text or ta9_mode or is_foundational:
+        if file_context or selected_ticket_text or ta9_mode or is_foundational or force_accept_context:
             print(
                 "[API][CHAT] Weak context but permissive mode enabled "
-                f"(files={bool(file_context)}, ticket={bool(selected_ticket_text)}, ta9={ta9_mode}, foundational={is_foundational})"
+                f"(files={bool(file_context)}, ticket={bool(selected_ticket_text)}, ta9={ta9_mode}, foundational={is_foundational}, user_priority={force_accept_context})"
             )
             # Don't reject - fall through to answer with file/ticket/weak context
         else:
@@ -2566,7 +2759,7 @@ def chat(req: ChatRequest):
         "INSTRUCTIONS:\n"
         "1. When the user attaches files (images, documents), those files are your PRIMARY source - answer directly from them.\n"
         "2. When you see [Image Content from ...] sections, that means the image has been analyzed - describe what you see in the analysis naturally.\n"
-        "3. For images: Simply describe what's shown in the provided analysis. Be direct and conversational.\n"
+        "3. For images: Provide a comprehensive explanation of what is shown in the provided analysis. Highlight key details, technical context, and likely causes when relevant.\n"
         "4. When a ticket is selected, use it to understand the user's issue and provide relevant solutions.\n"
         "5. Use knowledge base context to supplement your answer or provide additional related information.\n"
         "6. Use fenced code blocks (```bash, ```python, ```sql, etc.) for any commands or code snippets.\n"
