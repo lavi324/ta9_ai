@@ -3,8 +3,9 @@ import uuid
 import pathlib
 import time
 import traceback
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Any, Deque
 import random
+from collections import defaultdict, deque
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -26,6 +27,7 @@ import shutil
 import json
 import mimetypes
 from io import BytesIO
+from urllib.parse import unquote
 
 # Try to import optional dependencies
 try:
@@ -45,6 +47,18 @@ try:
     HAS_CSV = True
 except ImportError:
     HAS_CSV = False
+
+try:
+    import pdfplumber
+    HAS_PDFPLUMBER = True
+except ImportError:
+    HAS_PDFPLUMBER = False
+
+try:
+    import fitz
+    HAS_PYMUPDF = True
+except ImportError:
+    HAS_PYMUPDF = False
 
 load_dotenv()
 
@@ -69,13 +83,26 @@ CHROMA_DIR = os.getenv("CHROMA_DIR", "/app/chroma_db")
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
-COLLECTION_NAME = "wiki_rag"
-MEMORY_COLLECTION_NAME = "wiki_memories"
+COLLECTION_NAME = "Intsight"
+MEMORY_COLLECTION_NAME = "New_Knowledge"
+PDF_MAX_PAGES = int(os.getenv("PDF_MAX_PAGES", "0"))
+PDF_OCR_ENABLED = os.getenv("PDF_OCR_ENABLED", "true").lower() in ("1", "true", "yes")
+PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "25"))
+PDF_TABLE_EXTRACTION_ENABLED = os.getenv("PDF_TABLE_EXTRACTION_ENABLED", "true").lower() in ("1", "true", "yes")
+VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "1200"))
+TABLE_ROW_START_TAG = "[TABLE_ROW]"
+TABLE_ROW_END_TAG = "[/TABLE_ROW]"
 
 app = FastAPI(title="Wiki RAG API")
 
 # Track if a structured "first ticket response" was already sent per ticket key (id or URL fallback)
 ticket_first_reply_done: Dict[str, bool] = {}
+
+# Lightweight in-memory conversation memory (per conversation key)
+MAX_CONVERSATION_MESSAGES = 12
+conversation_store: Dict[str, Deque[Dict[str, str]]] = defaultdict(
+    lambda: deque(maxlen=MAX_CONVERSATION_MESSAGES)
+)
 
 
 # ---------------------------------------------------------------------
@@ -170,6 +197,49 @@ def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
         start_idx += size - overlap
     print(f"[CHUNK] Produced {len(chunks)} chunks")
     return chunks
+
+
+def chunk_text_preserve_table_rows(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
+    if not text:
+        return []
+
+    pattern = re.compile(r"\[TABLE_ROW\][\s\S]*?\[/TABLE_ROW\]")
+    chunks: List[str] = []
+    cursor = 0
+
+    for match in pattern.finditer(text):
+        regular_part = text[cursor:match.start()].strip()
+        if regular_part:
+            chunks.extend(chunk_text(regular_part, size=size, overlap=overlap))
+
+        table_row_block = match.group(0).strip()
+        if table_row_block:
+            if len(table_row_block) <= size:
+                chunks.append(table_row_block)
+            else:
+                chunks.extend(chunk_text(table_row_block, size=size, overlap=0))
+
+        cursor = match.end()
+
+    tail = text[cursor:].strip()
+    if tail:
+        chunks.extend(chunk_text(tail, size=size, overlap=overlap))
+
+    print(f"[CHUNK] Produced {len(chunks)} chunks with TABLE_ROW preservation")
+    return chunks
+
+
+def extract_table_row_metadata(chunk: str) -> Dict[str, int]:
+    if not chunk:
+        return {}
+    match = re.search(r"\[TABLE_ROW\]\s*page=(\d+)\s+table=(\d+)\s+row=(\d+)", chunk)
+    if not match:
+        return {}
+    return {
+        "table_page": int(match.group(1)),
+        "table_index": int(match.group(2)),
+        "table_row_index": int(match.group(3)),
+    }
 
 
 # ---------------------------------------------------------------------
@@ -323,6 +393,142 @@ def _describe_image_via_vision(image_url: str) -> str:
         return f"[Image analysis unavailable]"
 
 
+def _extract_structured_text_from_image(image_ref: str, source_label: str = "image") -> str:
+    """
+    Extract OCR-style text from an image and preserve table content as markdown.
+    """
+    if not OPENAI_API_KEY:
+        return ""
+
+    try:
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+        body = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Extract all readable text from this image exactly as it appears. "
+                                "If there are tables, output each table in markdown table format and preserve row/column values. "
+                                "Do not summarize. Do not omit rows. If text is unclear, mark it as [unclear]."
+                            ),
+                        },
+                        {"type": "image_url", "image_url": {"url": image_ref}},
+                    ],
+                }
+            ],
+            "max_tokens": VISION_MAX_TOKENS,
+            "temperature": 0,
+        }
+        resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=120)
+        if resp.status_code != 200:
+            print(f"[VISION][WARN] OCR extraction failed for {source_label}: {resp.status_code} {resp.text[:200]}")
+            return ""
+        data = resp.json()
+        text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if text:
+            print(f"[VISION] OCR extraction success for {source_label}, len={len(text)}")
+        return text
+    except Exception as e:
+        print(f"[VISION][WARN] OCR extraction error for {source_label}: {e}")
+        return ""
+
+
+def _normalize_table_rows(rows: List[List[Any]]) -> List[List[str]]:
+    normalized: List[List[str]] = []
+    for row in rows:
+        row_values: List[str] = []
+        for cell in (row or []):
+            cell_text = "" if cell is None else str(cell)
+            cell_text = " ".join(cell_text.replace("\r", " ").split())
+            cell_text = cell_text.replace("|", "\\|")
+            row_values.append(cell_text)
+        normalized.append(row_values)
+    return normalized
+
+
+def _format_table_rows_as_markdown(rows: List[List[Any]]) -> str:
+    if not rows:
+        return ""
+
+    normalized = _normalize_table_rows(rows)
+
+    if not normalized:
+        return ""
+
+    width = max(len(r) for r in normalized)
+    if width == 0:
+        return ""
+
+    padded = [r + [""] * (width - len(r)) for r in normalized]
+    header = padded[0]
+    separator = ["---"] * width
+
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(separator) + " |",
+    ]
+
+    for row in padded[1:]:
+        lines.append("| " + " | ".join(row) + " |")
+
+    return "\n".join(lines)
+
+
+def _format_table_rows_as_blocks(rows: List[List[Any]], page_number: int, table_number: int) -> List[str]:
+    normalized = _normalize_table_rows(rows)
+    if len(normalized) <= 1:
+        return []
+
+    width = max(len(r) for r in normalized)
+    if width == 0:
+        return []
+
+    padded = [r + [""] * (width - len(r)) for r in normalized]
+    header = padded[0]
+    row_blocks: List[str] = []
+
+    for row_idx, row_values in enumerate(padded[1:], start=1):
+        row_dict = {}
+        for col_idx, cell_val in enumerate(row_values, start=1):
+            key = header[col_idx - 1].strip() or f"col_{col_idx}"
+            row_dict[key] = cell_val
+
+        row_payload = {
+            "page": page_number,
+            "table": table_number,
+            "row": row_idx,
+            "cells": row_values,
+            "by_header": row_dict,
+        }
+        row_blocks.append(
+            f"{TABLE_ROW_START_TAG} page={page_number} table={table_number} row={row_idx}\n"
+            + json.dumps(row_payload, ensure_ascii=False)
+            + f"\n{TABLE_ROW_END_TAG}"
+        )
+
+    return row_blocks
+
+
+def _extract_text_from_pypdf2_page(page: Any) -> str:
+    try:
+        text = page.extract_text(extraction_mode="layout")
+        if text:
+            return text
+    except TypeError:
+        pass
+    except Exception:
+        pass
+
+    try:
+        return page.extract_text() or ""
+    except Exception:
+        return ""
+
+
 def _strip_html(text: str) -> str:
     try:
         txt = re.sub(r"<[^>]+>", " ", text or "")
@@ -335,6 +541,32 @@ def _strip_html(text: str) -> str:
 # ---------------------------------------------------------------------
 # File Processing Functions (for uploaded files in chat)
 # ---------------------------------------------------------------------
+
+POPULAR_IMAGE_EXTS = {
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg", "ico", "heic", "heif", "avif", "jfif"
+}
+POPULAR_EXCEL_EXTS = {"xlsx", "xls", "xlsm", "xltx", "xltm", "xlsb", "ods"}
+POPULAR_TEXT_EXTS = {
+    "txt", "md", "markdown", "rst", "csv", "tsv", "log", "ini", "cfg", "conf", "properties", "env",
+    "json", "jsonl", "xml", "yaml", "yml", "toml", "sql",
+    "sh", "bash", "zsh", "ps1", "bat", "cmd",
+    "py", "js", "ts", "jsx", "tsx", "java", "cs", "go", "rb", "php", "c", "cpp", "h", "hpp",
+    "html", "htm", "css", "scss", "less",
+}
+POPULAR_OTHER_EXTS = {
+    "ppt", "pptx", "odp", "odt", "rtf", "eml", "msg",
+    "zip", "rar", "7z", "tar", "gz",
+    "mp3", "wav", "m4a", "aac", "ogg", "flac",
+    "mp4", "mkv", "mov", "avi", "wmv", "webm",
+}
+
+
+def _process_unstructured_popular_file(file_name: str, file_ext: str) -> str:
+    """Graceful fallback for popular file types that are uploadable but not text-extractable yet."""
+    return (
+        f"**File: {file_name}**\n\n"
+        f"[NOTICE] .{file_ext} is accepted for upload, but automatic text extraction is not available yet for this type."
+    )
 
 def process_uploaded_file(file_data: Dict[str, str], describe_image_func=None) -> str:
     """
@@ -368,21 +600,20 @@ def process_uploaded_file(file_data: Dict[str, str], describe_image_func=None) -
         print(f"[FILE] Processing {file_name} (ext={file_ext}, size={len(file_bytes)} bytes)")
         
         # Route to appropriate handler
-        image_exts = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg", "ico", "heic", "heif"}
-        excel_exts = {"xlsx", "xls", "xlsm", "xltx", "xltm"}
-
-        if file_ext in image_exts or (file_type and file_type.startswith("image/")):
+        if file_ext in POPULAR_IMAGE_EXTS or (file_type and file_type.startswith("image/")):
             return _process_image_file(file_name, file_b64, file_type, describe_image_func)
-        elif file_ext in excel_exts:
+        elif file_ext in POPULAR_EXCEL_EXTS:
             return _process_excel_file(file_name, file_bytes)
         elif file_ext == "csv":
             return _process_csv_file(file_name, file_bytes)
         elif file_ext == "pdf":
             return _process_pdf_file(file_name, file_bytes)
-        elif file_ext == "txt":
+        elif file_ext in POPULAR_TEXT_EXTS:
             return _process_text_file(file_name, file_bytes)
         elif file_ext in ["doc", "docx"]:
             return _process_word_file(file_name, file_bytes)
+        elif file_ext in POPULAR_OTHER_EXTS:
+            return _process_unstructured_popular_file(file_name, file_ext)
         else:
             return f"[WARNING] Unsupported file type: {file_name} (.{file_ext})"
     
@@ -433,7 +664,11 @@ def _process_image_file(file_name: str, file_b64: str, file_type: Optional[str] 
         else:
             data_uri = f"data:{mime_type};base64,{file_b64}"
 
-        image_description = describe_func(data_uri)
+        image_description = _extract_structured_text_from_image(data_uri, source_label=file_name)
+        if not image_description and describe_func:
+            image_description = describe_func(data_uri)
+        if not image_description:
+            image_description = "[Image analysis unavailable]"
         return f"[Image Content from {file_name}]\n{image_description}"
     except Exception as e:
         print(f"[FILE] Vision API failed for {file_name}: {e}")
@@ -517,16 +752,97 @@ def _process_pdf_file(file_name: str, file_bytes: bytes) -> str:
         import PyPDF2
         pdf_file = BytesIO(file_bytes)
         reader = PyPDF2.PdfReader(pdf_file)
-        
-        content_lines = [f"**File: {file_name}** ({len(reader.pages)} pages)\n"]
-        
-        for page_idx, page in enumerate(reader.pages[:10]):
-            text = page.extract_text()
-            if text:
-                content_lines.append(f"\n--- Page {page_idx + 1} ---\n{text}")
-        
-        if len(reader.pages) > 10:
-            content_lines.append(f"\n... (showing first 10 pages of {len(reader.pages)} total)")
+
+        total_pages = len(reader.pages)
+        pages_to_process = total_pages
+        if PDF_MAX_PAGES > 0:
+            pages_to_process = min(total_pages, PDF_MAX_PAGES)
+
+        content_lines = [f"**File: {file_name}** ({total_pages} pages)\n"]
+
+        plumber_doc = None
+        if HAS_PDFPLUMBER and PDF_TABLE_EXTRACTION_ENABLED:
+            try:
+                plumber_doc = pdfplumber.open(BytesIO(file_bytes))
+            except Exception as e:
+                print(f"[FILE][PDF][WARN] pdfplumber open failed for {file_name}: {e}")
+
+        pymupdf_doc = None
+        if HAS_PYMUPDF and PDF_OCR_ENABLED and OPENAI_API_KEY:
+            try:
+                pymupdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
+            except Exception as e:
+                print(f"[FILE][PDF][WARN] PyMuPDF open failed for {file_name}: {e}")
+
+        for page_idx in range(pages_to_process):
+            page = reader.pages[page_idx]
+            page_lines: List[str] = [f"\n--- Page {page_idx + 1} ---"]
+
+            text = _extract_text_from_pypdf2_page(page)
+            if text and text.strip():
+                page_lines.append(text)
+
+            table_count = 0
+            if plumber_doc and page_idx < len(plumber_doc.pages):
+                try:
+                    tables = plumber_doc.pages[page_idx].extract_tables() or []
+                    for table_idx, table_rows in enumerate(tables, start=1):
+                        table_md = _format_table_rows_as_markdown(table_rows)
+                        if table_md:
+                            table_count += 1
+                            page_lines.append(f"\n[Table {table_idx}]\n{table_md}")
+                            row_blocks = _format_table_rows_as_blocks(
+                                table_rows,
+                                page_number=page_idx + 1,
+                                table_number=table_idx,
+                            )
+                            if row_blocks:
+                                page_lines.append("\n" + "\n".join(row_blocks))
+                except Exception as e:
+                    print(f"[FILE][PDF][WARN] Table extraction failed page={page_idx + 1}: {e}")
+
+            should_try_ocr = (
+                pymupdf_doc is not None
+                and page_idx < max(0, PDF_OCR_MAX_PAGES)
+                and (not text.strip() or table_count == 0)
+            )
+
+            if should_try_ocr:
+                try:
+                    p = pymupdf_doc.load_page(page_idx)
+                    pix = p.get_pixmap(dpi=200, alpha=False)
+                    image_bytes = pix.tobytes("png")
+                    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    data_uri = f"data:image/png;base64,{image_b64}"
+                    ocr_text = _extract_structured_text_from_image(
+                        data_uri,
+                        source_label=f"{file_name}:page-{page_idx + 1}",
+                    )
+                    if ocr_text:
+                        page_lines.append("\n[OCR Content]\n" + ocr_text)
+                except Exception as e:
+                    print(f"[FILE][PDF][WARN] OCR fallback failed page={page_idx + 1}: {e}")
+
+            if len(page_lines) == 1:
+                page_lines.append("[No extractable text found on this page]")
+
+            content_lines.append("\n".join(page_lines))
+
+        if pages_to_process < total_pages:
+            content_lines.append(
+                f"\n... (showing first {pages_to_process} pages of {total_pages} total; set PDF_MAX_PAGES=0 for all pages)"
+            )
+
+        if plumber_doc:
+            try:
+                plumber_doc.close()
+            except Exception:
+                pass
+        if pymupdf_doc:
+            try:
+                pymupdf_doc.close()
+            except Exception:
+                pass
         
         return "\n".join(content_lines)
     
@@ -605,9 +921,15 @@ def _safe_resolve_path(root_dir: str, rel_path: str) -> str:
 def _list_server_files(root_dir: str) -> List[dict]:
     """List files under the knowledge directory for server-file selection."""
     allowed_exts = {
-        ".md", ".txt", ".pdf", ".doc", ".docx", ".csv",
-        ".xlsx", ".xls", ".xlsm", ".xltx", ".xltm",
-        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"
+        ".md", ".markdown", ".txt", ".rst", ".csv", ".tsv", ".log", ".ini", ".cfg", ".conf", ".properties",
+        ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".sql",
+        ".pdf", ".doc", ".docx", ".rtf", ".odt", ".eml", ".msg",
+        ".xlsx", ".xls", ".xlsm", ".xltx", ".xltm", ".xlsb", ".ods",
+        ".ppt", ".pptx", ".odp",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".ico", ".heic", ".heif", ".avif", ".jfif",
+        ".zip", ".rar", ".7z", ".tar", ".gz",
+        ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac",
+        ".mp4", ".mkv", ".mov", ".avi", ".wmv", ".webm",
     }
     files = []
     root_abs = os.path.abspath(root_dir)
@@ -641,15 +963,12 @@ def _process_local_file(file_path: str) -> str:
     except Exception as e:
         return f"[ERROR] Failed to read file {file_name}: {e}"
 
-    image_exts = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"}
-    excel_exts = {"xlsx", "xls", "xlsm", "xltx", "xltm"}
-
-    if ext in image_exts:
+    if ext in POPULAR_IMAGE_EXTS:
         desc = _describe_local_image_via_vision(file_path)
         if not desc:
             return f"[Image file {file_name} - analysis unavailable]"
         return f"[Image Content from {file_name}]\n{desc}"
-    if ext in excel_exts:
+    if ext in POPULAR_EXCEL_EXTS:
         return _process_excel_file(file_name, file_bytes)
     if ext == "csv":
         return _process_csv_file(file_name, file_bytes)
@@ -657,6 +976,8 @@ def _process_local_file(file_path: str) -> str:
         return _process_pdf_file(file_name, file_bytes)
     if ext in {"doc", "docx"}:
         return _process_word_file(file_name, file_bytes)
+    if ext in POPULAR_OTHER_EXTS:
+        return _process_unstructured_popular_file(file_name, ext)
     return _process_text_file(file_name, file_bytes)
 
 
@@ -1251,7 +1572,8 @@ def _describe_local_image_via_vision(file_path: str) -> Optional[str]:
             data = resp.json()
             description = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             print(f"[VISION] Image description ({os.path.basename(file_path)}): {description[:150]}...")
-            return description
+            structured = _extract_structured_text_from_image(data_uri, source_label=os.path.basename(file_path))
+            return structured or description
         else:
             print(f"[VISION][WARN] Vision call failed for {file_path}: {resp.status_code}")
             return None
@@ -1461,45 +1783,145 @@ def _is_foundational_question(question: str) -> bool:
 
 
 def _has_ta9_context(text: str) -> bool:
-    """Strict heuristic gate: only strong TA9/IntSight signals count."""
+    """Domain gate: detects clear TA9/IntSight product context."""
     if not text:
         return False
     t = text.lower()
-    strong_terms = [
-        "ta9", "intsight", "int-sight", "admin studio", "federated search",
-        "link analysis", "geospatial", "detection", "entity profile", "case management",
-        "data model", "investigation graph", "watchlist", "alert rule"
+    term_groups = {
+        "brand": [
+            "ta9", "t-a9", "t a9", "intsight", "int-sight", "int sight",
+        ],
+        "core_modules": [
+            "admin studio", "kyc", "federated search", "data model", "data models", "entities",
+            "relations", "ontology manager", "main graph", "link analysis", "cases",
+            "tasks", "situational awareness", "dashboard", "insight", "annotations", "autoloader",
+        ],
+        "platform_terms": [
+            "identifier", "taxonomy", "query builder", "cluster query", "field role",
+            "is free text", "is id", "sequence", "permission mode", "case profile",
+            "indexing service", "index to federated", "admin tools", "lookup manager",
+        ],
+    }
+
+    group_hits = 0
+    for _, terms in term_groups.items():
+        if any(term in t for term in terms):
+            group_hits += 1
+
+    return group_hits >= 1
+
+
+def _has_ta9_support_signal(text: str) -> bool:
+    """
+    Detects meaningful technical/procedural support content aligned with TA9 guide material.
+    Accepts operational documentation, configuration steps, integration guidance, and troubleshooting.
+    """
+    if not text:
+        return False
+
+    t = text.lower()
+
+    workflow_terms = [
+        "step", "click", "open", "select", "save", "configure", "set", "define", "navigate",
+        "upload", "download", "reset", "create", "edit", "delete", "assign", "grant",
+        "permission", "role", "profile", "workflow", "prerequisite", "note:",
     ]
-    matched = [term for term in strong_terms if term in t]
-    return len(matched) >= 1
+    technical_terms = [
+        "api", "rest", "endpoint", "json", "regex", "query", "sql", "mysql", "mariadb",
+        "solr", "orient", "indexing", "schema", "field", "mapping", "lookup", "parser",
+        "config", "dll", "path", "service", "cache", "cron", "batch", "token", "2fa",
+        "sso", "active directory", "ldap", "authentication", "authorization", "audit",
+    ]
+    product_artifacts = [
+        "admin", "analyst", "developer", "entity", "relation", "case", "incident", "protocol",
+        "map", "graph", "gantt", "timeline", "facet", "widget", "dashboard", "federated",
+        "data loader", "load file manager", "autoloader", "document viewer", "speech to text",
+        "translation", "system config", "localization",
+    ]
+    integration_terms = [
+        "kerberos", "krb5", "krb5.conf", "krb5.keytab", "keytab", "spn", "realm", "kdc",
+        "mssql", "sql server", "odbc", "odbc.ini", "trusted_connection", "integratedsecurity",
+        "authmech", "krbservicename", "krbhostfqdn", "krbauthrealm", "active directory",
+        "domain controller", "dc", "ad user",
+    ]
+
+    workflow_hits = sum(1 for term in workflow_terms if term in t)
+    technical_hits = sum(1 for term in technical_terms if term in t)
+    artifact_hits = sum(1 for term in product_artifacts if term in t)
+    integration_hits = sum(1 for term in integration_terms if term in t)
+
+    has_structured_config_pattern = bool(
+        re.search(r"\b[a-z0-9_.-]+\s*=\s*[^\s].+", t)
+        or re.search(r"<add\s+key=", t)
+        or re.search(r"\{\s*\"[a-z0-9_\-]+\"\s*:", t)
+    )
+    has_stepwise_pattern = bool(re.search(r"\bstep\s*\d+\b", t))
+    has_version_or_section_pattern = bool(re.search(r"\b(v|version)\s*\d+(\.\d+)*\b", t))
+
+    # Broad but meaningful acceptance for guide-like knowledge
+    if workflow_hits >= 3 and artifact_hits >= 1:
+        return True
+    if technical_hits >= 3 and artifact_hits >= 1:
+        return True
+    if artifact_hits >= 2 and (has_structured_config_pattern or has_stepwise_pattern):
+        return True
+    if artifact_hits >= 2 and technical_hits >= 2:
+        return True
+    if has_version_or_section_pattern and artifact_hits >= 2 and (workflow_hits >= 2 or technical_hits >= 2):
+        return True
+    # Explicit acceptance for enterprise integration/config guides (e.g., Kerberos + MSSQL setup)
+    if integration_hits >= 3 and has_structured_config_pattern:
+        return True
+    if integration_hits >= 4 and (workflow_hits >= 2 or technical_hits >= 2):
+        return True
+    if "prerequisite" in t and integration_hits >= 3:
+        return True
+
+    return False
 
 
 def _validate_ta9_knowledge_content(content_text: str) -> Tuple[bool, str]:
-    """Strict validation for TA9 knowledge ingestion with explicit rejection reason."""
+    """Comprehensive validation for TA9/IntSight knowledge ingestion with explicit rejection reason."""
     text = (content_text or "").strip()
     if not text:
         return False, "The content is empty. Please provide TA9-related details before adding knowledge."
 
     fallback_reason = (
         "The content was rejected because it is not specific to TA9/IntSight. "
-        "Please include concrete TA9 entities such as modules, fields, workflows, errors, "
-        "or product procedures instead of general information."
+        "Please include concrete IntSight/TA9 details such as module names, admin/configuration steps, "
+        "permissions, data model/entity behavior, integration settings, troubleshooting context, or procedures."
     )
 
-    # Hard heuristic gate (strict)
+    # Heuristic domain and substance gates (comprehensive)
     has_strong_ta9_signal = _has_ta9_context(text)
+    has_support_signal = _has_ta9_support_signal(text)
+
+    # If both domain and support signals are strong, approve early to avoid LLM false negatives.
+    # This is especially important for technical integration/configuration runbooks.
+    if has_strong_ta9_signal and has_support_signal:
+        return True, "Approved"
+
+    # Reject very short, low-information text unless it has very strong product context.
+    text_word_count = len(re.findall(r"\b\w+\b", text))
+    if text_word_count < 12 and not (has_strong_ta9_signal and has_support_signal):
+        return False, (
+            "The content is too short to be useful for support retrieval. "
+            "Please add specific TA9/IntSight details, steps, or technical context."
+        )
+
     if not has_strong_ta9_signal and not OPENAI_API_KEY:
         return False, fallback_reason
 
     # LLM gate for meaningfulness and domain relevance (authoritative verdict)
     if OPENAI_API_KEY:
         prompt = (
-            "You are a strict validator for TA9/IntSight RAG ingestion. "
+            "You are a strict-but-practical validator for TA9/IntSight RAG ingestion. "
             "Decide whether the submitted content is meaningful and domain-relevant for TA9.\n\n"
             "Approval criteria (ALL required):\n"
-            "1) Clearly tied to TA9/IntSight domain or features.\n"
-            "2) Contains concrete, factual, technical/helpful details (not generic narrative).\n"
-            "3) Useful for support retrieval (steps, fields, modules, behavior, constraints, errors, entities, or procedures).\n\n"
+            "1) Clearly tied to TA9/IntSight product usage, administration, configuration, integration, troubleshooting, or operations.\n"
+            "2) Contains concrete support-relevant details such as modules, roles/permissions, fields, entities/relations, workflows, settings, queries, endpoints, errors, or procedures.\n"
+            "3) Useful for retrieval by support/admin/analyst teams (can be user-guide, runbook, config guide, FAQ, or troubleshooting instructions).\n"
+            "4) Not purely irrelevant/general text unrelated to TA9/IntSight.\n\n"
             "If not approved, explain briefly what is missing.\n"
             "Return ONLY valid JSON with this exact schema:\n"
             "{\"approved\": true|false, \"reason\": \"short reason\"}\n\n"
@@ -1515,19 +1937,19 @@ def _validate_ta9_knowledge_content(content_text: str) -> Tuple[bool, str]:
             approved = bool(parsed.get("approved", False))
             reason = str(parsed.get("reason") or "").strip()
             if approved:
-                # Keep strict posture: if LLM approves but no strong TA9 signal at all, reject.
-                if not has_strong_ta9_signal:
+                # Keep domain integrity: require explicit TA9 context OR strong support signal.
+                if not has_strong_ta9_signal and not has_support_signal:
                     return False, (
-                        "The content appears structured but does not include explicit TA9/IntSight identifiers. "
-                        "Please mention TA9 modules, entities, workflows, or product-specific terms."
+                        "The content appears structured but lacks clear TA9/IntSight context. "
+                        "Please mention relevant modules, workflows, admin/configuration concepts, or product terms."
                     )
                 return True, "Approved"
             return False, reason or fallback_reason
         except Exception as e:
             print(f"[KNOWLEDGE][WARN] LLM validation parse/exec failed: {e}")
-            return (False, fallback_reason) if not has_strong_ta9_signal else (True, "Approved")
+            return (False, fallback_reason) if not (has_strong_ta9_signal and has_support_signal) else (True, "Approved")
 
-    return (True, "Approved") if has_strong_ta9_signal else (False, fallback_reason)
+    return (True, "Approved") if (has_strong_ta9_signal and has_support_signal) else (False, fallback_reason)
 
 
 def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
@@ -1728,9 +2150,6 @@ def rerank_results(
 
     print(f"[RERANK] Reranking {len(docs)} docs for question='{question[:120]}...'")
     
-    # Detect short query for adaptive reranking
-    is_short_query = _is_short_query(question)
-    
     items = []
     for idx, (d, m) in enumerate(zip(docs, metas)):
         # Safety: skip None documents
@@ -1738,12 +2157,6 @@ def rerank_results(
             print(f"[RERANK] Skipping None doc at idx={idx}")
             continue
         meta = m or {}
-        source = str(meta.get("source", ""))
-        is_memory = (
-            meta.get("collection") == "user_knowledge"
-            or source.startswith("user:")
-            or source.startswith("memory:")
-        )
         s = lexical_boost_score(question, d, m)
         dist = None if distances is None or idx >= len(distances) else distances[idx]
         idv = None if ids is None or idx >= len(ids) else ids[idx]
@@ -1754,16 +2167,15 @@ def rerank_results(
             "idx": idx,
             "dist": dist,
             "id": idv,
-            "is_memory": 1 if is_memory else 0,
         })
 
     if all(it["score"] == 0 for it in items):
-        print("[RERANK] All scores=0 → keeping vector order with memory priority")
+        print("[RERANK] All scores=0 → sorting by vector distance (balanced across collections)")
         # Still print a summary of results
         for it in items[:10]:
             print(f"[RERANK] src={it['meta'].get('source')} chunk={it['meta'].get('chunk')} id={it['id']} dist={it['dist']}")
 
-        items.sort(key=lambda x: (-x["is_memory"] * (1.5 if is_short_query else 1.0), x["idx"]))
+        items.sort(key=lambda x: ((x["dist"] if x["dist"] is not None else 999.0), x["idx"]))
         
         # Even with 0 score, apply deduplication
         reranked_docs = [it["doc"] for it in items]
@@ -1772,7 +2184,13 @@ def rerank_results(
         reranked_ids = [it["id"] for it in items]
         return _smart_deduplicate_and_diversify(reranked_docs, reranked_metas, reranked_distances, reranked_ids)
 
-    items.sort(key=lambda x: (-x["is_memory"] * (1.5 if is_short_query else 1.0), -x["score"], x["idx"]))
+    items.sort(
+        key=lambda x: (
+            -x["score"],
+            (x["dist"] if x["dist"] is not None else 999.0),
+            x["idx"],
+        )
+    )
 
     print("[RERANK] Top 10 after rerank (score, dist, id, source, chunk):")
     for it in items[:10]:
@@ -1805,6 +2223,101 @@ def _is_short_query(question: str) -> bool:
     """Detect if query is short (likely needs lenient matching)."""
     word_count = len(question.strip().split())
     return word_count <= 8
+
+
+def _extract_query_keywords(question: str, max_terms: int = 8) -> List[str]:
+    """Extract compact keyword terms from a user question for fallback retrieval."""
+    if not question:
+        return []
+    stopwords = {
+        "the", "is", "are", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with", "by",
+        "from", "as", "at", "be", "this", "that", "these", "those", "it", "its", "if", "then",
+        "how", "what", "when", "where", "why", "who", "can", "could", "should", "would", "do",
+        "does", "did", "i", "we", "you", "they", "he", "she", "my", "our", "your", "their",
+        "about", "into", "through", "using", "use", "want", "need", "like", "please",
+    }
+    tokens = re.findall(r"[a-zA-Z0-9_\-]+", question.lower())
+    ranked = [t for t in tokens if len(t) > 2 and t not in stopwords]
+    seen = set()
+    deduped = []
+    for term in ranked:
+        if term in seen:
+            continue
+        seen.add(term)
+        deduped.append(term)
+        if len(deduped) >= max_terms:
+            break
+    return deduped
+
+
+def _build_fallback_query_variants(question: str) -> List[str]:
+    """Build generic fallback variants for broader recall across any topic."""
+    if not question:
+        return []
+    variants: List[str] = []
+    base = question.strip()
+    if base:
+        variants.append(base)
+
+    normalized = _normalize_question(base)
+    if normalized and normalized not in variants:
+        variants.append(normalized)
+
+    # Split compound questions into smaller clauses for better retrieval hit rate
+    clauses = re.split(r"\?|\.|,|\band\b|\bthen\b|\balso\b", base, flags=re.IGNORECASE)
+    for clause in clauses:
+        c = clause.strip()
+        if len(c.split()) >= 2 and c not in variants:
+            variants.append(c)
+
+    keywords = _extract_query_keywords(base)
+    if keywords:
+        keyword_query = " ".join(keywords)
+        if keyword_query and keyword_query not in variants:
+            variants.append(keyword_query)
+
+    return variants[:6]
+
+
+def _context_confidence_profile(
+    question: str,
+    docs: List[str],
+    distances: Optional[List[float]],
+) -> dict:
+    """Compute topic-agnostic retrieval confidence from semantic and lexical signals."""
+    if not docs:
+        return {
+            "confidence": 0.0,
+            "best_distance": None,
+            "max_overlap": 0.0,
+            "is_short": _is_short_query(question),
+        }
+
+    best_distance = min(distances) if distances else None
+    top_docs = [d for d in docs[:5] if d]
+    max_overlap = max((_lexical_overlap_ratio(question, d) for d in top_docs), default=0.0)
+
+    # Distance score: lower distance => higher confidence
+    if best_distance is None:
+        distance_score = 0.35
+    else:
+        distance_score = 1.0 - min(max(best_distance, 0.0), 0.95) / 0.95
+
+    # Overlap score saturates once overlap is reasonably meaningful
+    overlap_score = min(max_overlap / 0.22, 1.0)
+
+    # Blend scores with slight leniency for short follow-up style questions
+    is_short = _is_short_query(question)
+    confidence = (0.7 * distance_score) + (0.3 * overlap_score)
+    if is_short:
+        confidence = max(confidence, 0.45 * distance_score + 0.55 * overlap_score)
+
+    return {
+        "confidence": round(max(0.0, min(1.0, confidence)), 4),
+        "best_distance": best_distance,
+        "max_overlap": round(max_overlap, 4),
+        "is_short": is_short,
+    }
 
 
 def _is_context_relevant(
@@ -1886,6 +2399,360 @@ def _generate_contextual_rejection(question: str, docs: List[str] = None) -> str
         )
 
 
+def _ground_answer_against_context(question: str, context_text: str, draft_answer: str) -> str:
+    """
+    Universal anti-hallucination guard.
+    Rewrites the draft so final output only contains claims supported by provided context.
+    """
+    if not draft_answer:
+        return ""
+    if not OPENAI_API_KEY:
+        return draft_answer
+
+    if not context_text or not context_text.strip():
+        return (
+            "I couldn’t find enough verified information in the current knowledge base context to answer this reliably. "
+            "Please share more specific details or add the relevant documentation so I can answer precisely."
+        )
+
+    grounding_prompt = (
+        "You are a strict grounding and factuality verifier for a RAG assistant.\n\n"
+        "TASK:\n"
+        "Rewrite the draft answer so EVERY factual claim is directly supported by the provided context.\n"
+        "If a claim is not supported, remove it.\n"
+        "If critical details are missing, explicitly say they are not present in the available knowledge context.\n"
+        "Do not invent commands, paths, settings, UI labels, API names, or product behavior.\n"
+        "Do not use outside knowledge.\n"
+        "Keep the response helpful and concise.\n"
+        "Ask at most one focused follow-up question if needed.\n\n"
+        f"QUESTION:\n{question}\n\n"
+        f"CONTEXT:\n{context_text}\n\n"
+        f"DRAFT ANSWER:\n{draft_answer}\n\n"
+        "RETURN ONLY THE FINAL REWRITTEN ANSWER."
+    )
+
+    try:
+        grounded = call_llm(grounding_prompt, temperature=0.0)
+        grounded = (grounded or "").strip()
+        return grounded if grounded else draft_answer
+    except Exception as e:
+        print(f"[API][CHAT][WARN] Grounding verification failed: {e}")
+        return draft_answer
+
+
+def _normalize_history_messages(raw_messages: Optional[List[Dict[str, Any]]]) -> List[Dict[str, str]]:
+    """Normalize user-provided history messages to role/content pairs."""
+    if not raw_messages:
+        return []
+    normalized: List[Dict[str, str]] = []
+    for msg in raw_messages:
+        role = str((msg or {}).get("role") or "").strip().lower()
+        content = str((msg or {}).get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        normalized.append({"role": role, "content": content})
+    return normalized
+
+
+def _format_history_for_prompt(messages: List[Dict[str, str]], max_messages: int = 8) -> str:
+    """Format recent conversation history for retrieval and prompt context."""
+    if not messages:
+        return ""
+    tail = messages[-max_messages:]
+    lines: List[str] = []
+    for msg in tail:
+        role = "User" if msg.get("role") == "user" else "Assistant"
+        lines.append(f"{role}: {msg.get('content', '')}")
+    return "\n".join(lines)
+
+
+def _question_requires_specifics(question: str) -> bool:
+    """Detect questions that require explicit, concrete details instead of generic guidance."""
+    if not question:
+        return False
+    q = question.lower()
+    patterns = [
+        r"\bwhich\b",
+        r"\bwhat exact\b",
+        r"\bexactly\b",
+        r"\blist\b",
+        r"\bshow\b",
+        r"\bcolumn(s)?\b",
+        r"\bfield(s)?\b",
+        r"\bheader(s)?\b",
+        r"\bparameter(s)?\b",
+        r"\bproperty|properties\b",
+        r"\bstep(s)?\b",
+        r"\bcommand(s)?\b",
+        r"\bpath(s)?\b",
+        r"\bname(s)?\b",
+    ]
+    return any(re.search(p, q) for p in patterns)
+
+
+def _enforce_specific_grounded_answer(question: str, context_text: str, answer: str) -> str:
+    """
+    If the question asks for concrete details, force the answer to be explicit and context-grounded.
+    """
+    if not answer or not OPENAI_API_KEY:
+        return answer
+    if not _question_requires_specifics(question):
+        return answer
+
+    prompt = (
+        "You are a strict response quality checker for a RAG assistant.\n\n"
+        "Goal: ensure the final answer is concrete, specific, and grounded in context.\n"
+        "Rules:\n"
+        "1) Keep only details supported by CONTEXT.\n"
+        "2) If user asks for explicit lists (columns/fields/steps/commands/etc), provide explicit bullet list.\n"
+        "3) If exact details are missing in CONTEXT, explicitly say which exact details are missing.\n"
+        "4) Do not output vague placeholders like 'necessary columns' when specifics are available.\n"
+        "5) Never invent values, names, paths, or commands.\n\n"
+        f"QUESTION:\n{question}\n\n"
+        f"CONTEXT:\n{context_text}\n\n"
+        f"CURRENT ANSWER:\n{answer}\n\n"
+        "Return ONLY the improved final answer."
+    )
+    try:
+        improved = call_llm(prompt, temperature=0.0)
+        improved = (improved or "").strip()
+        return improved if improved else answer
+    except Exception as e:
+        print(f"[API][CHAT][WARN] Specificity enforcement failed: {e}")
+        return answer
+
+
+def _get_vector_collection(collection_name: str):
+    normalized_name = (collection_name or "").strip()
+    if normalized_name == COLLECTION_NAME:
+        return collection
+    if normalized_name == MEMORY_COLLECTION_NAME:
+        return memory_collection
+    raise HTTPException(status_code=400, detail=f"Unknown collection: {collection_name}")
+
+
+def _vector_collection_description(collection_name: str) -> str:
+    if collection_name == COLLECTION_NAME:
+        return "Primary operational knowledge base"
+    if collection_name == MEMORY_COLLECTION_NAME:
+        return "User-added and curated knowledge"
+    return "Vector collection"
+
+
+def _safe_embedding_to_list(embedding: Any) -> List[float]:
+    if embedding is None:
+        return []
+    if hasattr(embedding, "tolist"):
+        embedding = embedding.tolist()
+    return [float(value) for value in embedding]
+
+
+def _display_source_name(source: str) -> str:
+    source_text = str(source or "").strip()
+    if not source_text:
+        return "Untitled document"
+    return os.path.basename(unquote(source_text)) or source_text
+
+
+def _extract_document_heading(text: str) -> str:
+    if not text:
+        return ""
+    for raw_line in text.splitlines()[:10]:
+        line = raw_line.strip()
+        if not line:
+            continue
+        file_match = re.match(r"^\*\*File:\s*(.+?)\*\*$", line)
+        if file_match:
+            return file_match.group(1).strip()
+        if line.startswith("#"):
+            return line.lstrip("#").strip()
+    return ""
+
+
+def _build_document_title(source: str, first_chunk_text: str) -> str:
+    heading = _extract_document_heading(first_chunk_text)
+    return heading or _display_source_name(source)
+
+
+def _find_chunk_overlap(existing_text: str, next_chunk: str, max_overlap: int = CHUNK_OVERLAP) -> int:
+    if not existing_text or not next_chunk:
+        return 0
+    max_len = min(max_overlap, len(existing_text), len(next_chunk))
+    for overlap_size in range(max_len, 0, -1):
+        if existing_text.endswith(next_chunk[:overlap_size]):
+            return overlap_size
+    return 0
+
+
+def _merge_chunk_texts(chunks: List[str]) -> str:
+    if not chunks:
+        return ""
+    merged = chunks[0]
+    for chunk in chunks[1:]:
+        overlap_size = _find_chunk_overlap(merged, chunk)
+        merged += chunk[overlap_size:]
+    return merged
+
+
+def _group_collection_documents(collection_name: str) -> List[dict]:
+    target_collection = _get_vector_collection(collection_name)
+    raw = target_collection.get(include=["metadatas", "documents"])
+    ids = list(raw.get("ids", []) or [])
+    docs = list(raw.get("documents", []) or [])
+    metas = list(raw.get("metadatas", []) or [])
+
+    grouped: Dict[str, dict] = {}
+    for doc_id, doc_text, meta in zip(ids, docs, metas):
+        safe_meta = meta or {}
+        source = str(safe_meta.get("source") or doc_id or "")
+        chunk_index = int(safe_meta.get("chunk", 0) or 0)
+        entry = grouped.setdefault(
+            source,
+            {
+                "source": source,
+                "items": [],
+                "updated_at": "",
+            },
+        )
+        entry["items"].append(
+            {
+                "id": doc_id,
+                "chunk": chunk_index,
+                "document": doc_text or "",
+                "metadata": safe_meta,
+            }
+        )
+
+        candidate_timestamp = str(
+            safe_meta.get("edited_at")
+            or safe_meta.get("uploaded_at")
+            or safe_meta.get("created_at")
+            or ""
+        )
+        if candidate_timestamp and candidate_timestamp > entry["updated_at"]:
+            entry["updated_at"] = candidate_timestamp
+
+    summaries: List[dict] = []
+    for source, payload in grouped.items():
+        items = sorted(payload["items"], key=lambda item: item["chunk"])
+        merged_text = _merge_chunk_texts([item["document"] for item in items])
+        preview = re.sub(r"\s+", " ", merged_text).strip()[:280]
+        title = _build_document_title(source, items[0]["document"] if items else "")
+        summaries.append(
+            {
+                "source": source,
+                "title": title,
+                "display_source": _display_source_name(source),
+                "preview": preview,
+                "chunk_count": len(items),
+                "updated_at": payload["updated_at"] or None,
+            }
+        )
+
+    summaries.sort(key=lambda item: ((item["updated_at"] or ""), item["title"].lower()), reverse=True)
+    return summaries
+
+
+def _build_vector_document_detail(collection_name: str, source: str) -> dict:
+    target_collection = _get_vector_collection(collection_name)
+    raw = target_collection.get(
+        where={"source": source},
+        include=["documents", "metadatas", "embeddings"],
+    )
+
+    ids = list(raw.get("ids", []) or [])
+    if not ids:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    docs = list(raw.get("documents", []) or [])
+    metas = list(raw.get("metadatas", []) or [])
+    embeddings = raw.get("embeddings")
+    if embeddings is None:
+        embeddings = [None] * len(ids)
+
+    chunk_items: List[dict] = []
+    for doc_id, doc_text, meta, embedding in zip(ids, docs, metas, embeddings):
+        safe_meta = meta or {}
+        chunk_index = int(safe_meta.get("chunk", 0) or 0)
+        chunk_items.append(
+            {
+                "id": doc_id,
+                "chunk": chunk_index,
+                "content": doc_text or "",
+                "metadata": safe_meta,
+                "embedding": _safe_embedding_to_list(embedding),
+            }
+        )
+
+    chunk_items.sort(key=lambda item: item["chunk"])
+    full_content = _merge_chunk_texts([item["content"] for item in chunk_items])
+    title = _build_document_title(source, chunk_items[0]["content"] if chunk_items else "")
+    vector_dimensions = len(chunk_items[0]["embedding"]) if chunk_items and chunk_items[0]["embedding"] else 0
+    updated_at = None
+    for item in chunk_items:
+        safe_meta = item["metadata"] or {}
+        candidate_timestamp = safe_meta.get("edited_at") or safe_meta.get("uploaded_at") or safe_meta.get("created_at")
+        if candidate_timestamp and (updated_at is None or str(candidate_timestamp) > str(updated_at)):
+            updated_at = str(candidate_timestamp)
+
+    return {
+        "collection_name": collection_name,
+        "collection_description": _vector_collection_description(collection_name),
+        "source": source,
+        "title": title,
+        "display_source": _display_source_name(source),
+        "chunk_count": len(chunk_items),
+        "vector_dimensions": vector_dimensions,
+        "updated_at": updated_at,
+        "full_content": full_content,
+        "chunks": chunk_items,
+    }
+
+
+def _build_updated_chunk_records(source: str, content: str, existing_metas: List[dict]) -> Tuple[List[str], List[str], List[dict], List[List[float]]]:
+    clean_content = (content or "").strip()
+    if not clean_content:
+        raise HTTPException(status_code=400, detail="content is empty")
+
+    seed_meta = dict((existing_metas or [{}])[0] or {})
+    base_meta = {
+        key: value
+        for key, value in seed_meta.items()
+        if key not in {"chunk", "chunk_type", "table_page", "table_index", "table_row_index"}
+    }
+    base_meta["source"] = source
+    base_meta["edited_at"] = datetime.utcnow().isoformat() + "Z"
+
+    chunks = (
+        chunk_text_preserve_table_rows(clean_content)
+        if TABLE_ROW_START_TAG in clean_content
+        else chunk_text(clean_content)
+    )
+    if not chunks:
+        raise HTTPException(status_code=400, detail="No chunks generated from content")
+
+    ids_to_add: List[str] = []
+    docs_to_add: List[str] = []
+    metas_to_add: List[dict] = []
+    embeddings_to_add: List[List[float]] = []
+
+    for chunk_index, chunk_text_value in enumerate(chunks):
+        embedding = embed_text(chunk_text_value)
+        chunk_meta = dict(base_meta)
+        chunk_meta["chunk"] = chunk_index
+        if chunk_text_value.startswith(TABLE_ROW_START_TAG):
+            chunk_meta["chunk_type"] = "table_row"
+            chunk_meta.update(extract_table_row_metadata(chunk_text_value))
+        else:
+            chunk_meta["chunk_type"] = "text"
+        ids_to_add.append(str(uuid.uuid4()))
+        docs_to_add.append(chunk_text_value)
+        metas_to_add.append(chunk_meta)
+        embeddings_to_add.append(embedding)
+
+    return ids_to_add, docs_to_add, metas_to_add, embeddings_to_add
+
+
 # ---------------------------------------------------------------------
 # API Models
 # ---------------------------------------------------------------------
@@ -1895,6 +2762,8 @@ class ChatRequest(BaseModel):
     top_k: int = 5
     force_reingest: Optional[bool] = False
     ticket_url: Optional[str] = None
+    conversation_id: Optional[str] = None
+    history: Optional[List[Dict[str, str]]] = None
     teach: Optional[bool] = False
     # If a ticket is selected, set to True for follow-up messages after the first structured reply
     is_followup: Optional[bool] = False
@@ -1931,6 +2800,17 @@ class AdoLearnIngestResponse(BaseModel):
     tickets_processed: int
     tickets_skipped: int
     message: Optional[str] = None
+
+
+class VectorDbDocumentUpdateRequest(BaseModel):
+    collection_name: str
+    source: str
+    content: str
+
+
+class VectorDbDocumentDeleteRequest(BaseModel):
+    collection_name: str
+    source: str
 
 
 # ---------------------------------------------------------------------
@@ -2000,7 +2880,7 @@ def knowledge_add(req: KnowledgeAddRequest):
             }
 
         # Chunk + embed + add to collection with priority metadata
-        chunks = chunk_text(content_text)
+        chunks = chunk_text_preserve_table_rows(content_text) if req.files else chunk_text(content_text)
         if not chunks:
             raise HTTPException(status_code=400, detail="No chunks generated from content")
 
@@ -2026,6 +2906,11 @@ def knowledge_add(req: KnowledgeAddRequest):
                 "path": "",
                 "collection": collection_label,
             }
+            if ch.startswith(TABLE_ROW_START_TAG):
+                metadata["chunk_type"] = "table_row"
+                metadata.update(extract_table_row_metadata(ch))
+            else:
+                metadata["chunk_type"] = "text"
             if similar_sources:
                 metadata["supersedes"] = similar_sources
             ids.append(str(uuid.uuid4()))
@@ -2424,6 +3309,16 @@ def chat(req: ChatRequest):
     print(f"[API][CHAT] /chat called question='{req.question[:200]}' top_k={req.top_k} force_reingest={req.force_reingest} files={len(req.files) if req.files else 0}")
     question = (req.question or "").strip()
 
+    conversation_key = (req.conversation_id or req.ticket_url or "default").strip() or "default"
+    incoming_history = _normalize_history_messages(req.history)
+    if incoming_history:
+        dq = deque(incoming_history[-MAX_CONVERSATION_MESSAGES:], maxlen=MAX_CONVERSATION_MESSAGES)
+        conversation_store[conversation_key] = dq
+    stored_history = list(conversation_store.get(conversation_key, deque()))
+    history_context = _format_history_for_prompt(stored_history, max_messages=8)
+    if history_context:
+        print(f"[API][CHAT] Using conversation history context key={conversation_key} messages={len(stored_history)}")
+
     # Process uploaded files early to include their content in context
     file_context = ""
     if req.files:
@@ -2465,6 +3360,10 @@ def chat(req: ChatRequest):
     ta9_mode = _is_ta9_question(question)
     is_foundational = _is_foundational_question(question)
     query_variants = _build_query_variants(question, ta9_mode)
+    if history_context:
+        history_seed = f"Conversation context:\n{history_context}\n\nCurrent question:\n{question}"
+        query_variants = [history_seed] + query_variants
+        query_variants = query_variants[:4]
     ticket_context_hint = None
     if selected_ticket_text:
         # Keep a short hint to enrich similarity search without overwhelming the question
@@ -2537,6 +3436,8 @@ def chat(req: ChatRequest):
     if ticket_context_hint:
         try:
             similar_query = question + "\n\nRelated ticket context:\n" + ticket_context_hint
+            if history_context:
+                similar_query += "\n\nRecent conversation:\n" + history_context
             sim_emb = embed_text(similar_query)
             for col, col_label in ((memory_collection, "user_knowledge"), (collection, "wiki")):
                 sim_results = col.query(
@@ -2596,77 +3497,81 @@ def chat(req: ChatRequest):
                 meta = m or {"source": "memory", "chunk": 0}
                 if "collection" not in meta:
                     meta = {**meta, "collection": "user_knowledge"}
-                docs.insert(0, d)
-                metas.insert(0, meta)
+                docs.append(d)
+                metas.append(meta)
     except Exception as e:
         print(f"[API][CHAT][WARN] memory query failed: {e}")
 
-    if not docs:
-        print("[API][CHAT] No docs after injection → calling LLM with 'no context' message")
-        answer = call_llm(
-            "No wiki context available. Answer briefly but mention that you "
-            "do not have access to the internal knowledge base.\n\n"
-            f"Question: {question}"
+    # Topic-agnostic fallback retrieval when initial context is weak or empty
+    initial_profile = _context_confidence_profile(question, docs, distances)
+    if not file_context and not selected_ticket_text and (not docs or initial_profile["confidence"] < 0.42):
+        fallback_variants = _build_fallback_query_variants(question)
+        print(
+            f"[API][CHAT] Triggering fallback retrieval: docs={len(docs)} "
+            f"confidence={initial_profile['confidence']} variants={len(fallback_variants)}"
         )
+        try:
+            for variant in fallback_variants:
+                if not variant.strip():
+                    continue
+                fv_emb = embed_text(variant)
+                for col, col_label in ((memory_collection, "user_knowledge"), (collection, "wiki")):
+                    fv_results = col.query(
+                        query_embeddings=[fv_emb],
+                        n_results=max(12, req.top_k * 3),
+                        include=["distances", "documents", "metadatas"],
+                    )
+                    fv_ids = fv_results.get("ids", [[]])[0]
+                    fv_distances = fv_results.get("distances", [[]])[0]
+                    fv_docs = fv_results.get("documents", [[]])[0]
+                    fv_metas = fv_results.get("metadatas", [[]])[0]
+
+                    normalized_metas = []
+                    for meta in fv_metas or []:
+                        meta = meta or {}
+                        if "collection" not in meta:
+                            meta = {**meta, "collection": col_label}
+                        normalized_metas.append(meta)
+
+                    if fv_docs:
+                        docs.extend(fv_docs)
+                        metas.extend(normalized_metas)
+                        ids.extend(fv_ids)
+                        distances.extend(fv_distances)
+            print(f"[API][CHAT] Fallback retrieval completed: total docs now={len(docs)}")
+        except Exception as e:
+            print(f"[API][CHAT][WARN] fallback retrieval failed: {e}")
+
+    if not docs:
+        print("[API][CHAT] No docs after all retrieval attempts → returning strict no-context response")
+        answer = call_llm(
+            "You are a strict RAG assistant. There is no retrievable knowledge-base context for this question. "
+            "Do NOT provide speculative or generic product guidance. "
+            "Return a short response that clearly states the missing context and asks for the exact document/topic needed.\n\n"
+            f"Question: {question}\n\n"
+            "Response:"
+        )
+        try:
+            conversation_store[conversation_key].append({"role": "user", "content": question})
+            conversation_store[conversation_key].append({"role": "assistant", "content": answer})
+        except Exception as e:
+            print(f"[API][CHAT][WARN] Failed to persist conversation context: {e}")
         return ChatResponse(answer=answer, sources=[])
 
     docs, metas, distances, ids = rerank_results(question, docs, metas, distances=distances, ids=ids)
 
-    top_meta = metas[0] if metas else {}
-    top_doc = docs[0] if docs else ""
-    top_source = str((top_meta or {}).get("source", ""))
-    top_collection = str((top_meta or {}).get("collection", ""))
-    top_overlap = _lexical_overlap_ratio(question, top_doc) if top_doc else 0.0
-    has_user_priority_hit = (
-        top_collection == "user_knowledge"
-        or top_source.startswith("user:")
-        or top_source.startswith("memory:")
+    # Confidence-based behavior: avoid hard refusals and answer in best-effort mode when confidence is low
+    final_profile = _context_confidence_profile(question, docs, distances)
+    low_confidence_mode = (
+        not file_context
+        and not selected_ticket_text
+        and final_profile["confidence"] < 0.35
     )
-
-    force_accept_context = False
-    top_user_hits = 0
-    for meta in metas[:5]:
-        m = meta or {}
-        src = str(m.get("source", ""))
-        col = str(m.get("collection", ""))
-        if col == "user_knowledge" or src.startswith("user:") or src.startswith("memory:"):
-            top_user_hits += 1
-
-    # Answerability gate: refuse to answer if context does not match the question
-    # BUT: be much more permissive when files are attached, ticket is selected, or for foundational/TA9 questions
-    # Most relaxed: file attached or ticket selected + any question = answer from that context
-    if file_context:
-        max_dist = 1.0  # Skip relevance gating when user provides files
-        min_overlap = 0.0
-    elif selected_ticket_text:
-        max_dist = 0.85  # VERY permissive when ticket is primary context
-        min_overlap = 0.0  # Don't require lexical overlap - ticket context is king
-    elif top_user_hits > 0:
-        max_dist = 1.60
-        min_overlap = 0.0
-        force_accept_context = True
-        print(
-            f"[API][CHAT] User-knowledge unrestricted mode: top_user_hits={top_user_hits} "
-            f"top_source={top_source} overlap={top_overlap:.3f}"
-        )
-    elif ta9_mode or is_foundational:
-        max_dist = 0.70  # Very permissive for product questions
-        min_overlap = 0.01  # Minimal lexical overlap required
-    else:
-        max_dist = 0.45
-        min_overlap = 0.08
-    
-    if not _is_context_relevant(question, docs, distances, max_distance=max_dist, min_overlap=min_overlap):
-        # For file-based, ticket-based, foundational/TA9 questions, even with weak context, answer from context
-        if file_context or selected_ticket_text or ta9_mode or is_foundational or force_accept_context:
-            print(
-                "[API][CHAT] Weak context but permissive mode enabled "
-                f"(files={bool(file_context)}, ticket={bool(selected_ticket_text)}, ta9={ta9_mode}, foundational={is_foundational}, user_priority={force_accept_context})"
-            )
-            # Don't reject - fall through to answer with file/ticket/weak context
-        else:
-            rejection_msg = _generate_contextual_rejection(question, docs)
-            return ChatResponse(answer=rejection_msg, sources=[])
+    print(
+        "[API][CHAT] Retrieval confidence "
+        f"confidence={final_profile['confidence']} best_distance={final_profile['best_distance']} "
+        f"max_overlap={final_profile['max_overlap']} low_confidence_mode={low_confidence_mode}"
+    )
 
     context_blocks: List[str] = []
     source_strings: List[str] = []
@@ -2698,16 +3603,16 @@ def chat(req: ChatRequest):
     # Enhanced prompt that handles potentially redundant context intelligently
     foundational_instruction = (
         "10. FOUNDATIONAL QUESTIONS: If asked about core product concepts (data models, entities, features, Federated Search, Cases, Link Analysis etc.), "
-        "provide a clear explanation even if the context is weak. Explain the concept, then connect it to the product. "
-        "Never refuse to answer foundational product questions - help the user understand.\n\n"
+        "provide a clear explanation using only the available context. If context is incomplete, clearly state what is missing. "
+        "Do not add unsupported product details.\n\n"
         if is_foundational or ta9_mode
         else ""
     )
     
     ta9_instruction = (
         "11. If the question is about TA9/IntSight features or platform capabilities, "
-        "provide a comprehensive, detailed answer with key features, modules, and examples. "
-        "Use bullet points when helpful and be explanatory.\n\n"
+        "provide a detailed answer grounded in retrieved context, and avoid examples that are not present in context. "
+        "Use bullet points when helpful.\n\n"
         if ta9_mode
         else ""
     )
@@ -2750,6 +3655,21 @@ def chat(req: ChatRequest):
             f"=== KNOWLEDGE BASE ({priority_label}) ===\n"
             f"{context_text}\n"
         )
+
+    if low_confidence_mode:
+        context_sections.append(
+            "=== RETRIEVAL CONFIDENCE NOTICE ===\n"
+            "The retrieved context may only partially match the question. "
+            "Provide a best-effort answer grounded in available context, state assumptions clearly, "
+            "and ask one concise follow-up question to close the gap.\n"
+        )
+
+    if history_context:
+        context_sections.append(
+            "=== RECENT CONVERSATION CONTEXT ===\n"
+            "Use this to resolve references like 'that', 'those', or follow-up clarifications.\n"
+            f"{history_context}\n"
+        )
     
     combined_context = "\n\n".join(context_sections)
 
@@ -2765,9 +3685,16 @@ def chat(req: ChatRequest):
         "6. Use fenced code blocks (```bash, ```python, ```sql, etc.) for any commands or code snippets.\n"
         "7. If the context contains redundant or overlapping information, synthesize it into a single coherent answer.\n"
         "8. Do NOT repeat information from different sources - intelligently merge related points.\n"
-        "9. For product-related questions, you can use general product knowledge even if context is weak.\n"
+        "8.1 Use a balanced approach across both collections (Intsight and New_Knowledge) and do not assume one is always better.\n"
+        "8.2 If relevant details are split across both collections, combine them into one integrated, consistent answer.\n"
+        "9. Grounding is mandatory: only state facts supported by the provided context sections.\n"
+        "9.1 If a requested detail is not in context, explicitly say it is not available in the current knowledge context.\n"
+        "9.2 Never invent commands, configuration keys, UI paths, API names, or procedural steps.\n"
         "10. Keep a professional, helpful tone that encourages follow-up questions.\n"
         "11. Answer naturally and conversationally - avoid rigid structured formats unless specifically requested.\n"
+        "12. For Intsight or system configuration guidance, prioritize instructions that use Admin Studio (UI-based configuration) by default.\n"
+        "13. Provide database-level (DB) configuration instructions only when the user explicitly asks for DB configuration, SQL/database changes, or backend table-level steps.\n"
+        "14. Never hard-refuse when at least partial context exists; provide the best grounded answer possible, explicitly flag uncertainty, and ask one focused clarifying question if needed.\n"
         f"{foundational_instruction}"
         f"{ta9_instruction}\n"
         f"{combined_context}\n\n"
@@ -2776,11 +3703,19 @@ def chat(req: ChatRequest):
     )
 
     try:
-        answer = call_llm(prompt, temperature=0.35 if ta9_mode else 0.2)
+        draft_answer = call_llm(prompt, temperature=0.2)
+        answer = _ground_answer_against_context(question, combined_context, draft_answer)
+        answer = _enforce_specific_grounded_answer(question, combined_context, answer)
     except Exception as exc:
         print(f"[API][CHAT][ERROR] LLM call failed: {exc}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"LLM call failed: {exc}")
+
+    try:
+        conversation_store[conversation_key].append({"role": "user", "content": question})
+        conversation_store[conversation_key].append({"role": "assistant", "content": answer})
+    except Exception as e:
+        print(f"[API][CHAT][WARN] Failed to persist conversation context: {e}")
 
     # Optional teach: persist summarized lesson to memory collection
     if req.teach:

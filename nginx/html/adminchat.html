@@ -7,6 +7,9 @@
   <link rel="icon" type="image/png" href="/adminchat/ta9_logo.png">
   <!-- Markdown renderer to convert headings/bullets/code to HTML -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.10.0/styles/github-dark.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.10.0/lib/highlight.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <style>
     * {
@@ -411,12 +414,77 @@
 
     .knowledge-toolbar {
       display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
       padding: 10px;
       border: 1px solid #e2e8f0;
       border-radius: 12px;
       background: #f8fafc;
+    }
+
+    .knowledge-toolbar-left {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .knowledge-toolbar-right {
+      display: flex;
+      align-items: center;
+      margin-left: auto;
+    }
+
+    .knowledge-guide-btn {
+      border: 1px solid #bfd0e4;
+      background: #ffffff;
+      color: #0c3d6b;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+
+    .knowledge-guide-btn:hover {
+      border-color: #0c3d6b;
+      background: #edf4fb;
+    }
+
+    .knowledge-guide-content {
+      max-height: 62vh;
+      overflow: auto;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 14px;
+      background: #f8fafc;
+      color: #0f172a;
+      line-height: 1.6;
+      font-size: 14px;
+    }
+
+    .knowledge-guide-content p {
+      margin: 0 0 10px 0;
+    }
+
+    .knowledge-guide-content ul {
+      margin: 0;
+      padding-left: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .knowledge-guide-content code {
+      background: #eef2f7;
+      border: 1px solid #d6e1ef;
+      border-radius: 6px;
+      padding: 1px 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.92em;
     }
 
     .knowledge-tool-btn {
@@ -645,6 +713,75 @@
       color: #42546a;
       margin-bottom: 18px;
       line-height: 1.5;
+    }
+
+    .knowledge-loading-progress {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      text-align: left;
+      margin-bottom: 18px;
+    }
+
+    .knowledge-loading-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      background: #f8fafc;
+      padding: 10px 12px;
+    }
+
+    .knowledge-step-icon {
+      width: 22px;
+      min-width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 700;
+      border: 2px solid #cbd5e1;
+      color: #94a3b8;
+      background: #ffffff;
+    }
+
+    .knowledge-step-icon.running {
+      color: transparent;
+      border-color: #cbd5e1;
+      border-top-color: #0c3d6b;
+      animation: knowledge-spin 0.9s linear infinite;
+    }
+
+    .knowledge-step-icon.done {
+      border-color: #16a34a;
+      color: #16a34a;
+      background: #f0fdf4;
+    }
+
+    .knowledge-step-icon.error {
+      border-color: #b42318;
+      color: #b42318;
+      background: #fff1f2;
+    }
+
+    .knowledge-step-body {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .knowledge-step-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: #0f172a;
+    }
+
+    .knowledge-step-status {
+      font-size: 12px;
+      color: #64748b;
     }
 
     .knowledge-loading-spinner {
@@ -1123,30 +1260,167 @@
       border-radius: 0;
       padding: 0;
       min-height: 60px;
-      font-size: 15px;
-      line-height: 1.75;
-      color: #1f2d3d;
+      font-size: 16px;
+      line-height: 1.72;
+      color: #1f2937;
       white-space: normal;
       text-align: left;
-      max-width: 100%;
+      max-width: 780px;
+      width: 100%;
       margin-left: 0;
       margin-right: auto;
       margin-bottom: 0;
       display: flex;
       flex-direction: column;
-      gap: 20px;
+      gap: 24px;
     }
 
-    /* Boxed sections */
-    .response-box {
-      background: linear-gradient(135deg, #f0f7ff 0%, #ffffff 100%);
-      border: 1.5px solid #3b82f6;
+    .chatgpt-markdown {
+      max-width: 780px;
+      width: 100%;
+      color: #1f2937;
+      line-height: 1.72;
+      font-size: 16px;
+      word-wrap: break-word;
+      overflow-wrap: anywhere;
+    }
+
+    .chatgpt-markdown p {
+      margin: 0 0 16px;
+    }
+
+    .chatgpt-markdown > *:last-child {
+      margin-bottom: 0;
+    }
+
+    .chatgpt-markdown h1,
+    .chatgpt-markdown h2,
+    .chatgpt-markdown h3,
+    .chatgpt-markdown h4 {
+      color: #111827;
+      font-weight: 700;
+      line-height: 1.35;
+      margin: 24px 0 12px;
+    }
+
+    .chatgpt-markdown h1 { font-size: 1.7rem; }
+    .chatgpt-markdown h2 { font-size: 1.45rem; }
+    .chatgpt-markdown h3 { font-size: 1.2rem; }
+    .chatgpt-markdown h4 { font-size: 1.05rem; }
+
+    .chatgpt-markdown ul,
+    .chatgpt-markdown ol {
+      margin: 12px 0 16px;
+      padding-left: 1.45rem;
+    }
+
+    .chatgpt-markdown li {
+      margin: 6px 0;
+      line-height: 1.7;
+    }
+
+    .chatgpt-markdown ul ul,
+    .chatgpt-markdown ul ol,
+    .chatgpt-markdown ol ul,
+    .chatgpt-markdown ol ol {
+      margin-top: 6px;
+      margin-bottom: 6px;
+    }
+
+    .chatgpt-markdown hr {
+      border: 0;
+      border-top: 1px solid #e5e7eb;
+      margin: 24px 0;
+    }
+
+    .chatgpt-markdown blockquote {
+      margin: 20px 0;
+      padding: 10px 14px;
+      border-left: 4px solid #9ca3af;
+      background: #f9fafb;
+      color: #374151;
+    }
+
+    .chatgpt-markdown blockquote p:last-child {
+      margin-bottom: 0;
+    }
+
+    .table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      margin: 20px 0;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      background: #ffffff;
+    }
+
+    .chatgpt-markdown table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 520px;
+      font-size: 14px;
+    }
+
+    .chatgpt-markdown th,
+    .chatgpt-markdown td {
+      border-bottom: 1px solid #e5e7eb;
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .chatgpt-markdown th {
+      background: #f9fafb;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .chatgpt-markdown tr:last-child td {
+      border-bottom: none;
+    }
+
+    .chatgpt-markdown code:not(pre code) {
+      background: #f3f4f6;
+      border: 1px solid #e5e7eb;
+      color: #111827;
+      padding: 2px 6px;
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.92em;
+    }
+
+    .chatgpt-markdown pre {
+      background: #0b1020;
       border-radius: 12px;
-      padding: 22px;
-      line-height: 1.75;
-      color: #0c1d37;
-      font-size: 15px;
-      box-shadow: 0 2px 10px rgba(59, 130, 246, 0.12);
+      margin: 20px 0;
+      overflow: hidden;
+      border: 1px solid #1f2937;
+    }
+
+    .chatgpt-markdown pre code {
+      display: block;
+      padding: 16px;
+      overflow-x: auto;
+      font-size: 13.5px;
+      line-height: 1.6;
+      color: #e5e7eb;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      white-space: pre;
+      tab-size: 2;
+    }
+
+    .chatgpt-markdown pre code.hljs {
+      background: transparent;
+      color: #e5e7eb;
+    }
+
+    /* Boxed sections for structured output */
+    .response-box {
+      background: #ffffff;
+      border: 1px solid #dbeafe;
+      border-radius: 12px;
+      padding: 20px 22px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
     }
 
     .response-box h3 {
@@ -1176,14 +1450,11 @@
     }
 
     .customer-box {
-      background: linear-gradient(135deg, #f5fff5 0%, #ffffff 100%);
-      border: 1.5px solid #22c55e;
+      background: #ffffff;
+      border: 1px solid #d1fae5;
       border-radius: 12px;
-      padding: 22px;
-      line-height: 1.75;
-      color: #0f2a12;
-      font-size: 15px;
-      box-shadow: 0 2px 10px rgba(34, 197, 94, 0.12);
+      padding: 20px 22px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
     }
 
     .customer-box h3 {
@@ -1212,27 +1483,8 @@
       line-height: 1.6;
     }
 
-    /* Customer box code blocks - inline style, no dark theme */
-    .customer-box pre {
-      background: #e8f5e9;
-      border: 1px solid #c3e6cb;
-      border-radius: 6px;
-      padding: 12px 16px;
-      margin: 12px 0;
-      overflow-x: auto;
-    }
-
-    .customer-box pre code {
-      background: transparent;
-      color: #2d5016;
-      padding: 0;
-      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-      font-size: 13px;
-      line-height: 1.5;
-    }
-
     .customer-box .code-header {
-      display: none; /* Hide the copy button in customer replies */
+      display: flex;
     }
 
     /* Other sections stay as clean text (no boxes) */
@@ -1268,33 +1520,13 @@
       margin-bottom: 8px;
     }
 
-    /* Code blocks styling */
-    pre {
-      background: #1e1e1e;
-      border-radius: 8px;
-      padding: 0;
-      margin: 16px 0;
-      position: relative;
-      overflow: hidden;
-    }
-
-    pre code {
-      display: block;
-      padding: 16px;
-      overflow-x: auto;
-      color: #d4d4d4;
-      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-      font-size: 13px;
-      line-height: 1.5;
-    }
-
     .code-header {
-      background: #2d2d2d;
-      padding: 8px 12px;
+      background: #111827;
+      padding: 9px 12px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      border-bottom: 1px solid #3e3e3e;
+      border-bottom: 1px solid #1f2937;
     }
 
     .code-language {
@@ -1306,7 +1538,7 @@
 
     .copy-code-btn {
       background: transparent;
-      border: 1px solid #4a4a4a;
+      border: 1px solid #374151;
       color: #d4d4d4;
       padding: 4px 12px;
       border-radius: 4px;
@@ -1320,8 +1552,8 @@
     }
 
     .copy-code-btn:hover {
-      background: #3e3e3e;
-      border-color: #5a5a5a;
+      background: #1f2937;
+      border-color: #4b5563;
     }
 
     .copy-code-btn.copied {
@@ -1335,16 +1567,10 @@
       margin: 12px 0;
     }
 
-    .response-box code:not(pre code),
-    .customer-box code:not(pre code),
-    .content-section code:not(pre code),
-    .answer-box code:not(pre code) {
-      background: #f0f0f0;
-      color: #e01e5a;
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-size: 13px;
-      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    .response-box .chatgpt-markdown,
+    .customer-box .chatgpt-markdown,
+    .content-section .chatgpt-markdown {
+      max-width: 100%;
     }
 
     .question-bubble {
@@ -1376,6 +1602,11 @@
       display: flex;
       flex-direction: column;
       margin-bottom: 48px;
+      width: 100%;
+    }
+
+    .qa-pair > .answer-box {
+      max-width: 780px;
     }
 
     .thinking {
@@ -1546,11 +1777,11 @@
         </div>
       </div>
       <form id="chat-form" class="input-row">
-        <input id="knowledge-upload-input" type="file" multiple accept=".pdf,.xlsx,.xls,.xlsm,.xltx,.xltm,.csv,.txt,.doc,.docx" style="display: none;">
+        <input id="knowledge-upload-input" type="file" multiple accept=".pdf,.doc,.docx,.rtf,.odt,.eml,.msg,.xlsx,.xls,.xlsm,.xltx,.xltm,.xlsb,.ods,.csv,.tsv,.txt,.md,.markdown,.rst,.log,.ini,.cfg,.conf,.properties,.json,.jsonl,.xml,.yaml,.yml,.toml,.sql,.ppt,.pptx,.odp,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff,.svg,.ico,.heic,.heif,.avif,.jfif,.zip,.rar,.7z,.tar,.gz,.mp3,.wav,.m4a,.aac,.ogg,.flac,.mp4,.mkv,.mov,.avi,.wmv,.webm" style="display: none;">
         <button id="upload-file-btn" type="button" class="file-upload-btn" title="Upload files (images, Excel, PDF, etc.)">
           <span>+</span>
         </button>
-        <input id="file-input" type="file" multiple accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff,.svg,.ico,.heic,.heif,.pdf,.xlsx,.xls,.xlsm,.xltx,.xltm,.csv,.txt,.doc,.docx" style="display: none;">
+        <input id="file-input" type="file" multiple accept=".pdf,.doc,.docx,.rtf,.odt,.eml,.msg,.xlsx,.xls,.xlsm,.xltx,.xltm,.xlsb,.ods,.csv,.tsv,.txt,.md,.markdown,.rst,.log,.ini,.cfg,.conf,.properties,.json,.jsonl,.xml,.yaml,.yml,.toml,.sql,.ppt,.pptx,.odp,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff,.svg,.ico,.heic,.heif,.avif,.jfif,.zip,.rar,.7z,.tar,.gz,.mp3,.wav,.m4a,.aac,.ogg,.flac,.mp4,.mkv,.mov,.avi,.wmv,.webm" style="display: none;">
         <div class="textarea-wrapper">
           <textarea id="question" placeholder="Message AI Assistant..." rows="1"></textarea>
         </div>
@@ -1601,11 +1832,16 @@
         <button id="knowledge-content-close" type="button" class="knowledge-modal-close" aria-label="Close">×</button>
       </div>
       <div class="knowledge-toolbar" role="toolbar" aria-label="Formatting tools">
-        <button type="button" class="knowledge-tool-btn" data-cmd="fontSize" data-size="small">S</button>
-        <button type="button" class="knowledge-tool-btn active" data-cmd="fontSize" data-size="medium">M</button>
-        <button type="button" class="knowledge-tool-btn" data-cmd="fontSize" data-size="large">L</button>
-        <button type="button" class="knowledge-tool-btn" data-cmd="bold"><strong>B</strong></button>
-        <button type="button" class="knowledge-tool-btn" data-cmd="underline"><u>U</u></button>
+        <div class="knowledge-toolbar-left">
+          <button type="button" class="knowledge-tool-btn" data-cmd="fontSize" data-size="small">S</button>
+          <button type="button" class="knowledge-tool-btn active" data-cmd="fontSize" data-size="medium">M</button>
+          <button type="button" class="knowledge-tool-btn" data-cmd="fontSize" data-size="large">L</button>
+          <button type="button" class="knowledge-tool-btn" data-cmd="bold"><strong>B</strong></button>
+          <button type="button" class="knowledge-tool-btn" data-cmd="underline"><u>U</u></button>
+        </div>
+        <div class="knowledge-toolbar-right">
+          <button id="knowledge-guide-open" type="button" class="knowledge-guide-btn">What can I add?</button>
+        </div>
       </div>
       <div class="knowledge-editor-wrap">
         <div class="knowledge-editor-page">
@@ -1643,11 +1879,27 @@
 
   <div id="knowledge-loading" class="knowledge-loading hidden" aria-hidden="true">
     <div class="knowledge-loading-card" role="status" aria-live="polite">
-      <div class="knowledge-loading-title">Checking TA9 context</div>
+      <div id="knowledge-loading-title" class="knowledge-loading-title">Checking TA9 context</div>
       <div id="knowledge-loading-text" class="knowledge-loading-text">
         Waiting for AI approval before adding knowledge.
       </div>
-      <div class="knowledge-loading-spinner"></div>
+      <div id="knowledge-loading-progress" class="knowledge-loading-progress hidden">
+        <div class="knowledge-loading-step">
+          <span id="knowledge-step-check-icon" class="knowledge-step-icon" aria-hidden="true">○</span>
+          <div class="knowledge-step-body">
+            <div class="knowledge-step-label">Checking TA9 knowledge</div>
+            <div id="knowledge-step-check-status" class="knowledge-step-status">Pending</div>
+          </div>
+        </div>
+        <div class="knowledge-loading-step">
+          <span id="knowledge-step-upload-icon" class="knowledge-step-icon" aria-hidden="true">○</span>
+          <div class="knowledge-step-body">
+            <div class="knowledge-step-label">Uploading and embedding file</div>
+            <div id="knowledge-step-upload-status" class="knowledge-step-status">Pending</div>
+          </div>
+        </div>
+      </div>
+      <div id="knowledge-loading-spinner" class="knowledge-loading-spinner"></div>
       <div id="knowledge-loading-actions" class="knowledge-loading-actions hidden">
         <button id="knowledge-loading-cancel" type="button" class="btn-primary knowledge-loading-cancel">Cancel</button>
       </div>
@@ -1660,6 +1912,25 @@
       <div id="knowledge-decision-message" class="knowledge-decision-message"></div>
       <div class="knowledge-decision-actions">
         <button id="knowledge-decision-close" type="button" class="knowledge-action-btn clear">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="knowledge-guide-backdrop" class="knowledge-modal-backdrop hidden" aria-hidden="true">
+    <div class="knowledge-modal large" role="dialog" aria-modal="true" aria-labelledby="knowledge-guide-title">
+      <div class="knowledge-modal-header">
+        <h3 id="knowledge-guide-title">What can I add?</h3>
+        <button id="knowledge-guide-close" type="button" class="knowledge-modal-close" aria-label="Close">×</button>
+      </div>
+      <div class="knowledge-guide-content">
+        <p>Add practical TA9 or IntSight support knowledge in English that your team can search later.</p>
+        <ul>
+          <li>Make it TA9-specific: mention product context such as modules like Admin Studio, Federated Search, Data Model, entities/relations, dashboards, cases, indexing, permissions, or workflows.</li>
+          <li>Include concrete support details: step-by-step actions, settings, field names, configuration values, queries, endpoints, errors, troubleshooting notes, or runbook instructions.</li>
+          <li>Keep it meaningful and not too short. Very short or generic text is rejected. Aim for at least one clear procedure or technical explanation.</li>
+          <li>Avoid unrelated or generic content that is not connected to TA9 or IntSight usage, administration, troubleshooting, or operations.</li>
+          <li>Current flow: click <code>Prepare for RAG</code> first, review the prepared text, then click <code>Add</code>.</li>
+        </ul>
       </div>
     </div>
   </div>
@@ -1706,12 +1977,22 @@
     const knowledgePrepareCancel = document.getElementById('knowledge-prepare-cancel');
     const knowledgePrepareConfirm = document.getElementById('knowledge-prepare-confirm');
     const knowledgeLoading = document.getElementById('knowledge-loading');
+    const knowledgeLoadingTitle = document.getElementById('knowledge-loading-title');
     const knowledgeLoadingText = document.getElementById('knowledge-loading-text');
+    const knowledgeLoadingProgress = document.getElementById('knowledge-loading-progress');
+    const knowledgeLoadingSpinner = document.getElementById('knowledge-loading-spinner');
+    const knowledgeStepCheckIcon = document.getElementById('knowledge-step-check-icon');
+    const knowledgeStepCheckStatus = document.getElementById('knowledge-step-check-status');
+    const knowledgeStepUploadIcon = document.getElementById('knowledge-step-upload-icon');
+    const knowledgeStepUploadStatus = document.getElementById('knowledge-step-upload-status');
     const knowledgeLoadingActions = document.getElementById('knowledge-loading-actions');
     const knowledgeLoadingCancel = document.getElementById('knowledge-loading-cancel');
     const knowledgeDecisionBackdrop = document.getElementById('knowledge-decision-backdrop');
     const knowledgeDecisionMessage = document.getElementById('knowledge-decision-message');
     const knowledgeDecisionClose = document.getElementById('knowledge-decision-close');
+    const knowledgeGuideBackdrop = document.getElementById('knowledge-guide-backdrop');
+    const knowledgeGuideOpen = document.getElementById('knowledge-guide-open');
+    const knowledgeGuideClose = document.getElementById('knowledge-guide-close');
     const knowledgeToolbar = document.querySelector('.knowledge-toolbar');
     const knowledgeEditorWrap = document.querySelector('.knowledge-editor-wrap');
     const knowledgePageNav = document.getElementById('knowledge-page-nav');
@@ -1726,6 +2007,7 @@
     let knowledgePreparedForAdd = false;
     let knowledgeEditorLockedForPrepare = false;
     let englishOnlyToastTimer = null;
+    let currentFileBlobUrl = null;
     const KNOWLEDGE_DRAFT_KEY = 'ta9_knowledge_draft_html_v1';
 
     if (logoImg) {
@@ -1760,9 +2042,57 @@
       }, 1200);
     }
 
-    function showKnowledgeLoading(message, allowCancel) {
+    function setKnowledgeStepState(step, state, statusText) {
+      const isCheck = step === 'check';
+      const icon = isCheck ? knowledgeStepCheckIcon : knowledgeStepUploadIcon;
+      const status = isCheck ? knowledgeStepCheckStatus : knowledgeStepUploadStatus;
+      if (!icon || !status) return;
+
+      icon.classList.remove('running', 'done', 'error');
+      if (state === 'running') {
+        icon.classList.add('running');
+        icon.textContent = '';
+      } else if (state === 'done') {
+        icon.classList.add('done');
+        icon.textContent = '✓';
+      } else if (state === 'error') {
+        icon.classList.add('error');
+        icon.textContent = '✕';
+      } else {
+        icon.textContent = '○';
+      }
+
+      if (statusText) {
+        status.textContent = statusText;
+      }
+    }
+
+    function resetKnowledgeSteps() {
+      setKnowledgeStepState('check', 'pending', 'Pending');
+      setKnowledgeStepState('upload', 'pending', 'Pending');
+    }
+
+    function showKnowledgeLoading(message, allowCancel, options = {}) {
+      const title = options && options.title ? options.title : 'Checking TA9 context';
+      const showProgress = !!(options && options.showProgress);
+      const showSpinner = options && Object.prototype.hasOwnProperty.call(options, 'showSpinner')
+        ? !!options.showSpinner
+        : true;
+
+      if (knowledgeLoadingTitle) {
+        knowledgeLoadingTitle.textContent = title;
+      }
       if (knowledgeLoadingText) {
         knowledgeLoadingText.textContent = message || 'Waiting for AI approval before adding knowledge.';
+      }
+      if (knowledgeLoadingProgress) {
+        knowledgeLoadingProgress.classList.toggle('hidden', !showProgress);
+        if (!showProgress) {
+          resetKnowledgeSteps();
+        }
+      }
+      if (knowledgeLoadingSpinner) {
+        knowledgeLoadingSpinner.classList.toggle('hidden', !showSpinner);
       }
       if (knowledgeLoadingActions) {
         knowledgeLoadingActions.classList.toggle('hidden', !allowCancel);
@@ -1777,6 +2107,23 @@
       if (knowledgeLoadingActions) {
         knowledgeLoadingActions.classList.add('hidden');
       }
+      if (knowledgeLoadingProgress) {
+        knowledgeLoadingProgress.classList.add('hidden');
+      }
+      if (knowledgeLoadingSpinner) {
+        knowledgeLoadingSpinner.classList.remove('hidden');
+      }
+      resetKnowledgeSteps();
+      if (knowledgeLoadingTitle) {
+        knowledgeLoadingTitle.textContent = 'Checking TA9 context';
+      }
+      if (knowledgeLoadingText) {
+        knowledgeLoadingText.textContent = 'Waiting for AI approval before adding knowledge.';
+      }
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     function showKnowledgeDecisionMessage(message) {
@@ -1793,6 +2140,18 @@
       if (!knowledgeDecisionBackdrop) return;
       knowledgeDecisionBackdrop.classList.add('hidden');
       knowledgeDecisionBackdrop.setAttribute('aria-hidden', 'true');
+    }
+
+    function openKnowledgeGuide() {
+      if (!knowledgeGuideBackdrop) return;
+      knowledgeGuideBackdrop.classList.remove('hidden');
+      knowledgeGuideBackdrop.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeKnowledgeGuide() {
+      if (!knowledgeGuideBackdrop) return;
+      knowledgeGuideBackdrop.classList.add('hidden');
+      knowledgeGuideBackdrop.setAttribute('aria-hidden', 'true');
     }
 
     function toggleKnowledgeMenu(show) {
@@ -2036,12 +2395,34 @@
     function triggerFileDownload(fileItem) {
       if (!fileItem || !fileItem.data) return;
       const mimeType = fileItem.type || 'application/octet-stream';
+      let href = `data:${mimeType};base64,${fileItem.data}`;
+      let revokeAfterClick = false;
+
+      if (mimeType === 'application/pdf') {
+        try {
+          const binary = atob(fileItem.data);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: 'application/pdf' });
+          href = URL.createObjectURL(blob);
+          revokeAfterClick = true;
+        } catch (err) {
+          href = `data:${mimeType};base64,${fileItem.data}`;
+          revokeAfterClick = false;
+        }
+      }
+
       const link = document.createElement('a');
-      link.href = `data:${mimeType};base64,${fileItem.data}`;
+      link.href = href;
       link.download = fileItem.name || 'download';
       document.body.appendChild(link);
       link.click();
       link.remove();
+      if (revokeAfterClick) {
+        setTimeout(() => URL.revokeObjectURL(href), 1500);
+      }
     }
 
     function openFilePreview(fileItem) {
@@ -2065,21 +2446,41 @@
       const isExcel = ['xlsx', 'xls'].includes(fileExt);
       const isPdf = fileExt === 'pdf';
 
+      if (currentFileBlobUrl) {
+        URL.revokeObjectURL(currentFileBlobUrl);
+        currentFileBlobUrl = null;
+      }
+
       if (imagePreviewDownload) {
         imagePreviewDownload.classList.remove('hidden');
         imagePreviewDownload.onclick = () => triggerFileDownload(fileItem);
       }
 
       if (isPdf) {
-        const iframe = document.createElement('iframe');
-        iframe.style.width = '100%';
-        iframe.style.height = '100%';
-        iframe.style.minHeight = '72vh';
-        iframe.style.border = 'none';
-        iframe.src = `data:application/pdf;base64,${fileItem.data}`;
-        filePreviewContent.appendChild(iframe);
-        showModal();
-        return;
+        try {
+          const binary = atob(fileItem.data);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: 'application/pdf' });
+          currentFileBlobUrl = URL.createObjectURL(blob);
+
+          const iframe = document.createElement('iframe');
+          iframe.style.width = '100%';
+          iframe.style.height = '100%';
+          iframe.style.minHeight = '72vh';
+          iframe.style.border = 'none';
+          iframe.src = `${currentFileBlobUrl}#toolbar=0&navpanes=0&scrollbar=1`;
+          iframe.title = fileItem.name || 'PDF preview';
+          filePreviewContent.appendChild(iframe);
+          showModal();
+          return;
+        } catch (err) {
+          filePreviewContent.textContent = 'Unable to render PDF preview. Click Download to view.';
+          showModal();
+          return;
+        }
       }
 
       if (isText) {
@@ -2223,6 +2624,10 @@
       imagePreviewMeta.textContent = '';
       filePreviewContent.innerHTML = '';
       filePreviewBody.classList.add('hidden');
+      if (currentFileBlobUrl) {
+        URL.revokeObjectURL(currentFileBlobUrl);
+        currentFileBlobUrl = null;
+      }
       if (imagePreviewDownload) {
         imagePreviewDownload.classList.add('hidden');
         imagePreviewDownload.onclick = null;
@@ -2338,7 +2743,14 @@
         if (!files.length) return;
 
         try {
-          showKnowledgeLoading('Waiting for AI approval before adding knowledge.');
+          showKnowledgeLoading(
+            'Step 1 of 2: checking if this file is valid TA9 knowledge.',
+            false,
+            { title: 'Adding knowledge file', showProgress: true, showSpinner: false }
+          );
+          setKnowledgeStepState('check', 'running', 'Checking in progress...');
+          setKnowledgeStepState('upload', 'pending', 'Waiting for knowledge check.');
+
           const payloadFiles = [];
           for (const file of files) {
             const fileData = await readFileAsBase64(file);
@@ -2350,26 +2762,65 @@
             });
           }
 
-          const resp = await fetch('/adminchat/api/knowledge/add', {
+          const prepareResp = await fetch('/adminchat/api/knowledge/prepare', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ mode: 'content', text: '', files: payloadFiles })
           });
-          const data = await resp.json();
-          if (!resp.ok) {
-            showKnowledgeDecisionMessage((data && (data.message || data.detail)) || 'Upload failed');
+          const prepareData = await prepareResp.json();
+          if (!prepareResp.ok) {
+            setKnowledgeStepState('check', 'error', 'Failed.');
+            setKnowledgeStepState('upload', 'pending', 'Not started.');
+            showKnowledgeDecisionMessage((prepareData && (prepareData.message || prepareData.detail)) || 'Knowledge check failed');
             return;
           }
-          if (data.approved) {
-            showKnowledgeToast(data.message || 'Knowledge added.', false);
+
+          if (!prepareData.approved) {
+            setKnowledgeStepState('check', 'error', 'Not approved.');
+            setKnowledgeStepState('upload', 'pending', 'Not started.');
+            showKnowledgeDecisionMessage(prepareData.message || prepareData.detail || 'Content rejected.');
+            return;
+          }
+
+          setKnowledgeStepState('check', 'done', 'Completed.');
+          setKnowledgeStepState('upload', 'running', 'Uploading and embedding...');
+          if (knowledgeLoadingText) {
+            knowledgeLoadingText.textContent = 'Step 2 of 2: uploading and embedding file.';
+          }
+
+          const addResp = await fetch('/adminchat/api/knowledge/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'content', text: '', files: payloadFiles })
+          });
+          const addData = await addResp.json();
+          if (!addResp.ok) {
+            setKnowledgeStepState('upload', 'error', 'Failed.');
+            showKnowledgeDecisionMessage((addData && (addData.message || addData.detail)) || 'Upload failed');
+            return;
+          }
+
+          if (addData.approved) {
+            setKnowledgeStepState('upload', 'done', 'Completed.');
+            if (knowledgeLoadingText) {
+              knowledgeLoadingText.textContent = 'All steps completed. Closing...';
+            }
+            await sleep(900);
+            hideKnowledgeLoading();
+            showKnowledgeToast(addData.message || 'Knowledge added.', false);
           } else {
-            showKnowledgeDecisionMessage(data.message || data.detail || 'Content rejected.');
+            setKnowledgeStepState('upload', 'error', 'Not approved.');
+            showKnowledgeDecisionMessage(addData.message || addData.detail || 'Content rejected.');
           }
         } catch (err) {
           console.error('Knowledge file upload error:', err);
+          setKnowledgeStepState('check', 'error', 'Failed.');
+          setKnowledgeStepState('upload', 'error', 'Failed.');
           showKnowledgeToast('Failed to add knowledge.', true);
         } finally {
-          hideKnowledgeLoading();
+          if (!knowledgeLoading.classList.contains('hidden')) {
+            hideKnowledgeLoading();
+          }
           knowledgeUploadInput.value = '';
         }
       });
@@ -2397,6 +2848,20 @@
         if (e.target === knowledgeDecisionBackdrop) {
           return;
         }
+      });
+    }
+
+    if (knowledgeGuideOpen) {
+      knowledgeGuideOpen.addEventListener('click', openKnowledgeGuide);
+    }
+
+    if (knowledgeGuideClose) {
+      knowledgeGuideClose.addEventListener('click', closeKnowledgeGuide);
+    }
+
+    if (knowledgeGuideBackdrop) {
+      knowledgeGuideBackdrop.addEventListener('click', (e) => {
+        if (e.target === knowledgeGuideBackdrop) return;
       });
     }
 
@@ -2547,10 +3012,12 @@
           if (replaceEditor && responseData.prepared_text) {
             replaceEditorContent(responseData.prepared_text);
             knowledgePreparedForAdd = true;
+            setKnowledgeEditorLocked(false);
             showKnowledgeToast(responseData.message || successFallback, false);
           } else {
             showKnowledgeToast(responseData.message || successFallback, false);
             knowledgePreparedForAdd = false;
+            setKnowledgeEditorLocked(false);
             clearKnowledgeDraft();
             knowledgeContentEditor.innerHTML = '';
             if (knowledgePageNav) {
@@ -2560,14 +3027,17 @@
             closeKnowledgeContentModal();
           }
         } else {
+          setKnowledgeEditorLocked(false);
           showKnowledgeDecisionMessage(responseData.message || responseData.detail || 'Content rejected.');
         }
       } catch (err) {
         if (err && err.name === 'AbortError') {
+          setKnowledgeEditorLocked(false);
           showKnowledgeToast(isPrepareRequest ? 'Preparation canceled.' : 'Request canceled.', true);
           return;
         }
         console.error('Knowledge content error:', err);
+        setKnowledgeEditorLocked(false);
         showKnowledgeToast((err && err.message) ? err.message : 'Failed to add knowledge.', true);
       } finally {
         activeKnowledgeRequestController = null;
@@ -2578,7 +3048,7 @@
 
     knowledgeContentAdd.addEventListener('click', async () => {
       if (!knowledgePreparedForAdd) {
-        setKnowledgeEditorLocked(true);
+        setKnowledgeEditorLocked(false);
         showKnowledgeToast('Please click Prepare for RAG first, then Add.', true);
         return;
       }
@@ -2727,178 +3197,99 @@
       }
     }
 
-    // Enhance code blocks with copy button
-    function enhanceCodeBlocks(container) {
-      const codeBlocks = container.querySelectorAll('pre code');
-      codeBlocks.forEach((codeBlock, index) => {
-        const pre = codeBlock.parentElement;
-        
-        // Skip if already enhanced
-        if (pre.querySelector('.code-header')) return;
-        
-        // Detect language from class name (marked.js adds language-xxx)
-        let language = 'code';
-        const classes = codeBlock.className.split(' ');
-        for (const cls of classes) {
-          if (cls.startsWith('language-')) {
-            language = cls.replace('language-', '');
-            break;
-          }
-        }
-        
-        // Create header
-        const header = document.createElement('div');
-        header.className = 'code-header';
-        
-        const langLabel = document.createElement('span');
-        langLabel.className = 'code-language';
-        langLabel.textContent = language;
-        
-        const copyBtn = document.createElement('button');
-        copyBtn.type = 'button';
-        copyBtn.className = 'copy-code-btn';
-        copyBtn.innerHTML = '📋 Copy code';
-        copyBtn.onclick = async (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          const code = codeBlock.textContent;
-          
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            try {
-              await navigator.clipboard.writeText(code);
-              const originalText = copyBtn.innerHTML;
-              copyBtn.innerHTML = '✓ Copied!';
-              copyBtn.classList.add('copied');
-              setTimeout(() => {
-                copyBtn.innerHTML = originalText;
-                copyBtn.classList.remove('copied');
-              }, 2000);
-              return;
-            } catch (err) {
-              console.log('Clipboard API failed, trying fallback:', err);
-            }
-          }
-          
-          const textarea = document.createElement('textarea');
-          textarea.value = code;
-          document.body.appendChild(textarea);
-          textarea.select();
-          try {
-            document.execCommand('copy');
-            const originalText = copyBtn.innerHTML;
-            copyBtn.innerHTML = '✓ Copied!';
-            copyBtn.classList.add('copied');
-            setTimeout(() => {
-              copyBtn.innerHTML = originalText;
-              copyBtn.classList.remove('copied');
-            }, 2000);
-          } catch (err) {
-            console.error('Fallback copy failed:', err);
-          }
-          document.body.removeChild(textarea);
-        };
-        
-        header.appendChild(langLabel);
-        header.appendChild(copyBtn);
-        pre.insertBefore(header, codeBlock);
+    marked.setOptions({
+      gfm: true,
+      breaks: true,
+      mangle: false,
+      headerIds: false,
+      langPrefix: 'language-'
+    });
+
+    function sanitizeMarkdownHtml(html) {
+      if (window.DOMPurify) {
+        return DOMPurify.sanitize(html, {
+          USE_PROFILES: { html: true },
+          ALLOWED_ATTR: ['class', 'href', 'target', 'rel', 'title']
+        });
+      }
+      return html;
+    }
+
+    function renderMarkdownFragment(markdown) {
+      const parsed = marked.parse(markdown || '');
+      return sanitizeMarkdownHtml(parsed);
+    }
+
+    function wrapTables(container) {
+      const tables = container.querySelectorAll('table');
+      tables.forEach((table) => {
+        if (table.parentElement && table.parentElement.classList.contains('table-wrap')) return;
+        const wrapper = document.createElement('div');
+        wrapper.className = 'table-wrap';
+        table.parentNode.insertBefore(wrapper, table);
+        wrapper.appendChild(table);
       });
     }
 
-    // Render markdown answer
-    function renderAnswer(markdown, targetBox) {
-      try {
-        let html = marked.parse(markdown);
-        
-        const hasStructuredSections = /^(Ticket type:|Title:|Product:|Service:)/m.test(markdown);
-        
-        if (hasStructuredSections) {
-          const parts = markdown.split(/^-----$/m);
-          if (parts.length >= 2) {
-            const responsePart = parts[0].trim();
-            const customerPart = parts.slice(1).join('\n-----\n').trim();
-            
-            const responseHtml = marked.parse(responsePart);
-            const responseDiv = document.createElement('div');
-            responseDiv.className = 'response-box';
-            responseDiv.innerHTML = responseHtml;
-            enhanceCodeBlocks(responseDiv);
-            targetBox.appendChild(responseDiv);
-            
-            if (customerPart) {
-              const customerHtml = marked.parse(customerPart);
-              const customerDiv = document.createElement('div');
-              customerDiv.className = 'customer-box';
-              customerDiv.innerHTML = customerHtml;
-              enhanceCodeBlocks(customerDiv);
-              targetBox.appendChild(customerDiv);
-            }
-            
-            return;
-          }
-        }
-        
-        targetBox.innerHTML = html;
-        enhanceCodeBlocks(targetBox);
-      } catch (e) {
-        console.error('Error rendering markdown:', e);
-        targetBox.innerHTML = '<p>' + markdown.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</p>';
-      }
-    }
-
-    // Enhance code blocks with copy button
     function enhanceCodeBlocks(container) {
       const codeBlocks = container.querySelectorAll('pre code');
-      codeBlocks.forEach((codeBlock, index) => {
+      codeBlocks.forEach((codeBlock) => {
         const pre = codeBlock.parentElement;
-        
-        // Skip if already enhanced
+        if (!pre) return;
+
+        if (window.hljs) {
+          try {
+            window.hljs.highlightElement(codeBlock);
+          } catch (err) {
+            console.warn('[highlight] failed:', err);
+          }
+        }
+
         if (pre.querySelector('.code-header')) return;
-        
-        // Detect language from class name (marked.js adds language-xxx)
+
         let language = 'code';
-        const classes = codeBlock.className.split(' ');
+        const classes = (codeBlock.className || '').split(' ');
         for (const cls of classes) {
           if (cls.startsWith('language-')) {
-            language = cls.replace('language-', '');
+            language = cls.replace('language-', '') || 'code';
             break;
           }
         }
-        
-        // Create header
+
         const header = document.createElement('div');
         header.className = 'code-header';
-        
+
         const langLabel = document.createElement('span');
         langLabel.className = 'code-language';
         langLabel.textContent = language;
-        
+
         const copyBtn = document.createElement('button');
-        copyBtn.type = 'button';  // Prevent form submission
+        copyBtn.type = 'button';
         copyBtn.className = 'copy-code-btn';
-        copyBtn.innerHTML = '📋 Copy code';
+        copyBtn.textContent = 'Copy';
         copyBtn.onclick = async (e) => {
           e.preventDefault();
           e.stopPropagation();
-          const code = codeBlock.textContent;
-          
-          // Try modern clipboard API first
+          const code = codeBlock.textContent || '';
+
+          const setCopied = () => {
+            const original = copyBtn.textContent;
+            copyBtn.textContent = 'Copied';
+            copyBtn.classList.add('copied');
+            setTimeout(() => {
+              copyBtn.textContent = original;
+              copyBtn.classList.remove('copied');
+            }, 1400);
+          };
+
           if (navigator.clipboard && navigator.clipboard.writeText) {
             try {
               await navigator.clipboard.writeText(code);
-              const originalText = copyBtn.innerHTML;
-              copyBtn.innerHTML = '✓ Copied!';
-              copyBtn.classList.add('copied');
-              setTimeout(() => {
-                copyBtn.innerHTML = originalText;
-                copyBtn.classList.remove('copied');
-              }, 2000);
+              setCopied();
               return;
-            } catch (err) {
-              console.log('Clipboard API failed, trying fallback:', err);
-            }
+            } catch (err) {}
           }
-          
-          // Fallback method for older browsers or non-HTTPS
+
           try {
             const textArea = document.createElement('textarea');
             textArea.value = code;
@@ -2908,33 +3299,14 @@
             document.body.appendChild(textArea);
             textArea.focus();
             textArea.select();
-            
             const successful = document.execCommand('copy');
             document.body.removeChild(textArea);
-            
-            if (successful) {
-              const originalText = copyBtn.innerHTML;
-              copyBtn.innerHTML = '✓ Copied!';
-              copyBtn.classList.add('copied');
-              setTimeout(() => {
-                copyBtn.innerHTML = originalText;
-                copyBtn.classList.remove('copied');
-              }, 2000);
-            } else {
-              copyBtn.innerHTML = '❌ Failed';
-              setTimeout(() => {
-                copyBtn.innerHTML = '📋 Copy code';
-              }, 2000);
-            }
+            if (successful) setCopied();
           } catch (err) {
-            console.error('All copy methods failed:', err);
-            copyBtn.innerHTML = '❌ Failed';
-            setTimeout(() => {
-              copyBtn.innerHTML = '📋 Copy code';
-            }, 2000);
+            console.error('Copy failed:', err);
           }
         };
-        
+
         header.appendChild(langLabel);
         header.appendChild(copyBtn);
         pre.insertBefore(header, codeBlock);
@@ -2944,20 +3316,15 @@
     // Render markdown answer; structured replies show boxed answer + customer reply
     function renderAnswer(markdown, targetBox) {
       try {
-        marked.setOptions({ mangle: false, headerIds: false, breaks: true });
+        const raw = markdown || '';
+        const hasResponse = raw.includes('---ANSWER_START---');
 
-        // Check if this is a structured response with new delimiters
-        const hasResponse = markdown.includes('---ANSWER_START---');
-        console.log('[renderAnswer] hasResponse:', hasResponse);
-        console.log('[renderAnswer] markdown preview:', markdown.substring(0, 200));
+        targetBox.innerHTML = '';
+        targetBox.style.display = 'flex';
+        targetBox.style.flexDirection = 'column';
+        targetBox.style.gap = '24px';
 
         if (hasResponse) {
-          console.log('[renderAnswer] Rendering structured response');
-          targetBox.innerHTML = '';
-          targetBox.style.display = 'flex';
-          targetBox.style.flexDirection = 'column';
-          targetBox.style.gap = '20px';
-
           const sections = [
             { delim: 'ANSWER', className: 'response-box', title: 'Answer' },
             { delim: 'CUSTOMER_REPLY', className: 'customer-box', title: 'Customer reply' },
@@ -2969,41 +3336,36 @@
           for (const section of sections) {
             const startDelim = `---${section.delim}_START---`;
             const endDelim = `---${section.delim}_END---`;
+            const startIdx = raw.indexOf(startDelim);
+            const endIdx = raw.indexOf(endDelim);
+            if (startIdx === -1 || endIdx === -1) continue;
 
-            const startIdx = markdown.indexOf(startDelim);
-            const endIdx = markdown.indexOf(endDelim);
+            const content = raw.substring(startIdx + startDelim.length, endIdx).trim();
+            if (!content) continue;
 
-            console.log(`[renderAnswer] Section ${section.delim}: startIdx=${startIdx}, endIdx=${endIdx}`);
+            const sectionDiv = document.createElement('div');
+            sectionDiv.className = section.className;
 
-            if (startIdx !== -1 && endIdx !== -1) {
-              const content = markdown.substring(startIdx + startDelim.length, endIdx).trim();
-              if (content) {
-                console.log(`[renderAnswer] Adding section ${section.delim}, content length=${content.length}`);
-                const sectionDiv = document.createElement('div');
-                sectionDiv.className = section.className;
-
-                if (section.title) {
-                  const titleEl = document.createElement('h3');
-                  titleEl.textContent = section.title;
-                  sectionDiv.appendChild(titleEl);
-                }
-
-                const htmlContent = marked.parse(content);
-                const contentDiv = document.createElement('div');
-                contentDiv.innerHTML = htmlContent;
-                sectionDiv.appendChild(contentDiv);
-
-                targetBox.appendChild(sectionDiv);
-              }
+            if (section.title) {
+              const titleEl = document.createElement('h3');
+              titleEl.textContent = section.title;
+              sectionDiv.appendChild(titleEl);
             }
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'chatgpt-markdown';
+            contentDiv.innerHTML = renderMarkdownFragment(content);
+            sectionDiv.appendChild(contentDiv);
+            targetBox.appendChild(sectionDiv);
           }
         } else {
-          console.log('[renderAnswer] Rendering unstructured response');
-          const html = marked.parse(markdown || '');
-          targetBox.innerHTML = html;
+          const contentDiv = document.createElement('div');
+          contentDiv.className = 'chatgpt-markdown';
+          contentDiv.innerHTML = renderMarkdownFragment(raw);
+          targetBox.appendChild(contentDiv);
         }
-        
-        // Enhance code blocks with copy buttons
+
+        wrapTables(targetBox);
         enhanceCodeBlocks(targetBox);
       } catch (e) {
         console.error('[renderAnswer] Error:', e);

@@ -4,3 +4,9 @@ chromadb
 python-dotenv
 requests
 openai
+PyPDF2
+python-docx
+openpyxl
+Pillow
+pdfplumber
+PyMuPDF
