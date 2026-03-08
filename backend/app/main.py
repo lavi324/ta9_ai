@@ -16,8 +16,7 @@ import hashlib
 import fnmatch
 import chromadb
 import base64
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime
 import asyncio
 import re
 from html import unescape
@@ -60,6 +59,12 @@ try:
 except ImportError:
     HAS_PYMUPDF = False
 
+try:
+    import tiktoken
+    HAS_TIKTOKEN = True
+except ImportError:
+    HAS_TIKTOKEN = False
+
 load_dotenv()
 
 # ---------------------------------------------------------------------
@@ -80,11 +85,15 @@ WIKI_ROOT = os.getenv("WIKI_DIR", "/app/wiki_files")
 KNOWLEDGE_DIR = os.getenv("KNOWLEDGE_DIR", WIKI_ROOT)
 
 CHROMA_DIR = os.getenv("CHROMA_DIR", "/app/chroma_db")
+SYSTEM_PROMPT_FILE = os.getenv("SYSTEM_PROMPT_FILE", "/app/system_prompt_template.txt")
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 COLLECTION_NAME = "Intsight"
 MEMORY_COLLECTION_NAME = "New_Knowledge"
+VECTOR_DB_PREVIEW_CHARS = 280
+VECTOR_DB_DEFAULT_CHUNK_LIMIT = 25
+VECTOR_DB_MAX_CHUNK_LIMIT = 100
 PDF_MAX_PAGES = int(os.getenv("PDF_MAX_PAGES", "0"))
 PDF_OCR_ENABLED = os.getenv("PDF_OCR_ENABLED", "true").lower() in ("1", "true", "yes")
 PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "25"))
@@ -92,6 +101,37 @@ PDF_TABLE_EXTRACTION_ENABLED = os.getenv("PDF_TABLE_EXTRACTION_ENABLED", "true")
 VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "1200"))
 TABLE_ROW_START_TAG = "[TABLE_ROW]"
 TABLE_ROW_END_TAG = "[/TABLE_ROW]"
+
+DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
+    "You are a TA9 / IntSight customer support assistant with deep technical knowledge. "
+    "Your role is to provide clear, accurate, and helpful answers in a natural, conversational way.\n\n"
+    "INSTRUCTIONS:\n"
+    "1. When the user attaches files (images, documents), those files are your PRIMARY source - answer directly from them.\n"
+    "2. When you see [Image Content from ...] sections, that means the image has been analyzed - describe what you see in the analysis naturally.\n"
+    "3. For images: Provide a comprehensive explanation of what is shown in the provided analysis. Highlight key details, technical context, and likely causes when relevant.\n"
+    "4. When a ticket is selected, use it to understand the user's issue and provide relevant solutions.\n"
+    "5. Use knowledge base context to supplement your answer or provide additional related information.\n"
+    "6. Use fenced code blocks (```bash, ```python, ```sql, etc.) for any commands or code snippets.\n"
+    "7. If the context contains redundant or overlapping information, synthesize it into a single coherent answer.\n"
+    "8. Do NOT repeat information from different sources - intelligently merge related points.\n"
+    "8.1 Use a balanced approach across both collections (Intsight and New_Knowledge) and do not assume one is always better.\n"
+    "8.2 If relevant details are split across both collections, combine them into one integrated, consistent answer.\n"
+    "9. Grounding is mandatory: only state facts supported by the provided context sections.\n"
+    "9.1 If a requested detail is not in context, explicitly say it is not available in the current knowledge context.\n"
+    "9.2 Never invent commands, configuration keys, UI paths, API names, or procedural steps.\n"
+    "10. Keep a professional, helpful tone that encourages follow-up questions.\n"
+    "11. Answer naturally and conversationally - avoid rigid structured formats unless specifically requested.\n"
+    "12. For Intsight or system configuration guidance, prioritize instructions that use Admin Studio (UI-based configuration) by default.\n"
+    "13. Provide database-level (DB) configuration instructions only when the user explicitly asks for DB configuration, SQL/database changes, or backend table-level steps.\n"
+    "14. Never hard-refuse when at least partial context exists; provide the best grounded answer possible, explicitly flag uncertainty, and ask one focused clarifying question if needed.\n"
+    "{foundational_instruction}"
+    "{ta9_instruction}\n"
+    "{combined_context}\n\n"
+    "Question: {question}\n\n"
+    "Answer:\n"
+)
+
+SYSTEM_PROMPT_REQUIRED_FIELDS = {"combined_context", "question"}
 
 app = FastAPI(title="Wiki RAG API")
 
@@ -103,6 +143,84 @@ MAX_CONVERSATION_MESSAGES = 12
 conversation_store: Dict[str, Deque[Dict[str, str]]] = defaultdict(
     lambda: deque(maxlen=MAX_CONVERSATION_MESSAGES)
 )
+
+
+class _PromptTemplateValues(dict):
+    def __missing__(self, key: str) -> str:
+        return ""
+
+
+def _validate_system_prompt_template(template: str) -> str:
+    candidate = str(template or "")
+    if not candidate.strip():
+        raise ValueError("System prompt template cannot be empty.")
+
+    missing_fields = [field for field in sorted(SYSTEM_PROMPT_REQUIRED_FIELDS) if f"{{{field}}}" not in candidate]
+    if missing_fields:
+        raise ValueError(
+            "System prompt template is missing required placeholders: "
+            + ", ".join(f"{{{field}}}" for field in missing_fields)
+        )
+
+    try:
+        candidate.format_map(
+            _PromptTemplateValues(
+                {
+                    "foundational_instruction": "",
+                    "ta9_instruction": "",
+                    "combined_context": "test context",
+                    "question": "test question",
+                }
+            )
+        )
+    except Exception as exc:
+        raise ValueError(f"System prompt template is invalid: {exc}") from exc
+
+    return candidate
+
+
+def _read_system_prompt_template() -> str:
+    try:
+        with open(SYSTEM_PROMPT_FILE, "r", encoding="utf-8") as handle:
+            template = handle.read()
+        return _validate_system_prompt_template(template)
+    except FileNotFoundError:
+        return DEFAULT_SYSTEM_PROMPT_TEMPLATE
+    except Exception as exc:
+        print(f"[PROMPT][WARN] Failed to read system prompt template from {SYSTEM_PROMPT_FILE}: {exc}")
+        return DEFAULT_SYSTEM_PROMPT_TEMPLATE
+
+
+def _write_system_prompt_template(template: str) -> str:
+    validated = _validate_system_prompt_template(template)
+    parent = os.path.dirname(SYSTEM_PROMPT_FILE)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(SYSTEM_PROMPT_FILE, "w", encoding="utf-8") as handle:
+        handle.write(validated)
+    return validated
+
+
+def _build_system_prompt(
+    question: str,
+    combined_context: str,
+    foundational_instruction: str = "",
+    ta9_instruction: str = "",
+) -> str:
+    template = _read_system_prompt_template()
+    values = _PromptTemplateValues(
+        {
+            "foundational_instruction": foundational_instruction,
+            "ta9_instruction": ta9_instruction,
+            "combined_context": combined_context,
+            "question": question,
+        }
+    )
+    try:
+        return template.format_map(values)
+    except Exception as exc:
+        print(f"[PROMPT][WARN] Failed to render custom system prompt template, falling back to default: {exc}")
+        return DEFAULT_SYSTEM_PROMPT_TEMPLATE.format_map(values)
 
 
 # ---------------------------------------------------------------------
@@ -2533,9 +2651,9 @@ def _get_vector_collection(collection_name: str):
 
 def _vector_collection_description(collection_name: str) -> str:
     if collection_name == COLLECTION_NAME:
-        return "Primary operational knowledge base"
+        return "Wiki + User Guide + Old Tickets Summeries"
     if collection_name == MEMORY_COLLECTION_NAME:
-        return "User-added and curated knowledge"
+        return "New User Knowledge"
     return "Vector collection"
 
 
@@ -2552,6 +2670,61 @@ def _display_source_name(source: str) -> str:
     if not source_text:
         return "Untitled document"
     return os.path.basename(unquote(source_text)) or source_text
+
+
+def _normalize_vector_input_type(value: Any) -> Optional[str]:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"file", "upload", "uploaded_file", "uploaded-file"}:
+        return "file"
+    if normalized in {"free_text", "free-text", "text", "content", "manual"}:
+        return "free_text"
+    return None
+
+
+def _looks_like_uploaded_file_content(text: str) -> bool:
+    normalized_text = str(text or "").strip()
+    if not normalized_text:
+        return False
+    if "---FILE SEPARATOR---" in normalized_text:
+        return True
+    if re.search(r"(?m)^\*\*File:\s*.+?\*\*(?:\s*\(.+?\))?$", normalized_text):
+        return True
+    if re.search(r"(?mi)^\[Image Content from .+\]$", normalized_text):
+        return True
+    return bool(re.search(r"(?i)\.(pdf|docx?|xlsx?|csv|png|jpe?g|gif|webp|txt|md)\b", normalized_text[:240]))
+
+
+def _get_tokenizer_encoding():
+    if not HAS_TIKTOKEN:
+        return None
+
+    for model_name in (OPENAI_EMBEDDING_MODEL, OPENAI_CHAT_MODEL):
+        try:
+            return tiktoken.encoding_for_model(model_name)
+        except KeyError:
+            continue
+
+    return tiktoken.get_encoding("cl100k_base")
+
+
+def _infer_vector_document_input_type(collection_name: str, source: str, items: List[dict], merged_content: str) -> Optional[str]:
+    if collection_name != MEMORY_COLLECTION_NAME:
+        return None
+
+    seed_meta = dict((items[0].get("metadata") if items else {}) or {})
+    is_user_knowledge = str(seed_meta.get("collection") or "").strip().lower() == "user_knowledge" or str(source or "").startswith("user:content:")
+    if not is_user_knowledge:
+        return None
+
+    for item in items:
+        safe_meta = item.get("metadata") or {}
+        explicit_type = _normalize_vector_input_type(safe_meta.get("input_type") or safe_meta.get("source_type"))
+        if explicit_type == "file":
+            return explicit_type
+        if explicit_type == "free_text" and not _looks_like_uploaded_file_content(merged_content):
+            return explicit_type
+
+    return "file" if _looks_like_uploaded_file_content(merged_content) else "free_text"
 
 
 def _extract_document_heading(text: str) -> str:
@@ -2584,14 +2757,135 @@ def _find_chunk_overlap(existing_text: str, next_chunk: str, max_overlap: int = 
     return 0
 
 
-def _merge_chunk_texts(chunks: List[str]) -> str:
+def _merge_chunk_texts(chunks: List[str], max_chars: Optional[int] = None) -> str:
     if not chunks:
         return ""
-    merged = chunks[0]
-    for chunk in chunks[1:]:
-        overlap_size = _find_chunk_overlap(merged, chunk)
-        merged += chunk[overlap_size:]
-    return merged
+    merged_parts: List[str] = []
+    merged_length = 0
+    merged_tail = ""
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+
+        if not merged_parts:
+            piece = chunk
+        else:
+            overlap_size = _find_chunk_overlap(merged_tail, chunk)
+            piece = chunk[overlap_size:]
+
+        if not piece:
+            continue
+
+        if max_chars is not None:
+            remaining = max_chars - merged_length
+            if remaining <= 0:
+                break
+            if len(piece) > remaining:
+                piece = piece[:remaining]
+
+        merged_parts.append(piece)
+        merged_length += len(piece)
+        merged_tail = (merged_tail + piece)[-CHUNK_OVERLAP:]
+
+        if max_chars is not None and merged_length >= max_chars:
+            break
+
+    return "".join(merged_parts)
+
+
+def _vector_chunk_page_bounds(limit: int, offset: int) -> Tuple[int, int]:
+    safe_limit = max(1, min(int(limit), VECTOR_DB_MAX_CHUNK_LIMIT))
+    safe_offset = max(0, int(offset))
+    return safe_limit, safe_offset
+
+
+def _get_sorted_document_rows(
+    collection_name: str,
+    source: str,
+    include_embeddings: bool = False,
+) -> List[dict]:
+    target_collection = _get_vector_collection(collection_name)
+    include_fields = ["documents", "metadatas"]
+    if include_embeddings:
+        include_fields.append("embeddings")
+
+    raw = target_collection.get(where={"source": source}, include=include_fields)
+    ids = list(raw.get("ids", []) or [])
+    docs = list(raw.get("documents", []) or [])
+    metas = list(raw.get("metadatas", []) or [])
+    embeddings = list(raw.get("embeddings", []) or []) if include_embeddings else []
+
+    rows: List[dict] = []
+    for idx, (doc_id, doc_text, meta) in enumerate(zip(ids, docs, metas)):
+        safe_meta = meta or {}
+        rows.append(
+            {
+                "id": doc_id,
+                "chunk": int(safe_meta.get("chunk", 0) or 0),
+                "content": doc_text or "",
+                "metadata": safe_meta,
+                "embedding": embeddings[idx] if include_embeddings and idx < len(embeddings) else None,
+            }
+        )
+
+    rows.sort(key=lambda item: item["chunk"])
+    return rows
+
+
+def _build_chunk_page(rows: List[dict], limit: int, offset: int, include_embeddings: bool = False) -> Tuple[List[dict], int, int]:
+    safe_limit, safe_offset = _vector_chunk_page_bounds(limit, offset)
+    page_rows = rows[safe_offset:safe_offset + safe_limit]
+    chunk_items: List[dict] = []
+    for row in page_rows:
+        chunk_items.append(
+            {
+                "id": row["id"],
+                "chunk": row["chunk"],
+                "content": row["content"],
+                "metadata": row["metadata"],
+                "embedding": _safe_embedding_to_list(row.get("embedding")) if include_embeddings else None,
+                "embedding_loaded": bool(include_embeddings),
+            }
+        )
+    return chunk_items, safe_limit, safe_offset
+
+
+def _get_vector_dimensions(collection_name: str, chunk_id: Optional[str]) -> int:
+    if not chunk_id:
+        return 0
+    target_collection = _get_vector_collection(collection_name)
+    raw = target_collection.get(ids=[chunk_id], include=["embeddings"])
+    raw_embeddings = raw.get("embeddings")
+    if raw_embeddings is None:
+        return 0
+    embeddings = list(raw_embeddings)
+    if not embeddings:
+        return 0
+    return len(_safe_embedding_to_list(embeddings[0]))
+
+
+def _count_collection_documents(collection_name: str) -> int:
+    target_collection = _get_vector_collection(collection_name)
+    raw = target_collection.get(include=["metadatas"])
+    sources = {
+        str((meta or {}).get("source") or "").strip()
+        for meta in list(raw.get("metadatas", []) or [])
+        if str((meta or {}).get("source") or "").strip()
+    }
+    return len(sources)
+
+
+def _count_text_tokens(text: str) -> int:
+    raw_text = str(text or "")
+    if not raw_text:
+        return 0
+
+    encoding = _get_tokenizer_encoding()
+    if encoding is None:
+        raise RuntimeError("tiktoken is required for exact token counting")
+
+    return len(encoding.encode(raw_text, disallowed_special=()))
 
 
 def _group_collection_documents(collection_name: str) -> List[dict]:
@@ -2635,9 +2929,12 @@ def _group_collection_documents(collection_name: str) -> List[dict]:
     summaries: List[dict] = []
     for source, payload in grouped.items():
         items = sorted(payload["items"], key=lambda item: item["chunk"])
-        merged_text = _merge_chunk_texts([item["document"] for item in items])
-        preview = re.sub(r"\s+", " ", merged_text).strip()[:280]
+        merged_content = _merge_chunk_texts([item["document"] for item in items])
+        preview = re.sub(r"\s+", " ", merged_content).strip()
+        if len(preview) > VECTOR_DB_PREVIEW_CHARS:
+            preview = preview[:VECTOR_DB_PREVIEW_CHARS].rstrip() + "..."
         title = _build_document_title(source, items[0]["document"] if items else "")
+        input_type = _infer_vector_document_input_type(collection_name, source, items, merged_content)
         summaries.append(
             {
                 "source": source,
@@ -2645,6 +2942,8 @@ def _group_collection_documents(collection_name: str) -> List[dict]:
                 "display_source": _display_source_name(source),
                 "preview": preview,
                 "chunk_count": len(items),
+                "token_count": _count_text_tokens(merged_content),
+                "input_type": input_type,
                 "updated_at": payload["updated_at"] or None,
             }
         )
@@ -2653,44 +2952,41 @@ def _group_collection_documents(collection_name: str) -> List[dict]:
     return summaries
 
 
-def _build_vector_document_detail(collection_name: str, source: str) -> dict:
-    target_collection = _get_vector_collection(collection_name)
-    raw = target_collection.get(
-        where={"source": source},
-        include=["documents", "metadatas", "embeddings"],
+def _build_vector_document_detail(
+    collection_name: str,
+    source: str,
+    chunk_limit: int = VECTOR_DB_DEFAULT_CHUNK_LIMIT,
+    chunk_offset: int = 0,
+    include_embeddings: bool = False,
+    include_full_content: bool = True,
+) -> dict:
+    rows = _get_sorted_document_rows(
+        collection_name,
+        source,
+        include_embeddings=include_embeddings,
     )
-
-    ids = list(raw.get("ids", []) or [])
-    if not ids:
+    if not rows:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    docs = list(raw.get("documents", []) or [])
-    metas = list(raw.get("metadatas", []) or [])
-    embeddings = raw.get("embeddings")
-    if embeddings is None:
-        embeddings = [None] * len(ids)
-
-    chunk_items: List[dict] = []
-    for doc_id, doc_text, meta, embedding in zip(ids, docs, metas, embeddings):
-        safe_meta = meta or {}
-        chunk_index = int(safe_meta.get("chunk", 0) or 0)
-        chunk_items.append(
-            {
-                "id": doc_id,
-                "chunk": chunk_index,
-                "content": doc_text or "",
-                "metadata": safe_meta,
-                "embedding": _safe_embedding_to_list(embedding),
-            }
-        )
-
-    chunk_items.sort(key=lambda item: item["chunk"])
-    full_content = _merge_chunk_texts([item["content"] for item in chunk_items])
-    title = _build_document_title(source, chunk_items[0]["content"] if chunk_items else "")
-    vector_dimensions = len(chunk_items[0]["embedding"]) if chunk_items and chunk_items[0]["embedding"] else 0
+    chunk_items, safe_limit, safe_offset = _build_chunk_page(
+        rows,
+        limit=chunk_limit,
+        offset=chunk_offset,
+        include_embeddings=include_embeddings,
+    )
+    full_content = _merge_chunk_texts([row["content"] for row in rows]) if include_full_content else None
+    merged_content = full_content or _merge_chunk_texts([row["content"] for row in rows])
+    token_count = _count_text_tokens(merged_content)
+    title = _build_document_title(source, rows[0]["content"] if rows else "")
+    input_type = _infer_vector_document_input_type(
+        collection_name,
+        source,
+        [{"metadata": row["metadata"]} for row in rows],
+        merged_content,
+    )
     updated_at = None
-    for item in chunk_items:
-        safe_meta = item["metadata"] or {}
+    for row in rows:
+        safe_meta = row["metadata"] or {}
         candidate_timestamp = safe_meta.get("edited_at") or safe_meta.get("uploaded_at") or safe_meta.get("created_at")
         if candidate_timestamp and (updated_at is None or str(candidate_timestamp) > str(updated_at)):
             updated_at = str(candidate_timestamp)
@@ -2701,10 +2997,14 @@ def _build_vector_document_detail(collection_name: str, source: str) -> dict:
         "source": source,
         "title": title,
         "display_source": _display_source_name(source),
-        "chunk_count": len(chunk_items),
-        "vector_dimensions": vector_dimensions,
+        "chunk_count": len(rows),
+        "token_count": token_count,
+        "input_type": input_type,
         "updated_at": updated_at,
         "full_content": full_content,
+        "chunk_limit": safe_limit,
+        "chunk_offset": safe_offset,
+        "chunk_has_more": safe_offset + safe_limit < len(rows),
         "chunks": chunk_items,
     }
 
@@ -2723,9 +3023,16 @@ def _build_updated_chunk_records(source: str, content: str, existing_metas: List
     base_meta["source"] = source
     base_meta["edited_at"] = datetime.utcnow().isoformat() + "Z"
 
+    if str(base_meta.get("collection") or "").strip().lower() == "user_knowledge" or str(source or "").startswith("user:content:"):
+        current_input_type = _normalize_vector_input_type(base_meta.get("input_type"))
+        if current_input_type != "file" and _looks_like_uploaded_file_content(clean_content):
+            base_meta["input_type"] = "file"
+        elif current_input_type is None:
+            base_meta["input_type"] = "free_text"
+
     chunks = (
         chunk_text_preserve_table_rows(clean_content)
-        if TABLE_ROW_START_TAG in clean_content
+        if TABLE_ROW_START_TAG in clean_content or base_meta.get("input_type") == "file"
         else chunk_text(clean_content)
     )
     if not chunks:
@@ -2813,9 +3120,175 @@ class VectorDbDocumentDeleteRequest(BaseModel):
     source: str
 
 
+class SystemPromptUpdateRequest(BaseModel):
+    template: str
+
+
 # ---------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------
+
+
+@app.get("/vector-db/collections")
+def vector_db_collections():
+    items: List[dict] = []
+    for collection_name in (COLLECTION_NAME, MEMORY_COLLECTION_NAME):
+        target_collection = _get_vector_collection(collection_name)
+        items.append(
+            {
+                "name": collection_name,
+                "description": _vector_collection_description(collection_name),
+                "document_count": _count_collection_documents(collection_name),
+                "chunk_count": target_collection.count(),
+            }
+        )
+    return {"items": items}
+
+
+@app.get("/vector-db/documents")
+def vector_db_documents(
+    collection_name: str,
+    search: str = "",
+    limit: int = 24,
+    offset: int = 0,
+):
+    safe_limit = max(1, min(limit, 100))
+    safe_offset = max(0, offset)
+    summaries = _group_collection_documents(collection_name)
+    search_value = (search or "").strip().lower()
+    if search_value:
+        filtered_summaries = []
+        for item in summaries:
+            haystack = " ".join(
+                [
+                    item.get("title") or "",
+                    item.get("source") or "",
+                    item.get("display_source") or "",
+                    item.get("preview") or "",
+                ]
+            ).lower()
+            if search_value in haystack:
+                filtered_summaries.append(item)
+        summaries = filtered_summaries
+
+    page_items = summaries[safe_offset:safe_offset + safe_limit]
+    return {
+        "collection_name": collection_name,
+        "total": len(summaries),
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "items": page_items,
+    }
+
+
+@app.get("/vector-db/document")
+def vector_db_document(
+    collection_name: str,
+    source: str,
+    chunk_limit: int = VECTOR_DB_DEFAULT_CHUNK_LIMIT,
+    chunk_offset: int = 0,
+    include_embeddings: bool = False,
+    include_full_content: bool = True,
+):
+    return _build_vector_document_detail(
+        collection_name,
+        source,
+        chunk_limit=chunk_limit,
+        chunk_offset=chunk_offset,
+        include_embeddings=include_embeddings,
+        include_full_content=include_full_content,
+    )
+
+
+@app.get("/vector-db/chunk-embedding")
+def vector_db_chunk_embedding(collection_name: str, chunk_id: str):
+    target_collection = _get_vector_collection(collection_name)
+    raw = target_collection.get(ids=[chunk_id], include=["embeddings", "metadatas"])
+    ids = list(raw.get("ids", []) or [])
+    if not ids:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+
+    metas = list(raw.get("metadatas", []) or [])
+    embeddings = list(raw.get("embeddings", []) or [])
+    safe_meta = (metas[0] if metas else {}) or {}
+    embedding = _safe_embedding_to_list(embeddings[0]) if embeddings else []
+
+    return {
+        "id": ids[0],
+        "chunk": int(safe_meta.get("chunk", 0) or 0),
+        "metadata": safe_meta,
+        "embedding": embedding,
+        "vector_dimensions": len(embedding),
+    }
+
+
+@app.put("/vector-db/document")
+def vector_db_update_document(req: VectorDbDocumentUpdateRequest):
+    target_collection = _get_vector_collection(req.collection_name)
+    existing = target_collection.get(where={"source": req.source}, include=["metadatas"])
+    existing_ids = list(existing.get("ids", []) or [])
+    existing_metas = list(existing.get("metadatas", []) or [])
+    if not existing_ids:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    new_ids, new_docs, new_metas, new_embeddings = _build_updated_chunk_records(
+        req.source,
+        req.content,
+        existing_metas,
+    )
+
+    try:
+        target_collection.add(
+            ids=new_ids,
+            documents=new_docs,
+            metadatas=new_metas,
+            embeddings=new_embeddings,
+        )
+        target_collection.delete(ids=existing_ids)
+    except Exception as exc:
+        try:
+            target_collection.delete(ids=new_ids)
+        except Exception:
+            pass
+        print(f"[API][VECTOR_DB][ERROR] update failed: {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to update document: {exc}")
+
+    return {
+        "message": "Document updated successfully.",
+        "source": req.source,
+        "chunks_added": len(new_ids),
+        "detail": _build_vector_document_detail(
+            req.collection_name,
+            req.source,
+            chunk_limit=VECTOR_DB_DEFAULT_CHUNK_LIMIT,
+            chunk_offset=0,
+            include_embeddings=False,
+            include_full_content=True,
+        ),
+    }
+
+
+@app.delete("/vector-db/document")
+def vector_db_delete_document(req: VectorDbDocumentDeleteRequest):
+    target_collection = _get_vector_collection(req.collection_name)
+    existing = target_collection.get(where={"source": req.source}, include=["metadatas"])
+    existing_ids = list(existing.get("ids", []) or [])
+    if not existing_ids:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    try:
+        target_collection.delete(ids=existing_ids)
+    except Exception as exc:
+        print(f"[API][VECTOR_DB][ERROR] delete failed: {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {exc}")
+
+    return {
+        "message": "Document deleted successfully.",
+        "source": req.source,
+        "deleted_chunks": len(existing_ids),
+    }
 
 @app.get("/health")
 def health():
@@ -2843,6 +3316,33 @@ def azure_tickets(tag: str = "CC"):
         print(f"[API][ADO][ERROR] {exc}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/system-prompt")
+def get_system_prompt():
+    template = _read_system_prompt_template()
+    return {
+        "template": template,
+        "path": SYSTEM_PROMPT_FILE,
+    }
+
+
+@app.put("/system-prompt")
+def update_system_prompt(req: SystemPromptUpdateRequest):
+    try:
+        template = _write_system_prompt_template(req.template)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        print(f"[API][PROMPT][ERROR] Failed to save system prompt: {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to save system prompt: {exc}") from exc
+
+    return {
+        "message": "System prompt saved successfully.",
+        "template": template,
+        "path": SYSTEM_PROMPT_FILE,
+    }
 
 
 @app.post("/knowledge/add")
@@ -2880,7 +3380,8 @@ def knowledge_add(req: KnowledgeAddRequest):
             }
 
         # Chunk + embed + add to collection with priority metadata
-        chunks = chunk_text_preserve_table_rows(content_text) if req.files else chunk_text(content_text)
+        input_type = "file" if req.files or _looks_like_uploaded_file_content(content_text) else "free_text"
+        chunks = chunk_text_preserve_table_rows(content_text) if input_type == "file" else chunk_text(content_text)
         if not chunks:
             raise HTTPException(status_code=400, detail="No chunks generated from content")
 
@@ -2903,6 +3404,7 @@ def knowledge_add(req: KnowledgeAddRequest):
                 "priority": priority,
                 "uploaded_at": uploaded_at,
                 "mode": mode,
+                "input_type": input_type,
                 "path": "",
                 "collection": collection_label,
             }
@@ -3673,33 +4175,11 @@ def chat(req: ChatRequest):
     
     combined_context = "\n\n".join(context_sections)
 
-    prompt = (
-        "You are a TA9 / IntSight customer support assistant with deep technical knowledge. "
-        "Your role is to provide clear, accurate, and helpful answers in a natural, conversational way.\n\n"
-        "INSTRUCTIONS:\n"
-        "1. When the user attaches files (images, documents), those files are your PRIMARY source - answer directly from them.\n"
-        "2. When you see [Image Content from ...] sections, that means the image has been analyzed - describe what you see in the analysis naturally.\n"
-        "3. For images: Provide a comprehensive explanation of what is shown in the provided analysis. Highlight key details, technical context, and likely causes when relevant.\n"
-        "4. When a ticket is selected, use it to understand the user's issue and provide relevant solutions.\n"
-        "5. Use knowledge base context to supplement your answer or provide additional related information.\n"
-        "6. Use fenced code blocks (```bash, ```python, ```sql, etc.) for any commands or code snippets.\n"
-        "7. If the context contains redundant or overlapping information, synthesize it into a single coherent answer.\n"
-        "8. Do NOT repeat information from different sources - intelligently merge related points.\n"
-        "8.1 Use a balanced approach across both collections (Intsight and New_Knowledge) and do not assume one is always better.\n"
-        "8.2 If relevant details are split across both collections, combine them into one integrated, consistent answer.\n"
-        "9. Grounding is mandatory: only state facts supported by the provided context sections.\n"
-        "9.1 If a requested detail is not in context, explicitly say it is not available in the current knowledge context.\n"
-        "9.2 Never invent commands, configuration keys, UI paths, API names, or procedural steps.\n"
-        "10. Keep a professional, helpful tone that encourages follow-up questions.\n"
-        "11. Answer naturally and conversationally - avoid rigid structured formats unless specifically requested.\n"
-        "12. For Intsight or system configuration guidance, prioritize instructions that use Admin Studio (UI-based configuration) by default.\n"
-        "13. Provide database-level (DB) configuration instructions only when the user explicitly asks for DB configuration, SQL/database changes, or backend table-level steps.\n"
-        "14. Never hard-refuse when at least partial context exists; provide the best grounded answer possible, explicitly flag uncertainty, and ask one focused clarifying question if needed.\n"
-        f"{foundational_instruction}"
-        f"{ta9_instruction}\n"
-        f"{combined_context}\n\n"
-        f"Question: {question}\n\n"
-        "Answer:"
+    prompt = _build_system_prompt(
+        question=question,
+        combined_context=combined_context,
+        foundational_instruction=foundational_instruction,
+        ta9_instruction=ta9_instruction,
     )
 
     try:
@@ -3745,36 +4225,3 @@ def chat(req: ChatRequest):
 
     print(f"[API][CHAT] Returning answer len={len(answer)} with {len(source_strings)} sources")
     return ChatResponse(answer=answer, sources=source_strings)
-
-
-# ---------------------------------------------------------------------
-# Scheduler: run compare-and-ingest daily at 20:00 Asia/Jerusalem
-# ---------------------------------------------------------------------
-
-async def _wait_until(hour: int, minute: int, tz: ZoneInfo) -> float:
-    now = datetime.now(tz)
-    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if now >= target:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
-
-
-async def _daily_compare_and_ingest_task():
-    tz = ZoneInfo("Asia/Jerusalem")
-    while True:
-        try:
-            wait_s = await _wait_until(20, 0, tz)
-            print(f"[SCHEDULE] Next compare_and_ingest at 20:00 Asia/Jerusalem in {wait_s:.0f}s")
-            await asyncio.sleep(wait_s)
-            print("[SCHEDULE] Triggering scheduled compare_and_ingest")
-            compare_and_ingest_internal()
-        except Exception as e:
-            print(f"[SCHEDULE][ERROR] {e}")
-            traceback.print_exc()
-            # small backoff before retrying scheduling loop
-            await asyncio.sleep(60)
-
-
-@app.on_event("startup")
-async def _start_scheduler():
-    asyncio.create_task(_daily_compare_and_ingest_task())

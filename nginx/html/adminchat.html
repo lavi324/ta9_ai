@@ -25,6 +25,7 @@
       min-height: 100vh;
       padding: 0;
       margin: 0;
+      overflow-x: hidden;
     }
 
 
@@ -36,6 +37,11 @@
       min-height: 100vh;
       background: #fafbfc;
       padding-bottom: 140px;
+      overflow-x: hidden;
+    }
+
+    .page.vector-mode {
+      padding-bottom: 24px;
     }
 
     .topbar {
@@ -53,8 +59,16 @@
 
     .header-left {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
+      flex-direction: column;
       gap: 16px;
+    }
+
+    .header-left-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: -4px;
     }
 
     .header-center {
@@ -306,6 +320,41 @@
       font-size: 18px;
       color: #0c1d37;
       margin: 0;
+    }
+
+    .system-prompt-editor {
+      width: 100%;
+      min-height: 52vh;
+      resize: vertical;
+      border: 1px solid #d6e1ef;
+      border-radius: 12px;
+      padding: 16px;
+      font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      color: #0f172a;
+      background: #f8fafc;
+      outline: none;
+    }
+
+    .system-prompt-editor:focus {
+      border-color: #0c3d6b;
+      box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.12);
+      background: #ffffff;
+    }
+
+    .system-prompt-meta {
+      font-size: 12px;
+      color: #64748b;
+      word-break: break-all;
+    }
+
+    .system-prompt-note {
+      font-size: 13px;
+      color: #334155;
+      line-height: 1.6;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 14px 16px;
     }
 
     .knowledge-modal-header {
@@ -1721,9 +1770,840 @@
       height: 20px;
     }
 
+    .header-action-btn {
+      border-radius: 999px;
+      padding: 10px 16px;
+      font-weight: 600;
+      box-shadow: 0 6px 18px rgba(12, 61, 107, 0.16);
+    }
+
+    .vector-page {
+      width: 1200px;
+      max-width: calc(100% - 80px);
+      margin: 24px auto 0;
+      padding: 0 40px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .vector-hero-card {
+      background: linear-gradient(135deg, #ffffff 0%, #f3f8fc 100%);
+      border: 1px solid #d7e3f1;
+      border-radius: 18px;
+      padding: 24px 28px;
+      box-shadow: 0 14px 40px rgba(12, 29, 55, 0.08);
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    .vector-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #0c3d6b;
+      margin-bottom: 10px;
+    }
+
+    .vector-hero-card h2 {
+      font-size: 28px;
+      line-height: 1.2;
+      color: #0c1d37;
+      margin-bottom: 10px;
+    }
+
+    .vector-hero-card p {
+      color: #526173;
+      font-size: 15px;
+      line-height: 1.7;
+      max-width: 760px;
+    }
+
+    .vector-summary-note {
+      flex-shrink: 0;
+      background: #0c3d6b;
+      color: #ffffff;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      box-shadow: 0 10px 24px rgba(12, 61, 107, 0.2);
+    }
+
+    .vector-collection-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .vector-collection-card {
+      background: #ffffff;
+      border: 1px solid #dbe5f0;
+      border-radius: 16px;
+      padding: 20px 22px;
+      box-shadow: 0 10px 26px rgba(12, 29, 55, 0.06);
+      cursor: pointer;
+      transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .vector-collection-card:hover {
+      transform: translateY(-2px);
+      border-color: #0c3d6b;
+      box-shadow: 0 16px 32px rgba(12, 29, 55, 0.12);
+    }
+
+    .vector-collection-card.active {
+      border-color: #0c3d6b;
+      box-shadow: 0 18px 36px rgba(12, 61, 107, 0.18);
+      background: linear-gradient(180deg, #ffffff 0%, #f5f9fd 100%);
+    }
+
+    .vector-collection-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .vector-collection-name {
+      font-size: 22px;
+      font-weight: 700;
+      color: #0c1d37;
+      line-height: 1.2;
+    }
+
+    .vector-collection-desc {
+      font-size: 13px;
+      color: #5b6878;
+      line-height: 1.6;
+    }
+
+    .vector-collection-badge {
+      background: #edf4fb;
+      color: #0c3d6b;
+      border: 1px solid #d5e4f3;
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .vector-collection-stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .vector-stat {
+      background: #f8fbfe;
+      border: 1px solid #e1eaf4;
+      border-radius: 12px;
+      padding: 12px;
+    }
+
+    .vector-stat-label {
+      display: block;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #6b7784;
+      margin-bottom: 6px;
+      font-weight: 700;
+    }
+
+    .vector-stat-value {
+      display: block;
+      font-size: 24px;
+      font-weight: 700;
+      color: #10243f;
+    }
+
+    .vector-workspace {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .vector-toolbar {
+      background: #ffffff;
+      border: 1px solid #dbe5f0;
+      border-radius: 16px;
+      padding: 18px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      box-shadow: 0 8px 22px rgba(12, 29, 55, 0.05);
+    }
+
+    .vector-toolbar-left {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .vector-toolbar-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .vector-label {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #6b7784;
+      font-weight: 700;
+    }
+
+    .vector-selected-name {
+      font-size: 24px;
+      font-weight: 700;
+      color: #0c1d37;
+      line-height: 1.15;
+    }
+
+    .vector-search {
+      min-width: 320px;
+      border: 1px solid #d4dae3;
+      border-radius: 12px;
+      padding: 11px 14px;
+      font-size: 14px;
+      color: #1f2d3d;
+      outline: none;
+      background: #ffffff;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .vector-search:focus {
+      border-color: #0c3d6b;
+      box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.1);
+    }
+
+    .vector-layout {
+      display: grid;
+      grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+      gap: 18px;
+      align-items: stretch;
+      min-height: calc(100vh - 320px);
+    }
+
+    .vector-sidebar,
+    .vector-detail-card {
+      background: #ffffff;
+      border: 1px solid #dbe5f0;
+      border-radius: 16px;
+      box-shadow: 0 10px 30px rgba(12, 29, 55, 0.06);
+    }
+
+    .vector-sidebar {
+      padding: 18px;
+      position: sticky;
+      top: 100px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      min-height: calc(100vh - 320px);
+      max-height: calc(100vh - 120px);
+    }
+
+    .vector-sidebar-meta {
+      font-size: 13px;
+      color: #5c6c7b;
+    }
+
+    .vector-document-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding-right: 4px;
+    }
+
+    .vector-document-item {
+      appearance: none;
+      border: 1px solid #dfe7f1;
+      background: #fbfdff;
+      border-radius: 14px;
+      padding: 14px;
+      cursor: pointer;
+      transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+      display: grid;
+      gap: 10px;
+      justify-content: space-between;
+      overflow: hidden;
+      min-width: 0;
+      min-height: 172px;
+      text-align: left;
+      grid-template-rows: minmax(0, 1fr) auto;
+    }
+
+    .vector-document-item:hover {
+      border-color: #0c3d6b;
+      box-shadow: 0 14px 28px rgba(12, 61, 107, 0.12);
+      transform: translateY(-1px);
+    }
+
+    .vector-document-item.active {
+      border-color: #0c3d6b;
+      background: #f4f9fd;
+      box-shadow: 0 14px 28px rgba(12, 61, 107, 0.14);
+    }
+
+    .vector-document-preview {
+      font-size: 14px;
+      color: #24364b;
+      line-height: 1.7;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      white-space: pre-wrap;
+      display: block;
+      max-height: 11.9em;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    .vector-document-foot {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+      color: #6b7784;
+      min-width: 0;
+    }
+
+    .vector-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid #d5e4f3;
+      background: #edf4fb;
+      color: #0c3d6b;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+      justify-content: center;
+      width: 100%;
+      min-width: 0;
+    }
+
+    .vector-pill.type-placeholder {
+      visibility: hidden;
+    }
+
+    .vector-pill.type-file {
+      background: #eef9f1;
+      border-color: #cfe8d6;
+      color: #166534;
+    }
+
+    .vector-pill.type-free-text {
+      background: #fff4e8;
+      border-color: #f2d7ba;
+      color: #9a3412;
+    }
+
+    .vector-pager {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding-top: 6px;
+      border-top: 1px solid #e8eef5;
+    }
+
+    .vector-document-loading {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .vector-document-skeleton-card {
+      border: 1px solid #dfe7f1;
+      border-radius: 14px;
+      background: linear-gradient(180deg, #fbfdff 0%, #f5f9fd 100%);
+      padding: 14px;
+      min-height: 172px;
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) auto;
+      gap: 14px;
+    }
+
+    .vector-skeleton-lines {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .vector-skeleton-line,
+    .vector-skeleton-pill {
+      position: relative;
+      overflow: hidden;
+      background: #e6eef7;
+      border-radius: 999px;
+    }
+
+    .vector-skeleton-line::after,
+    .vector-skeleton-pill::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      transform: translateX(-100%);
+      background: linear-gradient(90deg, rgba(230, 238, 247, 0) 0%, rgba(255, 255, 255, 0.9) 50%, rgba(230, 238, 247, 0) 100%);
+      animation: vector-skeleton-shimmer 1.2s ease-in-out infinite;
+    }
+
+    .vector-skeleton-line {
+      height: 12px;
+      border-radius: 8px;
+    }
+
+    .vector-skeleton-line.short {
+      width: 68%;
+    }
+
+    .vector-skeleton-line.medium {
+      width: 82%;
+    }
+
+    .vector-skeleton-pill-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .vector-skeleton-pill {
+      height: 28px;
+    }
+
+    @keyframes vector-skeleton-shimmer {
+      100% {
+        transform: translateX(100%);
+      }
+    }
+
+    .vector-page-status {
+      font-size: 12px;
+      color: #6b7784;
+    }
+
+    .vector-detail-card {
+      padding: 22px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      min-height: calc(100vh - 320px);
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .vector-detail-header {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 16px;
+    }
+
+    .vector-detail-title {
+      font-size: 28px;
+      font-weight: 700;
+      color: #0c1d37;
+      line-height: 1.2;
+      margin-bottom: 8px;
+    }
+
+    .vector-detail-subtitle {
+      font-size: 13px;
+      color: #566577;
+      line-height: 1.6;
+      word-break: break-word;
+    }
+
+    .vector-detail-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .vector-action-btn {
+      border: 1px solid #d6e1ef;
+      border-radius: 12px;
+      padding: 10px 14px;
+      background: #ffffff;
+      color: #10243f;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.18s ease;
+    }
+
+    .vector-action-btn:hover {
+      border-color: #0c3d6b;
+      color: #0c3d6b;
+      transform: translateY(-1px);
+    }
+
+    .vector-action-btn.primary {
+      background: #0c3d6b;
+      border-color: #0c3d6b;
+      color: #ffffff;
+      box-shadow: 0 8px 18px rgba(12, 61, 107, 0.18);
+    }
+
+    .vector-action-btn.danger {
+      border-color: #f2c9cf;
+      color: #b42318;
+      background: #fff7f7;
+    }
+
+    .vector-action-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .vector-meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+    }
+
+    .vector-meta-card {
+      background: #f8fbfe;
+      border: 1px solid #e1eaf4;
+      border-radius: 14px;
+      padding: 14px;
+      min-height: 86px;
+    }
+
+    .vector-meta-card strong {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      color: #6b7784;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .vector-meta-card span {
+      display: block;
+      font-size: 15px;
+      color: #10243f;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .vector-editor-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      flex: 1 1 auto;
+    }
+
+    .vector-section-title {
+      font-size: 17px;
+      font-weight: 700;
+      color: #0c1d37;
+    }
+
+    .vector-section-note {
+      font-size: 13px;
+      color: #5b6878;
+      line-height: 1.6;
+    }
+
+    .vector-document-editor {
+      width: 100%;
+      max-width: 100%;
+      min-height: 100%;
+      border-radius: 16px;
+      border: 1px solid #d8e3f3;
+      background: #fbfdff;
+      padding: 18px;
+      font-size: 15px;
+      line-height: 1.8;
+      resize: vertical;
+      color: #1f2d3d;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      outline: none;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .vector-document-editor.editing {
+      background: #ffffff;
+      border-color: #0c3d6b;
+      box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.08);
+    }
+
+    .vector-chunk-list {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .vector-chunk-card {
+      border: 1px solid #dfe7f1;
+      border-radius: 16px;
+      background: #fbfdff;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .vector-chunk-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .vector-chunk-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: #10243f;
+    }
+
+    .vector-chunk-text {
+      width: 100%;
+      border: 1px solid #dbe5f0;
+      border-radius: 14px;
+      background: #ffffff;
+      padding: 14px;
+      font-size: 13px;
+      line-height: 1.65;
+      color: #1f2d3d;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .vector-chunk-text {
+      min-height: 120px;
+      resize: vertical;
+    }
+
+    .vector-section-head,
+    .vector-section-actions,
+    .vector-chunk-toolbar,
+    .vector-chunk-pager {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .vector-chunk-meta {
+      font-size: 12px;
+      color: #5b6878;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .vector-empty-state {
+      border: 1px dashed #c7d5e7;
+      border-radius: 18px;
+      padding: 30px;
+      text-align: center;
+      color: #526173;
+      background: linear-gradient(180deg, #fbfdff 0%, #f5f9fd 100%);
+    }
+
+    .vector-confirm-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(12, 29, 55, 0.46);
+      backdrop-filter: blur(4px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      z-index: 1200;
+    }
+
+    .vector-confirm-card {
+      width: min(100%, 460px);
+      background: linear-gradient(180deg, #ffffff 0%, #f8fbfe 100%);
+      border: 1px solid #d8e3f3;
+      border-radius: 24px;
+      box-shadow: 0 28px 60px rgba(12, 29, 55, 0.22);
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .vector-confirm-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      align-self: flex-start;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #fff4f2;
+      border: 1px solid #f7d0cb;
+      color: #b42318;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .vector-confirm-title {
+      font-size: 24px;
+      font-weight: 700;
+      color: #0c1d37;
+      line-height: 1.2;
+    }
+
+    .vector-confirm-text {
+      font-size: 14px;
+      color: #526173;
+      line-height: 1.7;
+    }
+
+    .vector-confirm-meta {
+      background: #ffffff;
+      border: 1px solid #e1eaf4;
+      border-radius: 16px;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .vector-confirm-meta-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #6b7784;
+    }
+
+    .vector-confirm-meta-value {
+      font-size: 14px;
+      color: #10243f;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .vector-confirm-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .vector-confirm-btn {
+      min-width: 112px;
+      border-radius: 12px;
+      padding: 11px 16px;
+      border: 1px solid #d6e1ef;
+      background: #ffffff;
+      color: #10243f;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.18s ease;
+    }
+
+    .vector-confirm-btn:hover {
+      transform: translateY(-1px);
+      border-color: #0c3d6b;
+    }
+
+    .vector-confirm-btn.cancel {
+      background: #f8fbfe;
+    }
+
+    .vector-confirm-btn.delete {
+      border-color: #b42318;
+      background: #b42318;
+      color: #ffffff;
+      box-shadow: 0 10px 22px rgba(180, 35, 24, 0.22);
+    }
+
+    .vector-empty-state h3 {
+      font-size: 22px;
+      color: #10243f;
+      margin-bottom: 8px;
+    }
+
+    .vector-empty-state p {
+      font-size: 14px;
+      line-height: 1.7;
+      max-width: 520px;
+      margin: 0 auto;
+    }
+
+    .vector-loading-note {
+      font-size: 14px;
+      color: #526173;
+    }
+
     .hidden { display: none; }
 
     @media (max-width: 1000px) {
+      .vector-page {
+        width: auto;
+        max-width: calc(100% - 32px);
+        padding: 0 0 150px;
+      }
+
+      .vector-collection-grid,
+      .vector-layout,
+      .vector-meta-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .vector-toolbar,
+      .vector-detail-header,
+      .vector-chunk-head,
+      .vector-hero-card {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .vector-toolbar-right {
+        justify-content: stretch;
+      }
+
+      .vector-search {
+        min-width: 0;
+        width: 100%;
+      }
+
+      .vector-sidebar {
+        position: static;
+        max-height: none;
+      }
+
       .grid {
         grid-template-columns: 1fr;
       }
@@ -1740,11 +2620,16 @@
     <div class="topbar">
       <div class="header-left">
         <img src="/adminchat/ta9_logo.png" alt="TA9" class="logo" onerror="this.style.display='none'">
+        <div class="header-left-actions">
+          <button id="system-prompt-btn" type="button" class="ghost-btn">System Prompt</button>
+        </div>
       </div>
       <div class="header-center">
         <div class="title">AI Support Assistant</div>
       </div>
-      <div class="header-right"></div>
+      <div class="header-right">
+        <button id="manage-vector-db-btn" type="button" class="ghost-btn header-action-btn">Manage Vector DB</button>
+      </div>
     </div>
 
     <div class="ticket-section">
@@ -1763,6 +2648,54 @@
       <div id="chat-history"></div>
       <div id="answer-section" class="hidden">
         <div id="answer-box" class="answer-box"></div>
+      </div>
+    </section>
+
+    <section id="vector-db-page" class="vector-page hidden">
+      <div class="vector-hero-card">
+        <div>
+          <span class="vector-eyebrow">Manage Vector DB</span>
+          <h2>Live Chroma Collections</h2>
+          <p>Choose a collection, review stored documents, check their chunk and token counts, and manage the knowledge base with direct search, edit, and delete actions.</p>
+        </div>
+      </div>
+
+      <div id="vector-collections" class="vector-collection-grid"></div>
+
+      <div id="vector-workspace" class="vector-workspace hidden">
+        <div class="vector-toolbar">
+          <div class="vector-toolbar-left">
+            <span class="vector-label">Active Collection</span>
+            <div id="vector-collection-name" class="vector-selected-name">-</div>
+          </div>
+          <div class="vector-toolbar-right">
+            <input id="vector-search" type="text" class="vector-search" placeholder="Search by text">
+            <button id="vector-search-btn" type="button" class="ghost-btn">Search</button>
+            <button id="vector-refresh-btn" type="button" class="ghost-btn">Refresh</button>
+          </div>
+        </div>
+
+        <div class="vector-layout">
+          <aside class="vector-sidebar">
+            <div>
+              <div class="card-head">Documents</div>
+              <div id="vector-doc-count" class="vector-sidebar-meta">Choose a collection to load documents.</div>
+            </div>
+            <div id="vector-document-list" class="vector-document-list"></div>
+            <div class="vector-pager">
+              <button id="vector-prev-btn" type="button" class="ghost-btn" disabled>Prev</button>
+              <span id="vector-page-status" class="vector-page-status">Page 1</span>
+              <button id="vector-next-btn" type="button" class="ghost-btn" disabled>Next</button>
+            </div>
+          </aside>
+
+          <section id="vector-detail" class="vector-detail-card">
+            <div class="vector-empty-state">
+              <h3>Select a document</h3>
+              <p>Select a document to inspect its content, chunks, and metadata.</p>
+            </div>
+          </section>
+        </div>
       </div>
     </section>
 
@@ -1935,6 +2868,42 @@
     </div>
   </div>
 
+  <div id="system-prompt-backdrop" class="knowledge-modal-backdrop hidden" aria-hidden="true">
+    <div class="knowledge-modal large" role="dialog" aria-modal="true" aria-labelledby="system-prompt-title">
+      <div class="knowledge-modal-header">
+        <h3 id="system-prompt-title">System Prompt</h3>
+        <button id="system-prompt-close" type="button" class="knowledge-modal-close" aria-label="Close">×</button>
+      </div>
+      <div class="system-prompt-note">
+        Changes are saved directly to the mounted backend prompt template and apply to the next chat request immediately.
+      </div>
+      <div id="system-prompt-path" class="system-prompt-meta"></div>
+      <textarea id="system-prompt-editor" class="system-prompt-editor" spellcheck="false"></textarea>
+      <div class="modal-actions">
+        <button id="system-prompt-refresh" type="button" class="knowledge-action-btn clear">Refresh</button>
+        <div class="modal-actions-right">
+          <button id="system-prompt-save" type="button" class="knowledge-action-btn add">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="vector-delete-confirm-backdrop" class="vector-confirm-backdrop hidden" aria-hidden="true">
+    <div class="vector-confirm-card" role="dialog" aria-modal="true" aria-labelledby="vector-delete-confirm-title">
+      <div class="vector-confirm-eyebrow">Delete document</div>
+      <div id="vector-delete-confirm-title" class="vector-confirm-title">Delete this document?</div>
+      <div class="vector-confirm-text">This will permanently remove the document and all of its stored chunks from the selected collection.</div>
+      <div class="vector-confirm-meta">
+        <div class="vector-confirm-meta-label">Collection</div>
+        <div id="vector-delete-confirm-collection" class="vector-confirm-meta-value"></div>
+      </div>
+      <div class="vector-confirm-actions">
+        <button id="vector-delete-confirm-cancel" type="button" class="vector-confirm-btn cancel">Cancel</button>
+        <button id="vector-delete-confirm-approve" type="button" class="vector-confirm-btn delete">Delete Document</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const answerBox = document.getElementById('answer-box');
     const form = document.getElementById('chat-form');
@@ -1960,6 +2929,13 @@
     const imagePreviewDownload = document.getElementById('image-preview-download');
     const imagePreviewClose = document.getElementById('image-preview-close');
     const logoImg = document.querySelector('.logo');
+    const systemPromptBtn = document.getElementById('system-prompt-btn');
+    const systemPromptBackdrop = document.getElementById('system-prompt-backdrop');
+    const systemPromptClose = document.getElementById('system-prompt-close');
+    const systemPromptEditor = document.getElementById('system-prompt-editor');
+    const systemPromptSave = document.getElementById('system-prompt-save');
+    const systemPromptRefresh = document.getElementById('system-prompt-refresh');
+    const systemPromptPath = document.getElementById('system-prompt-path');
     const filePreviewBody = document.getElementById('file-preview-body');
     const filePreviewContent = document.getElementById('file-preview-content');
     const knowledgeBtn = document.getElementById('knowledge-btn');
@@ -1996,6 +2972,27 @@
     const knowledgeToolbar = document.querySelector('.knowledge-toolbar');
     const knowledgeEditorWrap = document.querySelector('.knowledge-editor-wrap');
     const knowledgePageNav = document.getElementById('knowledge-page-nav');
+    const ticketSection = document.querySelector('.ticket-section');
+    const inputDock = document.querySelector('.input-dock');
+    const manageVectorDbBtn = document.getElementById('manage-vector-db-btn');
+    const vectorDbPage = document.getElementById('vector-db-page');
+    const vectorCollections = document.getElementById('vector-collections');
+    const vectorWorkspace = document.getElementById('vector-workspace');
+    const vectorCollectionName = document.getElementById('vector-collection-name');
+    const vectorSearchInput = document.getElementById('vector-search');
+    const vectorSearchBtn = document.getElementById('vector-search-btn');
+    const vectorRefreshBtn = document.getElementById('vector-refresh-btn');
+    const vectorDocumentList = document.getElementById('vector-document-list');
+    const vectorDetail = document.getElementById('vector-detail');
+    const vectorDocCount = document.getElementById('vector-doc-count');
+    const vectorPrevBtn = document.getElementById('vector-prev-btn');
+    const vectorNextBtn = document.getElementById('vector-next-btn');
+    const vectorPageStatus = document.getElementById('vector-page-status');
+    const vectorDeleteConfirmBackdrop = document.getElementById('vector-delete-confirm-backdrop');
+    const vectorDeleteConfirmCollection = document.getElementById('vector-delete-confirm-collection');
+    const vectorDeleteConfirmCancel = document.getElementById('vector-delete-confirm-cancel');
+    const vectorDeleteConfirmApprove = document.getElementById('vector-delete-confirm-approve');
+    const page = document.querySelector('.page');
 
     let currentController = null;
     let ticketFirstQuestionAsked = {}; // Track if first question was asked for each ticket URL
@@ -2008,12 +3005,41 @@
     let knowledgeEditorLockedForPrepare = false;
     let englishOnlyToastTimer = null;
     let currentFileBlobUrl = null;
+    let appMode = 'chat';
+    let vectorDeleteConfirmResolver = null;
+    let isSystemPromptBusy = false;
     const KNOWLEDGE_DRAFT_KEY = 'ta9_knowledge_draft_html_v1';
+    const vectorState = {
+      collections: [],
+      selectedCollection: null,
+      documents: [],
+      isLoadingDocuments: false,
+      total: 0,
+      limit: 18,
+      offset: 0,
+      search: '',
+      selectedSource: null,
+      detail: null,
+      detailRequestId: 0,
+      draftContent: '',
+      isEditing: false,
+      isSaving: false
+    };
 
     if (logoImg) {
       logoImg.addEventListener('click', () => {
         window.location.reload();
       });
+    }
+
+    if (manageVectorDbBtn) {
+      manageVectorDbBtn.addEventListener('click', () => {
+        setAppMode(appMode === 'vector' ? 'chat' : 'vector');
+      });
+    }
+
+    if (systemPromptBtn) {
+      systemPromptBtn.addEventListener('click', openSystemPromptModal);
     }
 
     if (knowledgeToolbar) {
@@ -2028,6 +3054,763 @@
       setTimeout(() => {
         toast.remove();
       }, 3500);
+    }
+
+    function setSystemPromptBusy(isBusy) {
+      isSystemPromptBusy = !!isBusy;
+      if (systemPromptSave) {
+        systemPromptSave.disabled = isSystemPromptBusy;
+        systemPromptSave.textContent = isSystemPromptBusy ? 'Saving...' : 'Save';
+      }
+      if (systemPromptRefresh) {
+        systemPromptRefresh.disabled = isSystemPromptBusy;
+      }
+      if (systemPromptEditor) {
+        systemPromptEditor.disabled = isSystemPromptBusy;
+      }
+    }
+
+    function openSystemPromptModal() {
+      if (!systemPromptBackdrop) return;
+      systemPromptBackdrop.classList.remove('hidden');
+      systemPromptBackdrop.setAttribute('aria-hidden', 'false');
+      loadSystemPrompt();
+    }
+
+    function closeSystemPromptModal() {
+      if (!systemPromptBackdrop) return;
+      systemPromptBackdrop.classList.add('hidden');
+      systemPromptBackdrop.setAttribute('aria-hidden', 'true');
+    }
+
+    async function loadSystemPrompt() {
+      if (!systemPromptEditor) return;
+      setSystemPromptBusy(true);
+      try {
+        const resp = await fetch('/adminchat/api/system-prompt');
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error((data && (data.detail || data.message)) || 'Failed to load system prompt.');
+        }
+        systemPromptEditor.value = String(data.template || '');
+        if (systemPromptPath) {
+          systemPromptPath.textContent = data.path ? `Mounted file: ${data.path}` : '';
+        }
+      } catch (err) {
+        console.error('System prompt load error:', err);
+        showKnowledgeToast((err && err.message) ? err.message : 'Failed to load system prompt.', true);
+      } finally {
+        setSystemPromptBusy(false);
+      }
+    }
+
+    async function saveSystemPrompt() {
+      if (!systemPromptEditor) return;
+      setSystemPromptBusy(true);
+      try {
+        const resp = await fetch('/adminchat/api/system-prompt', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ template: systemPromptEditor.value })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error((data && (data.detail || data.message)) || 'Failed to save system prompt.');
+        }
+        systemPromptEditor.value = String(data.template || systemPromptEditor.value || '');
+        if (systemPromptPath) {
+          systemPromptPath.textContent = data.path ? `Mounted file: ${data.path}` : '';
+        }
+        showKnowledgeToast('System prompt saved. New chats will use it immediately.', false);
+      } catch (err) {
+        console.error('System prompt save error:', err);
+        showKnowledgeToast((err && err.message) ? err.message : 'Failed to save system prompt.', true);
+      } finally {
+        setSystemPromptBusy(false);
+      }
+    }
+
+    function closeVectorDeleteConfirm(confirmed) {
+      if (vectorDeleteConfirmBackdrop) {
+        vectorDeleteConfirmBackdrop.classList.add('hidden');
+        vectorDeleteConfirmBackdrop.setAttribute('aria-hidden', 'true');
+      }
+
+      if (vectorDeleteConfirmResolver) {
+        const resolve = vectorDeleteConfirmResolver;
+        vectorDeleteConfirmResolver = null;
+        resolve(!!confirmed);
+      }
+    }
+
+    function openVectorDeleteConfirm() {
+      if (!vectorDeleteConfirmBackdrop || !vectorDeleteConfirmCollection) {
+        return Promise.resolve(false);
+      }
+
+      vectorDeleteConfirmCollection.textContent = getVectorCollectionDisplayName(vectorState.selectedCollection || '');
+      vectorDeleteConfirmBackdrop.classList.remove('hidden');
+      vectorDeleteConfirmBackdrop.setAttribute('aria-hidden', 'false');
+
+      if (vectorDeleteConfirmApprove) {
+        vectorDeleteConfirmApprove.focus();
+      }
+
+      return new Promise((resolve) => {
+        vectorDeleteConfirmResolver = resolve;
+      });
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function formatVectorDate(value) {
+      if (!value) return 'Not available';
+      try {
+        return new Date(value).toLocaleString();
+      } catch (err) {
+        return String(value);
+      }
+    }
+
+    const VECTOR_SELECT_DOCUMENT_TEXT = 'Select a document to inspect its content, chunks, and metadata.';
+
+    function renderVectorEmptyState(title, text) {
+      if (!vectorDetail) return;
+      vectorDetail.innerHTML = `
+        <div class="vector-empty-state">
+          <h3>${escapeHtml(title)}</h3>
+          <p>${escapeHtml(text)}</p>
+        </div>
+      `;
+    }
+
+    function setAppMode(mode) {
+      appMode = mode === 'vector' ? 'vector' : 'chat';
+      const showVectorDb = appMode === 'vector';
+
+      if (page) {
+        page.classList.toggle('vector-mode', showVectorDb);
+      }
+
+      vectorDbPage.classList.toggle('hidden', !showVectorDb);
+      ticketSection.classList.toggle('hidden', showVectorDb);
+      inputDock.classList.toggle('hidden', showVectorDb);
+      chatCard.classList.toggle('hidden', showVectorDb || !chatHistory.children.length);
+
+      if (manageVectorDbBtn) {
+        manageVectorDbBtn.textContent = showVectorDb ? 'Back to the AI Chat' : 'Manage Vector DB';
+      }
+
+      if (showVectorDb && !vectorState.collections.length) {
+        loadVectorCollections();
+      }
+    }
+
+    function renderVectorCollections() {
+      if (!vectorCollections) return;
+
+      if (!vectorState.collections.length) {
+        vectorCollections.innerHTML = `
+          <div class="vector-empty-state" style="grid-column: 1 / -1;">
+            <h3>No collections loaded</h3>
+            <p>The Vector DB service did not return collection metadata. Try refreshing the page or the backend service.</p>
+          </div>
+        `;
+        return;
+      }
+
+      vectorCollections.innerHTML = vectorState.collections.map((item) => {
+        const activeClass = item.name === vectorState.selectedCollection ? ' active' : '';
+        const collectionName = getVectorCollectionDisplayName(item.name);
+        const collectionDescription = getVectorCollectionDescription(item);
+        return `
+          <button type="button" class="vector-collection-card${activeClass}" data-collection-name="${escapeHtml(item.name)}">
+            <div class="vector-collection-head">
+              <div>
+                <div class="vector-collection-name">${escapeHtml(collectionName)}</div>
+                <div class="vector-collection-desc">${escapeHtml(collectionDescription)}</div>
+              </div>
+              <span class="vector-collection-badge">Live collection</span>
+            </div>
+            <div class="vector-collection-stats">
+              <div class="vector-stat">
+                <span class="vector-stat-label">Documents</span>
+                <span class="vector-stat-value">${Number(item.document_count || 0).toLocaleString()}</span>
+              </div>
+              <div class="vector-stat">
+                <span class="vector-stat-label">Chunks</span>
+                <span class="vector-stat-value">${Number(item.chunk_count || 0).toLocaleString()}</span>
+              </div>
+            </div>
+          </button>
+        `;
+      }).join('');
+
+      vectorCollections.querySelectorAll('[data-collection-name]').forEach((element) => {
+        element.addEventListener('click', () => {
+          const collectionName = element.getAttribute('data-collection-name');
+          if (!collectionName) return;
+          selectVectorCollection(collectionName);
+        });
+      });
+    }
+
+    async function loadVectorCollections() {
+      try {
+        vectorCollections.innerHTML = `
+          <div class="vector-empty-state" style="grid-column: 1 / -1;">
+            <h3>Loading collections</h3>
+            <p>Reading live collection metadata from Chroma.</p>
+          </div>
+        `;
+        const resp = await fetch('/adminchat/api/vector-db/collections');
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error((data && (data.detail || data.message)) || 'Failed to load collections.');
+        }
+        vectorState.collections = Array.isArray(data.items) ? data.items : [];
+        renderVectorCollections();
+      } catch (err) {
+        console.error('Vector DB collections error:', err);
+        vectorCollections.innerHTML = `
+          <div class="vector-empty-state" style="grid-column: 1 / -1;">
+            <h3>Collections unavailable</h3>
+            <p>${escapeHtml((err && err.message) ? err.message : 'Failed to load collections.')}</p>
+          </div>
+        `;
+      }
+    }
+
+    function getVectorCollectionDisplayName(name) {
+      if (name === 'New_Knowledge') {
+        return 'New Knowledge';
+      }
+      return name || '';
+    }
+
+    function getVectorCollectionDescription(item) {
+      if (!item || !item.name) {
+        return '';
+      }
+      if (item.name === 'Intsight') {
+        return 'Wiki + User Guide + Old Tickets Summeries';
+      }
+      if (item.name === 'New_Knowledge') {
+        return 'New User Knowledge';
+      }
+      return item.description || '';
+    }
+
+    function getVectorInputTypeLabel(value) {
+      if (value === 'file') {
+        return 'File';
+      }
+      if (value === 'free_text') {
+        return 'Free-Text';
+      }
+      return '';
+    }
+
+    function getVectorInputTypeClass(value) {
+      if (value === 'file') {
+        return ' type-file';
+      }
+      if (value === 'free_text') {
+        return ' type-free-text';
+      }
+      return '';
+    }
+
+    function stripVectorFilePrefix(text, inputType) {
+      const rawText = String(text || '');
+      if (inputType !== 'file' || !rawText) {
+        return rawText;
+      }
+
+      const normalized = rawText.replace(/^\s*\*\*File:\s*(.+?)\*\*/m, '$1');
+      return normalized.replace(/^\s+/, '');
+    }
+
+    function buildVectorPreviewText(text, inputType) {
+      const normalizedText = stripVectorFilePrefix(text || '', inputType)
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!normalizedText) {
+        return 'No preview available for this document.';
+      }
+      if (normalizedText.length <= 280) {
+        return normalizedText;
+      }
+      return `${normalizedText.slice(0, 280).trimEnd()}...`;
+    }
+
+    function sortVectorDocumentsInPlace() {
+      vectorState.documents.sort((left, right) => {
+        const leftUpdated = left && left.updated_at ? String(left.updated_at) : '';
+        const rightUpdated = right && right.updated_at ? String(right.updated_at) : '';
+        if (leftUpdated !== rightUpdated) {
+          return rightUpdated.localeCompare(leftUpdated);
+        }
+        const leftTitle = String((left && (left.title || left.display_source || left.source)) || '').toLowerCase();
+        const rightTitle = String((right && (right.title || right.display_source || right.source)) || '').toLowerCase();
+        return rightTitle < leftTitle ? -1 : rightTitle > leftTitle ? 1 : 0;
+      });
+    }
+
+    function syncVectorSummaryFromDetail(detail) {
+      if (!detail || !detail.source) return;
+
+      const summary = {
+        source: detail.source,
+        title: detail.title || '',
+        display_source: detail.display_source || '',
+        preview: buildVectorPreviewText(detail.full_content || '', detail.input_type),
+        chunk_count: Number(detail.chunk_count || 0),
+        token_count: Number(detail.token_count || 0),
+        input_type: detail.input_type || null,
+        updated_at: detail.updated_at || null,
+      };
+
+      const itemIndex = vectorState.documents.findIndex((item) => item.source === detail.source);
+      if (itemIndex >= 0) {
+        vectorState.documents[itemIndex] = {
+          ...vectorState.documents[itemIndex],
+          ...summary,
+        };
+      } else {
+        vectorState.documents.unshift(summary);
+        vectorState.total = Number(vectorState.total || 0) + 1;
+      }
+
+      sortVectorDocumentsInPlace();
+    }
+
+    function removeVectorSummary(source) {
+      const beforeCount = vectorState.documents.length;
+      vectorState.documents = vectorState.documents.filter((item) => item.source !== source);
+      if (vectorState.documents.length !== beforeCount) {
+        vectorState.total = Math.max(0, Number(vectorState.total || 0) - 1);
+      }
+    }
+
+    function updateVectorPager() {
+      if (vectorState.isLoadingDocuments) {
+        vectorPageStatus.textContent = 'Fetching documents...';
+        vectorPrevBtn.disabled = true;
+        vectorNextBtn.disabled = true;
+        return;
+      }
+
+      const total = Number(vectorState.total || 0);
+      const currentPage = Math.floor(vectorState.offset / vectorState.limit) + 1;
+      const totalPages = Math.max(1, Math.ceil(total / vectorState.limit));
+      vectorPageStatus.textContent = `Page ${currentPage} of ${totalPages}`;
+      vectorPrevBtn.disabled = vectorState.offset <= 0;
+      vectorNextBtn.disabled = vectorState.offset + vectorState.limit >= total;
+    }
+
+    function renderVectorDocumentList() {
+      if (!vectorDocumentList) return;
+
+      if (!vectorState.selectedCollection) {
+        vectorDocumentList.innerHTML = '';
+        vectorDocCount.textContent = 'Choose a collection to load documents.';
+        updateVectorPager();
+        return;
+      }
+
+      if (vectorState.isLoadingDocuments) {
+        vectorDocCount.textContent = 'Fetching documents...';
+        vectorDocumentList.innerHTML = `
+          <div class="vector-document-loading" aria-live="polite">
+            ${Array.from({ length: 4 }, () => `
+              <div class="vector-document-skeleton-card">
+                <div class="vector-skeleton-lines">
+                  <div class="vector-skeleton-line medium"></div>
+                  <div class="vector-skeleton-line"></div>
+                  <div class="vector-skeleton-line"></div>
+                  <div class="vector-skeleton-line short"></div>
+                </div>
+                <div class="vector-skeleton-pill-row">
+                  <div class="vector-skeleton-pill"></div>
+                  <div class="vector-skeleton-pill"></div>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        `;
+        updateVectorPager();
+        return;
+      }
+
+      vectorDocCount.textContent = `${Number(vectorState.total || 0).toLocaleString()} documents found`;
+
+      if (!vectorState.documents.length) {
+        vectorDocumentList.innerHTML = `
+          <div class="vector-empty-state">
+            <h3>No documents found</h3>
+            <p>Try another collection or adjust the current search term.</p>
+          </div>
+        `;
+        updateVectorPager();
+        return;
+      }
+
+      vectorDocumentList.innerHTML = vectorState.documents.map((item) => {
+        const activeClass = item.source === vectorState.selectedSource ? ' active' : '';
+        const previewText = stripVectorFilePrefix(item.preview || '', item.input_type).trim() || 'No preview available for this document.';
+        const tokenCount = Number(item.token_count || 0).toLocaleString();
+        const chunkCount = Number(item.chunk_count || 0).toLocaleString();
+        return `
+          <button type="button" class="vector-document-item${activeClass}" data-source="${escapeHtml(item.source)}">
+            <div class="vector-document-preview">${escapeHtml(previewText)}</div>
+            <div class="vector-document-foot">
+              <span class="vector-pill">${chunkCount} chunks</span>
+              <span class="vector-pill token-pill">${tokenCount} tokens</span>
+            </div>
+          </button>
+        `;
+      }).join('');
+
+      vectorDocumentList.querySelectorAll('[data-source]').forEach((element) => {
+        element.addEventListener('click', () => {
+          const source = element.getAttribute('data-source');
+          if (!source) return;
+          loadVectorDocumentDetail(source, false, {
+            includeFullContent: true
+          });
+        });
+      });
+
+      updateVectorPager();
+    }
+
+    async function loadVectorDocuments() {
+      if (!vectorState.selectedCollection) return;
+
+      vectorWorkspace.classList.remove('hidden');
+      vectorCollectionName.textContent = getVectorCollectionDisplayName(vectorState.selectedCollection);
+      vectorState.isLoadingDocuments = true;
+      renderVectorDocumentList();
+
+      try {
+        const params = new URLSearchParams({
+          collection_name: vectorState.selectedCollection,
+          search: vectorState.search || '',
+          limit: String(vectorState.limit),
+          offset: String(vectorState.offset)
+        });
+        const resp = await fetch(`/adminchat/api/vector-db/documents?${params.toString()}`);
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error((data && (data.detail || data.message)) || 'Failed to load documents.');
+        }
+
+        vectorState.documents = Array.isArray(data.items) ? data.items : [];
+        vectorState.total = Number(data.total || 0);
+
+        if (vectorState.selectedSource) {
+          const exists = vectorState.documents.some((item) => item.source === vectorState.selectedSource);
+          if (!exists && vectorState.documents.length) {
+            vectorState.selectedSource = vectorState.documents[0].source;
+          }
+        }
+
+        vectorState.isLoadingDocuments = false;
+        renderVectorDocumentList();
+
+        if (vectorState.selectedSource && !vectorState.isEditing) {
+          loadVectorDocumentDetail(vectorState.selectedSource, true);
+        } else if (!vectorState.detail) {
+          renderVectorEmptyState('Select a document', VECTOR_SELECT_DOCUMENT_TEXT);
+        }
+      } catch (err) {
+        vectorState.isLoadingDocuments = false;
+        console.error('Vector DB documents error:', err);
+        vectorDocumentList.innerHTML = `
+          <div class="vector-empty-state">
+            <h3>Unable to load documents</h3>
+            <p>${escapeHtml((err && err.message) ? err.message : 'The document list could not be loaded.')}</p>
+          </div>
+        `;
+        vectorDocCount.textContent = 'Document list unavailable';
+        updateVectorPager();
+      }
+    }
+
+    function selectVectorCollection(collectionName) {
+      vectorState.selectedCollection = collectionName;
+      vectorState.selectedSource = null;
+      vectorState.detail = null;
+      vectorState.draftContent = '';
+      vectorState.isEditing = false;
+      vectorState.offset = 0;
+      vectorState.search = (vectorSearchInput && vectorSearchInput.value ? vectorSearchInput.value : '').trim();
+      renderVectorCollections();
+      renderVectorEmptyState('Select a document', VECTOR_SELECT_DOCUMENT_TEXT);
+      loadVectorDocuments();
+    }
+
+    function renderVectorDetail() {
+      if (!vectorDetail) return;
+      if (!vectorState.detail) {
+        renderVectorEmptyState('Select a document', VECTOR_SELECT_DOCUMENT_TEXT);
+        return;
+      }
+
+      const detail = vectorState.detail;
+      const isEditing = !!vectorState.isEditing;
+      const contentValue = isEditing
+        ? vectorState.draftContent
+        : stripVectorFilePrefix(detail.full_content || '', detail.input_type);
+
+      vectorDetail.innerHTML = `
+        <div class="vector-detail-header">
+          <div class="vector-detail-actions">
+            <button id="vector-refresh-detail-btn" type="button" class="vector-action-btn">Refresh</button>
+            ${isEditing
+              ? '<button id="vector-cancel-edit-btn" type="button" class="vector-action-btn">Cancel</button><button id="vector-save-document-btn" type="button" class="vector-action-btn primary">Save Changes</button>'
+              : '<button id="vector-edit-document-btn" type="button" class="vector-action-btn">Edit Document</button>'}
+            <button id="vector-delete-document-btn" type="button" class="vector-action-btn danger">Delete Document</button>
+          </div>
+        </div>
+
+        <div class="vector-meta-grid">
+          <div class="vector-meta-card">
+            <strong>Collection</strong>
+            <span>${escapeHtml(getVectorCollectionDisplayName(detail.collection_name || ''))}</span>
+          </div>
+          <div class="vector-meta-card">
+            <strong>Chunks</strong>
+            <span>${Number(detail.chunk_count || 0).toLocaleString()}</span>
+          </div>
+          <div class="vector-meta-card">
+            <strong>Tokens</strong>
+            <span>${Number(detail.token_count || 0).toLocaleString()}</span>
+          </div>
+        </div>
+
+        <div class="vector-editor-panel">
+          <div class="vector-section-head">
+            <div class="vector-section-title">Document text</div>
+          </div>
+          <textarea id="vector-document-editor" class="vector-document-editor${isEditing ? ' editing' : ''}" ${isEditing ? '' : 'readonly'}></textarea>
+        </div>
+      `;
+
+      const editor = document.getElementById('vector-document-editor');
+      if (editor) {
+        editor.value = contentValue;
+        if (isEditing) {
+          editor.addEventListener('input', () => {
+            vectorState.draftContent = editor.value;
+          });
+        }
+      }
+
+      const editBtn = document.getElementById('vector-edit-document-btn');
+      if (editBtn) {
+        editBtn.addEventListener('click', () => {
+          vectorState.isEditing = true;
+          vectorState.draftContent = stripVectorFilePrefix(detail.full_content || '', detail.input_type);
+          renderVectorDetail();
+        });
+      }
+
+      const cancelBtn = document.getElementById('vector-cancel-edit-btn');
+      if (cancelBtn) {
+        cancelBtn.addEventListener('click', () => {
+          vectorState.isEditing = false;
+          vectorState.draftContent = stripVectorFilePrefix(detail.full_content || '', detail.input_type);
+          renderVectorDetail();
+        });
+      }
+
+      const saveBtn = document.getElementById('vector-save-document-btn');
+      if (saveBtn) {
+        saveBtn.disabled = vectorState.isSaving;
+        saveBtn.addEventListener('click', saveVectorDocument);
+      }
+
+      const refreshBtn = document.getElementById('vector-refresh-detail-btn');
+      if (refreshBtn) {
+        refreshBtn.addEventListener('click', () => loadVectorDocumentDetail(detail.source, true, {
+          includeFullContent: true
+        }));
+      }
+
+      const deleteBtn = document.getElementById('vector-delete-document-btn');
+      if (deleteBtn) {
+        deleteBtn.disabled = vectorState.isSaving;
+        deleteBtn.addEventListener('click', deleteVectorDocument);
+      }
+    }
+
+    async function loadVectorDocumentDetail(source, silent, options = {}) {
+      if (!vectorState.selectedCollection || !source) return;
+      const sameSource = !!(vectorState.detail && vectorState.detail.source === source);
+      const includeFullContent = options.includeFullContent !== undefined
+        ? !!options.includeFullContent
+        : (!sameSource || !vectorState.detail || !vectorState.detail.full_content);
+
+      vectorState.selectedSource = source;
+      renderVectorDocumentList();
+      if (!silent) {
+        vectorDetail.innerHTML = '<div class="vector-loading-note">Loading document details...</div>';
+      }
+
+      const requestId = ++vectorState.detailRequestId;
+
+      try {
+        const params = new URLSearchParams({
+          collection_name: vectorState.selectedCollection,
+          source,
+          include_full_content: includeFullContent ? 'true' : 'false'
+        });
+        const resp = await fetch(`/adminchat/api/vector-db/document?${params.toString()}`);
+        const rawText = await resp.text();
+        let data = null;
+        try {
+          data = rawText ? JSON.parse(rawText) : {};
+        } catch (parseError) {
+          if (!resp.ok) {
+            throw new Error(rawText || 'Failed to load document details.');
+          }
+          throw parseError;
+        }
+        if (!resp.ok) {
+          throw new Error((data && (data.detail || data.message)) || 'Failed to load document details.');
+        }
+
+        if (requestId !== vectorState.detailRequestId) {
+          return;
+        }
+
+        const previousDetail = sameSource ? vectorState.detail : null;
+        vectorState.detail = {
+          ...(previousDetail || {}),
+          ...data,
+          full_content: data.full_content != null
+            ? data.full_content
+            : (previousDetail && previousDetail.full_content ? previousDetail.full_content : '')
+        };
+
+        if (!vectorState.isEditing || !sameSource) {
+          vectorState.draftContent = stripVectorFilePrefix(vectorState.detail.full_content || '', vectorState.detail.input_type);
+          vectorState.isEditing = false;
+        }
+
+        renderVectorDetail();
+      } catch (err) {
+        console.error('Vector DB detail error:', err);
+        renderVectorEmptyState('Document unavailable', (err && err.message) ? err.message : 'Failed to load document details.');
+      }
+    }
+
+    async function saveVectorDocument() {
+      if (!vectorState.detail || !vectorState.selectedCollection) return;
+      const nextContent = vectorState.draftContent || '';
+      if (!nextContent.trim()) {
+        showKnowledgeToast('Document content cannot be empty.', true);
+        return;
+      }
+
+      vectorState.isSaving = true;
+      renderVectorDetail();
+      try {
+        const resp = await fetch('/adminchat/api/vector-db/document', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            collection_name: vectorState.selectedCollection,
+            source: vectorState.detail.source,
+            content: nextContent
+          })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error((data && (data.detail || data.message)) || 'Failed to save document.');
+        }
+        vectorState.detail = data.detail || vectorState.detail;
+        vectorState.draftContent = stripVectorFilePrefix(vectorState.detail.full_content || nextContent, vectorState.detail.input_type);
+        vectorState.isEditing = false;
+        syncVectorSummaryFromDetail(vectorState.detail);
+        renderVectorDocumentList();
+        renderVectorDetail();
+        showKnowledgeToast(data.message || 'Document updated successfully.', false);
+        loadVectorCollections().catch((err) => {
+          console.error('Vector DB collections refresh error:', err);
+        });
+        loadVectorDocuments().catch((err) => {
+          console.error('Vector DB document refresh error:', err);
+        });
+      } catch (err) {
+        console.error('Vector DB save error:', err);
+        showKnowledgeToast((err && err.message) ? err.message : 'Failed to save document.', true);
+      } finally {
+        vectorState.isSaving = false;
+        renderVectorDetail();
+      }
+    }
+
+    async function deleteVectorDocument() {
+      if (!vectorState.detail || !vectorState.selectedCollection) return;
+      const confirmed = await openVectorDeleteConfirm();
+      if (!confirmed) return;
+
+      vectorState.isSaving = true;
+      renderVectorDetail();
+      try {
+        const resp = await fetch('/adminchat/api/vector-db/document', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            collection_name: vectorState.selectedCollection,
+            source: vectorState.detail.source
+          })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error((data && (data.detail || data.message)) || 'Failed to delete document.');
+        }
+        const deletedSource = vectorState.detail.source;
+        showKnowledgeToast(data.message || 'Document deleted successfully.', false);
+        removeVectorSummary(deletedSource);
+        vectorState.detail = null;
+        vectorState.draftContent = '';
+        vectorState.isEditing = false;
+        vectorState.selectedSource = null;
+        renderVectorDocumentList();
+        renderVectorEmptyState('Document deleted', 'Select another document to continue browsing the live vector database.');
+
+        if (!vectorState.documents.length && vectorState.total > 0 && vectorState.offset > 0) {
+          vectorState.offset = Math.max(0, vectorState.offset - vectorState.limit);
+          await loadVectorDocuments();
+        } else if (vectorState.documents.length && vectorState.documents.length < vectorState.limit && vectorState.total > vectorState.documents.length) {
+          loadVectorDocuments().catch((loadErr) => {
+            console.error('Vector DB document refresh error:', loadErr);
+          });
+        }
+
+        loadVectorCollections().catch((collectionErr) => {
+          console.error('Vector DB collections refresh error:', collectionErr);
+        });
+      } catch (err) {
+        console.error('Vector DB delete error:', err);
+        showKnowledgeToast((err && err.message) ? err.message : 'Failed to delete document.', true);
+      } finally {
+        vectorState.isSaving = false;
+        if (vectorState.detail) {
+          renderVectorDetail();
+        }
+      }
     }
 
     function hasHebrewText(text) {
@@ -2865,6 +4648,42 @@
       });
     }
 
+    if (systemPromptClose) {
+      systemPromptClose.addEventListener('click', closeSystemPromptModal);
+    }
+
+    if (systemPromptRefresh) {
+      systemPromptRefresh.addEventListener('click', loadSystemPrompt);
+    }
+
+    if (systemPromptSave) {
+      systemPromptSave.addEventListener('click', saveSystemPrompt);
+    }
+
+    if (systemPromptBackdrop) {
+      systemPromptBackdrop.addEventListener('click', (e) => {
+        if (e.target === systemPromptBackdrop) {
+          closeSystemPromptModal();
+        }
+      });
+    }
+
+    if (vectorDeleteConfirmCancel) {
+      vectorDeleteConfirmCancel.addEventListener('click', () => closeVectorDeleteConfirm(false));
+    }
+
+    if (vectorDeleteConfirmApprove) {
+      vectorDeleteConfirmApprove.addEventListener('click', () => closeVectorDeleteConfirm(true));
+    }
+
+    if (vectorDeleteConfirmBackdrop) {
+      vectorDeleteConfirmBackdrop.addEventListener('click', (e) => {
+        if (e.target === vectorDeleteConfirmBackdrop) {
+          closeVectorDeleteConfirm(false);
+        }
+      });
+    }
+
     knowledgePrepareCancel.addEventListener('click', () => {
       closePrepareConfirmModal();
       knowledgeContentEditor.focus();
@@ -2917,6 +4736,12 @@
 
     window.addEventListener('beforeunload', () => {
       saveKnowledgeDraft();
+    });
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && vectorDeleteConfirmBackdrop && !vectorDeleteConfirmBackdrop.classList.contains('hidden')) {
+        closeVectorDeleteConfirm(false);
+      }
     });
 
     if (knowledgeLoadingCancel) {
@@ -3489,6 +5314,53 @@
     form.addEventListener('submit', () => {
       questionInput.style.height = 'auto';
     });
+
+    if (vectorSearchBtn) {
+      vectorSearchBtn.addEventListener('click', () => {
+        if (!vectorState.selectedCollection) return;
+        vectorState.search = (vectorSearchInput.value || '').trim();
+        vectorState.offset = 0;
+        loadVectorDocuments();
+      });
+    }
+
+    if (vectorSearchInput) {
+      vectorSearchInput.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        if (!vectorState.selectedCollection) return;
+        vectorState.search = (vectorSearchInput.value || '').trim();
+        vectorState.offset = 0;
+        loadVectorDocuments();
+      });
+    }
+
+    if (vectorRefreshBtn) {
+      vectorRefreshBtn.addEventListener('click', async () => {
+        await loadVectorCollections();
+        if (!vectorState.selectedCollection) return;
+        await loadVectorDocuments();
+        if (vectorState.selectedSource) {
+          await loadVectorDocumentDetail(vectorState.selectedSource, true);
+        }
+      });
+    }
+
+    if (vectorPrevBtn) {
+      vectorPrevBtn.addEventListener('click', () => {
+        if (vectorState.offset <= 0) return;
+        vectorState.offset = Math.max(0, vectorState.offset - vectorState.limit);
+        loadVectorDocuments();
+      });
+    }
+
+    if (vectorNextBtn) {
+      vectorNextBtn.addEventListener('click', () => {
+        if (vectorState.offset + vectorState.limit >= vectorState.total) return;
+        vectorState.offset += vectorState.limit;
+        loadVectorDocuments();
+      });
+    }
 
     // Initial load
     loadKnowledgeDraft();

@@ -1,6 +1,6 @@
 services:
   wiki_rag_api:
-    image: wiki-rag-api:1.1.3
+    image: wiki-rag-api:1.2.0
     networks:
       - shared-ai-net
     environment:
@@ -15,8 +15,10 @@ services:
       ADO_PAT: ${ADO_PAT}
       WIKI_DIR: ${WIKI_DIR}
       CHROMA_DIR: ${CHROMA_DIR}
+      SYSTEM_PROMPT_FILE: /app/system_prompt_template.txt
     volumes:
       - /home/ta9/new_apps/wiki_rag/chroma_db:/app/chroma_db
+      - /home/ta9/new_apps/wiki_rag/backend/system_prompt_template.txt:/app/system_prompt_template.txt
     deploy:
       replicas: 1
       restart_policy:
