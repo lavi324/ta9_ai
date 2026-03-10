@@ -3868,9 +3868,19 @@ def vector_db_documents(
     search: str = "",
     limit: int = 24,
     offset: int = 0,
+    sort_by: str = "updated_at",
+    sort_direction: str = "desc",
 ):
     safe_limit = max(1, min(limit, 100))
     safe_offset = max(0, offset)
+    normalized_sort_by = (sort_by or "updated_at").strip().lower()
+    normalized_sort_direction = (sort_direction or "desc").strip().lower()
+
+    if normalized_sort_by not in {"updated_at", "token_count"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported sort_by: {sort_by}")
+    if normalized_sort_direction not in {"asc", "desc"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported sort_direction: {sort_direction}")
+
     summaries = _group_collection_documents(collection_name)
     search_value = (search or "").strip()
     if search_value:
@@ -3900,6 +3910,23 @@ def vector_db_documents(
         )
         summaries = active_matches
 
+    if normalized_sort_by == "token_count":
+        summaries.sort(
+            key=lambda item: (
+                int(item.get("token_count") or 0),
+                str(item.get("title") or "").lower(),
+            ),
+            reverse=(normalized_sort_direction == "desc"),
+        )
+    else:
+        summaries.sort(
+            key=lambda item: (
+                str(item.get("updated_at") or ""),
+                str(item.get("title") or "").lower(),
+            ),
+            reverse=(normalized_sort_direction == "desc"),
+        )
+
     page_items = [
         {key: value for key, value in item.items() if not key.startswith("_")}
         for item in summaries[safe_offset:safe_offset + safe_limit]
@@ -3909,6 +3936,8 @@ def vector_db_documents(
         "total": len(summaries),
         "limit": safe_limit,
         "offset": safe_offset,
+        "sort_by": normalized_sort_by,
+        "sort_direction": normalized_sort_direction,
         "items": page_items,
     }
 

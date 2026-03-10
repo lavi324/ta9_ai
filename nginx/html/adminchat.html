@@ -2318,6 +2318,37 @@
       color: #5c6c7b;
     }
 
+    .vector-sidebar-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .vector-sidebar-head-copy {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .vector-sort-select {
+      min-width: 168px;
+      border: 1px solid #d4dae3;
+      border-radius: 10px;
+      padding: 9px 12px;
+      font-size: 13px;
+      color: #1f2d3d;
+      outline: none;
+      background: #ffffff;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .vector-sort-select:focus {
+      border-color: #0c3d6b;
+      box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.1);
+    }
+
     .vector-document-list {
       display: flex;
       flex-direction: column;
@@ -3027,9 +3058,17 @@
 
         <div class="vector-layout">
           <aside class="vector-sidebar">
-            <div>
-              <div class="card-head">Documents</div>
-              <div id="vector-doc-count" class="vector-sidebar-meta">Choose a collection to load documents.</div>
+            <div class="vector-sidebar-head">
+              <div class="vector-sidebar-head-copy">
+                <div class="card-head">Documents</div>
+                <div id="vector-doc-count" class="vector-sidebar-meta">Choose a collection to load documents.</div>
+              </div>
+              <select id="vector-sort" class="vector-sort-select" aria-label="Sort documents">
+                <option value="updated_desc">Newest First</option>
+                <option value="updated_asc">Oldest First</option>
+                <option value="tokens_desc">Most Tokens First</option>
+                <option value="tokens_asc">Fewest Tokens First</option>
+              </select>
             </div>
             <div id="vector-document-list" class="vector-document-list"></div>
             <div class="vector-pager">
@@ -3340,6 +3379,7 @@
     const vectorSearchInput = document.getElementById('vector-search');
     const vectorSearchBtn = document.getElementById('vector-search-btn');
     const vectorRefreshBtn = document.getElementById('vector-refresh-btn');
+    const vectorSortSelect = document.getElementById('vector-sort');
     const vectorDocumentList = document.getElementById('vector-document-list');
     const vectorDetail = document.getElementById('vector-detail');
     const vectorDocCount = document.getElementById('vector-doc-count');
@@ -3381,6 +3421,7 @@
       limit: 18,
       offset: 0,
       search: '',
+      sort: 'updated_desc',
       selectedSource: null,
       detail: null,
       detailRequestId: 0,
@@ -3824,6 +3865,10 @@
     function renderVectorDocumentList() {
       if (!vectorDocumentList) return;
 
+      if (vectorSortSelect) {
+        vectorSortSelect.value = vectorState.sort || 'updated_desc';
+      }
+
       if (!vectorState.selectedCollection) {
         vectorDocumentList.innerHTML = '';
         vectorDocCount.textContent = 'Choose a collection to load documents.';
@@ -3904,11 +3949,17 @@
       renderVectorDocumentList();
 
       try {
+        const sortValue = String(vectorState.sort || 'updated_desc');
+        const [sortKey, sortDirectionRaw] = sortValue.split('_');
+        const sortBy = sortKey === 'tokens' ? 'token_count' : 'updated_at';
+        const sortDirection = sortDirectionRaw === 'asc' ? 'asc' : 'desc';
         const params = new URLSearchParams({
           collection_name: vectorState.selectedCollection,
           search: vectorState.search || '',
           limit: String(vectorState.limit),
-          offset: String(vectorState.offset)
+          offset: String(vectorState.offset),
+          sort_by: sortBy,
+          sort_direction: sortDirection
         });
         const resp = await fetch(`/adminchat/api/vector-db/documents?${params.toString()}`);
         const data = await resp.json();
@@ -3955,7 +4006,11 @@
       vectorState.draftContent = '';
       vectorState.isEditing = false;
       vectorState.offset = 0;
+      vectorState.sort = 'updated_desc';
       vectorState.search = (vectorSearchInput && vectorSearchInput.value ? vectorSearchInput.value : '').trim();
+      if (vectorSortSelect) {
+        vectorSortSelect.value = 'updated_desc';
+      }
       renderVectorCollections();
       renderVectorEmptyState('Select a document', VECTOR_SELECT_DOCUMENT_TEXT);
       loadVectorDocuments();
@@ -5948,6 +6003,14 @@
         if (vectorState.selectedSource) {
           await loadVectorDocumentDetail(vectorState.selectedSource, true);
         }
+      });
+    }
+
+    if (vectorSortSelect) {
+      vectorSortSelect.addEventListener('change', () => {
+        vectorState.sort = vectorSortSelect.value || 'updated_desc';
+        vectorState.offset = 0;
+        loadVectorDocuments();
       });
     }
 
