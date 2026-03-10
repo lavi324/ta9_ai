@@ -2125,9 +2125,14 @@
 
     .vector-collection-head {
       display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
+      align-items: center;
+      justify-content: center;
       gap: 12px;
+      text-align: center;
+    }
+
+    .vector-collection-head > div {
+      width: 100%;
     }
 
     .vector-collection-name {
@@ -2644,71 +2649,13 @@
       box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.08);
     }
 
-    .vector-chunk-list {
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }
-
-    .vector-chunk-card {
-      border: 1px solid #dfe7f1;
-      border-radius: 16px;
-      background: #fbfdff;
-      padding: 16px;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }
-
-    .vector-chunk-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-
-    .vector-chunk-title {
-      font-size: 15px;
-      font-weight: 700;
-      color: #10243f;
-    }
-
-    .vector-chunk-text {
-      width: 100%;
-      border: 1px solid #dbe5f0;
-      border-radius: 14px;
-      background: #ffffff;
-      padding: 14px;
-      font-size: 13px;
-      line-height: 1.65;
-      color: #1f2d3d;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-
-    .vector-chunk-text {
-      min-height: 120px;
-      resize: vertical;
-    }
-
     .vector-section-head,
-    .vector-section-actions,
-    .vector-chunk-toolbar,
-    .vector-chunk-pager {
+    .vector-section-actions {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
       flex-wrap: wrap;
-    }
-
-    .vector-chunk-meta {
-      font-size: 12px;
-      color: #5b6878;
-      overflow-wrap: anywhere;
-      word-break: break-word;
     }
 
     .vector-empty-state {
@@ -2718,6 +2665,66 @@
       text-align: center;
       color: #526173;
       background: linear-gradient(180deg, #fbfdff 0%, #f5f9fd 100%);
+    }
+
+    .vector-empty-state.loading {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      min-height: 160px;
+    }
+
+    .vector-loading-orbit {
+      position: relative;
+      width: 56px;
+      height: 56px;
+    }
+
+    .vector-loading-orbit::before {
+      content: '';
+      position: absolute;
+      inset: 6px;
+      border: 2px solid #d8e3f3;
+      border-radius: 50%;
+    }
+
+    .vector-loading-orbit::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 50%;
+      width: 12px;
+      height: 12px;
+      margin-left: -6px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #0c3d6b 0%, #3b82f6 100%);
+      box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.12);
+      transform-origin: 50% 26px;
+      animation: vector-loading-orbit 1.1s linear infinite;
+    }
+
+    .vector-loading-dots {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .vector-loading-dots span {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #9bb4d1;
+      animation: vector-loading-dot-pulse 1.2s ease-in-out infinite;
+    }
+
+    .vector-loading-dots span:nth-child(2) {
+      animation-delay: 0.16s;
+    }
+
+    .vector-loading-dots span:nth-child(3) {
+      animation-delay: 0.32s;
     }
 
     .vector-confirm-backdrop {
@@ -2851,6 +2858,26 @@
       color: #526173;
     }
 
+    @keyframes vector-loading-orbit {
+      100% {
+        transform: rotate(360deg);
+      }
+    }
+
+    @keyframes vector-loading-dot-pulse {
+      0%,
+      80%,
+      100% {
+        transform: scale(0.72);
+        opacity: 0.45;
+      }
+
+      40% {
+        transform: scale(1);
+        opacity: 1;
+      }
+    }
+
     .hidden { display: none; }
 
     @media (max-width: 1000px) {
@@ -2868,7 +2895,6 @@
 
       .vector-toolbar,
       .vector-detail-header,
-      .vector-chunk-head,
       .vector-hero-card {
         flex-direction: column;
         align-items: stretch;
@@ -2948,7 +2974,7 @@
       <div class="vector-hero-card">
         <div>
           <h2>Live Chroma Collections</h2>
-          <p>Choose a collection, review stored documents, check their chunk and token counts, and manage the knowledge base with direct search, edit, and delete actions.</p>
+          <p>Choose a collection, review stored documents, and manage the knowledge base with direct search, edit, and delete actions.</p>
         </div>
       </div>
 
@@ -3186,7 +3212,7 @@
     <div class="vector-confirm-card" role="dialog" aria-modal="true" aria-labelledby="vector-delete-confirm-title">
       <div class="vector-confirm-eyebrow">Delete document</div>
       <div id="vector-delete-confirm-title" class="vector-confirm-title">Delete this document?</div>
-      <div class="vector-confirm-text">This will permanently remove the document and all of its stored chunks from the selected collection.</div>
+      <div class="vector-confirm-text">This will permanently remove the document from the selected collection.</div>
       <div class="vector-confirm-meta">
         <div class="vector-confirm-meta-label">Collection</div>
         <div id="vector-delete-confirm-collection" class="vector-confirm-meta-value"></div>
@@ -3518,7 +3544,7 @@
       }
     }
 
-    const VECTOR_SELECT_DOCUMENT_TEXT = 'Select a document to inspect its content, chunks, and metadata.';
+    const VECTOR_SELECT_DOCUMENT_TEXT = 'Select a document to inspect its content and metadata.';
 
     function renderVectorEmptyState(title, text) {
       if (!vectorDetail) return;
@@ -3569,6 +3595,7 @@
         const activeClass = item.name === vectorState.selectedCollection ? ' active' : '';
         const collectionName = getVectorCollectionDisplayName(item.name);
         const collectionDescription = getVectorCollectionDescription(item);
+        const tokenCount = Number(item.token_count || 0).toLocaleString();
         return `
           <button type="button" class="vector-collection-card${activeClass}" data-collection-name="${escapeHtml(item.name)}">
             <div class="vector-collection-head">
@@ -3576,7 +3603,6 @@
                 <div class="vector-collection-name">${escapeHtml(collectionName)}</div>
                 <div class="vector-collection-desc">${escapeHtml(collectionDescription)}</div>
               </div>
-              <span class="vector-collection-badge">Live collection</span>
             </div>
             <div class="vector-collection-stats">
               <div class="vector-stat">
@@ -3584,8 +3610,8 @@
                 <span class="vector-stat-value">${Number(item.document_count || 0).toLocaleString()}</span>
               </div>
               <div class="vector-stat">
-                <span class="vector-stat-label">Chunks</span>
-                <span class="vector-stat-value">${Number(item.chunk_count || 0).toLocaleString()}</span>
+                <span class="vector-stat-label">Tokens</span>
+                <span class="vector-stat-value">${tokenCount}</span>
               </div>
             </div>
           </button>
@@ -3604,9 +3630,15 @@
     async function loadVectorCollections() {
       try {
         vectorCollections.innerHTML = `
-          <div class="vector-empty-state" style="grid-column: 1 / -1;">
+          <div class="vector-empty-state loading" style="grid-column: 1 / -1;">
+            <div class="vector-loading-orbit" aria-hidden="true"></div>
             <h3>Loading collections</h3>
             <p>Reading live collection metadata from Chroma.</p>
+            <div class="vector-loading-dots" aria-hidden="true">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
           </div>
         `;
         const resp = await fetch('/adminchat/api/vector-db/collections');
@@ -3642,7 +3674,7 @@
         return 'Wiki + User Guide + Old Tickets Summeries';
       }
       if (item.name === 'New_Knowledge') {
-        return 'New User Knowledge';
+        return 'User Knowledge Hub';
       }
       return item.description || '';
     }
@@ -3711,7 +3743,6 @@
         title: detail.title || '',
         display_source: detail.display_source || '',
         preview: buildVectorPreviewText(detail.full_content || '', detail.input_type),
-        chunk_count: Number(detail.chunk_count || 0),
         token_count: Number(detail.token_count || 0),
         input_type: detail.input_type || null,
         updated_at: detail.updated_at || null,
@@ -3806,12 +3837,10 @@
         const activeClass = item.source === vectorState.selectedSource ? ' active' : '';
         const previewText = stripVectorFilePrefix(item.preview || '', item.input_type).trim() || 'No preview available for this document.';
         const tokenCount = Number(item.token_count || 0).toLocaleString();
-        const chunkCount = Number(item.chunk_count || 0).toLocaleString();
         return `
           <button type="button" class="vector-document-item${activeClass}" data-source="${escapeHtml(item.source)}">
             <div class="vector-document-preview">${escapeHtml(previewText)}</div>
             <div class="vector-document-foot">
-              <span class="vector-pill">${chunkCount} chunks</span>
               <span class="vector-pill token-pill">${tokenCount} tokens</span>
             </div>
           </button>
@@ -3925,10 +3954,6 @@
           <div class="vector-meta-card">
             <strong>Collection</strong>
             <span>${escapeHtml(getVectorCollectionDisplayName(detail.collection_name || ''))}</span>
-          </div>
-          <div class="vector-meta-card">
-            <strong>Chunks</strong>
-            <span>${Number(detail.chunk_count || 0).toLocaleString()}</span>
           </div>
           <div class="vector-meta-card">
             <strong>Tokens</strong>

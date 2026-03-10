@@ -2949,6 +2949,64 @@ def _merge_chunk_texts(chunks: List[str], max_chars: Optional[int] = None) -> st
     return "".join(merged_parts)
 
 
+def _build_chunk_boundaries(rows: List[dict], preview_chars: int = 72) -> List[dict]:
+    boundaries: List[dict] = []
+    merged_length = 0
+    merged_tail = ""
+
+    for row in rows:
+        chunk_text = row.get("content") or ""
+        chunk_number = int(row.get("chunk", 0) or 0)
+        if not chunk_text:
+            boundaries.append(
+                {
+                    "chunk": chunk_number,
+                    "start_position": merged_length,
+                    "end_position": merged_length,
+                    "visible_length": 0,
+                    "original_length": 0,
+                    "start_preview": "",
+                    "end_preview": "",
+                }
+            )
+            continue
+
+        if not boundaries:
+            overlap_size = 0
+            visible_text = chunk_text
+        else:
+            overlap_size = _find_chunk_overlap(merged_tail, chunk_text)
+            visible_text = chunk_text[overlap_size:]
+
+        visible_length = len(visible_text)
+        start_position = merged_length + 1 if visible_length > 0 else merged_length
+        end_position = merged_length + visible_length
+
+        start_preview = visible_text[:preview_chars].strip()
+        end_preview = visible_text[-preview_chars:].strip() if visible_text else ""
+
+        boundaries.append(
+            {
+                "chunk": chunk_number,
+                "start_position": start_position,
+                "end_position": end_position,
+                "visible_length": visible_length,
+                "original_length": len(chunk_text),
+                "overlap_trimmed": overlap_size,
+                "start_preview": start_preview,
+                "end_preview": end_preview,
+            }
+        )
+
+        if not visible_text:
+            continue
+
+        merged_length += visible_length
+        merged_tail = (merged_tail + visible_text)[-CHUNK_OVERLAP:]
+
+    return boundaries
+
+
 def _vector_chunk_page_bounds(limit: int, offset: int) -> Tuple[int, int]:
     safe_limit = max(1, min(int(limit), VECTOR_DB_MAX_CHUNK_LIMIT))
     safe_offset = max(0, int(offset))
@@ -3027,6 +3085,11 @@ def _count_text_tokens(text: str) -> int:
         raise RuntimeError("tiktoken is required for exact token counting")
 
     return len(encoding.encode(raw_text, disallowed_special=()))
+
+
+def _count_collection_tokens(collection_name: str) -> int:
+    summaries = _group_collection_documents(collection_name)
+    return sum(int(item.get("token_count", 0) or 0) for item in summaries)
 
 
 def _group_collection_documents(collection_name: str) -> List[dict]:
@@ -3219,8 +3282,9 @@ def _build_vector_document_detail(
         offset=chunk_offset,
         include_embeddings=include_embeddings,
     )
-    full_content = _merge_chunk_texts([row["content"] for row in rows]) if include_full_content else None
-    merged_content = full_content or _merge_chunk_texts([row["content"] for row in rows])
+    chunk_boundaries = _build_chunk_boundaries(rows)
+    merged_content = _merge_chunk_texts([row["content"] for row in rows])
+    full_content = merged_content if include_full_content else None
     token_count = _count_text_tokens(merged_content)
     title = _build_document_title(source, rows[0]["content"] if rows else "")
     input_type = _infer_vector_document_input_type(
@@ -3247,6 +3311,7 @@ def _build_vector_document_detail(
         "input_type": input_type,
         "updated_at": updated_at,
         "full_content": full_content,
+        "chunk_boundaries": chunk_boundaries,
         "chunk_limit": safe_limit,
         "chunk_offset": safe_offset,
         "chunk_has_more": safe_offset + safe_limit < len(rows),
@@ -3790,6 +3855,7 @@ def vector_db_collections():
                 "name": collection_name,
                 "description": _vector_collection_description(collection_name),
                 "document_count": _count_collection_documents(collection_name),
+                "token_count": _count_collection_tokens(collection_name),
                 "chunk_count": target_collection.count(),
             }
         )
