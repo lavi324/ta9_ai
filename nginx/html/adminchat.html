@@ -59,16 +59,18 @@
 
     .header-left {
       display: flex;
-      align-items: flex-start;
-      flex-direction: column;
+      align-items: center;
       gap: 16px;
     }
 
-    .header-left-actions {
+    .vector-top-actions {
       display: flex;
       align-items: center;
-      gap: 10px;
-      margin-top: -4px;
+      justify-content: flex-start;
+      width: 100%;
+      max-width: none;
+      margin: 0 0 24px 0;
+      padding: 0;
     }
 
     .header-center {
@@ -310,6 +312,13 @@
       width: min(980px, 96vw);
     }
 
+    .knowledge-modal.system-prompt-modal {
+      width: min(1200px, 98vw);
+      max-height: 92vh;
+      min-height: 78vh;
+      overflow: auto;
+    }
+
     .knowledge-modal.xlarge {
       width: min(1200px, 98vw);
       max-height: 92vh;
@@ -324,7 +333,7 @@
 
     .system-prompt-editor {
       width: 100%;
-      min-height: 52vh;
+      min-height: 60vh;
       resize: vertical;
       border: 1px solid #d6e1ef;
       border-radius: 12px;
@@ -347,14 +356,73 @@
       word-break: break-all;
     }
 
-    .system-prompt-note {
+    .system-prompt-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: #10243f;
+      margin-bottom: 6px;
+    }
+
+    .system-prompt-submeta {
       font-size: 13px;
       color: #334155;
       line-height: 1.6;
-      background: #f8fafc;
-      border: 1px solid #e2e8f0;
-      border-radius: 12px;
+    }
+
+    .system-prompt-status {
+      min-height: 22px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #1d4ed8;
+      opacity: 0;
+      transform: translateY(-2px);
+      transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+
+    .system-prompt-status.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .system-prompt-status.error {
+      color: #b91c1c;
+    }
+
+    .system-prompt-toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 3200;
+      min-width: 260px;
+      max-width: 360px;
       padding: 14px 16px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #0c3d6b 0%, #14508a 100%);
+      color: #ffffff;
+      box-shadow: 0 18px 44px rgba(12, 29, 55, 0.28);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      opacity: 0;
+      transform: translateY(8px) scale(0.98);
+      transition: opacity 0.18s ease, transform 0.18s ease;
+      pointer-events: none;
+    }
+
+    .system-prompt-toast.visible {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+
+    .system-prompt-toast-title {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      margin-bottom: 4px;
+    }
+
+    .system-prompt-toast-text {
+      font-size: 12px;
+      line-height: 1.45;
+      color: rgba(255, 255, 255, 0.9);
     }
 
     .knowledge-modal-header {
@@ -1777,6 +1845,21 @@
       box-shadow: 0 6px 18px rgba(12, 61, 107, 0.16);
     }
 
+    #manage-vector-db-btn,
+    #system-prompt-btn {
+      width: 178px;
+      min-width: 178px;
+      height: 44px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      padding: 10px 16px;
+      font-weight: 600;
+      box-shadow: 0 6px 18px rgba(12, 61, 107, 0.16);
+      white-space: nowrap;
+    }
+
     .vector-page {
       width: 1200px;
       max-width: calc(100% - 80px);
@@ -2070,12 +2153,16 @@
     .vector-document-preview {
       font-size: 14px;
       color: #24364b;
-      line-height: 1.7;
+      line-height: 22px;
       overflow-wrap: anywhere;
       word-break: break-word;
-      white-space: pre-wrap;
-      display: block;
-      max-height: 11.9em;
+      white-space: normal;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 5;
+      line-clamp: 5;
+      height: 110px;
+      max-height: 110px;
       overflow: hidden;
       min-height: 0;
     }
@@ -2620,15 +2707,12 @@
     <div class="topbar">
       <div class="header-left">
         <img src="/adminchat/ta9_logo.png" alt="TA9" class="logo" onerror="this.style.display='none'">
-        <div class="header-left-actions">
-          <button id="system-prompt-btn" type="button" class="ghost-btn">System Prompt</button>
-        </div>
       </div>
       <div class="header-center">
         <div class="title">AI Support Assistant</div>
       </div>
       <div class="header-right">
-        <button id="manage-vector-db-btn" type="button" class="ghost-btn header-action-btn">Manage Vector DB</button>
+        <button id="manage-vector-db-btn" type="button" class="ghost-btn header-action-btn">Manage DB and Prompt</button>
       </div>
     </div>
 
@@ -2652,9 +2736,11 @@
     </section>
 
     <section id="vector-db-page" class="vector-page hidden">
+      <div class="vector-top-actions">
+        <button id="system-prompt-btn" type="button" class="ghost-btn">System Prompt</button>
+      </div>
       <div class="vector-hero-card">
         <div>
-          <span class="vector-eyebrow">Manage Vector DB</span>
           <h2>Live Chroma Collections</h2>
           <p>Choose a collection, review stored documents, check their chunk and token counts, and manage the knowledge base with direct search, edit, and delete actions.</p>
         </div>
@@ -2869,16 +2955,16 @@
   </div>
 
   <div id="system-prompt-backdrop" class="knowledge-modal-backdrop hidden" aria-hidden="true">
-    <div class="knowledge-modal large" role="dialog" aria-modal="true" aria-labelledby="system-prompt-title">
+    <div class="knowledge-modal system-prompt-modal" role="dialog" aria-modal="true" aria-labelledby="system-prompt-title">
       <div class="knowledge-modal-header">
         <h3 id="system-prompt-title">System Prompt</h3>
         <button id="system-prompt-close" type="button" class="knowledge-modal-close" aria-label="Close">×</button>
       </div>
-      <div class="system-prompt-note">
-        Changes are saved directly to the mounted backend prompt template and apply to the next chat request immediately.
-      </div>
       <div id="system-prompt-path" class="system-prompt-meta"></div>
-      <textarea id="system-prompt-editor" class="system-prompt-editor" spellcheck="false"></textarea>
+      <div class="system-prompt-label">Current prompt</div>
+      <div class="system-prompt-submeta">This file contains only the editable system prompt text. Runtime context, question, and answer markers are added by the backend automatically.</div>
+      <div id="system-prompt-status" class="system-prompt-status" aria-live="polite"></div>
+      <textarea id="system-prompt-editor" class="system-prompt-editor" spellcheck="false" placeholder="Loading current prompt..."></textarea>
       <div class="modal-actions">
         <button id="system-prompt-refresh" type="button" class="knowledge-action-btn clear">Refresh</button>
         <div class="modal-actions-right">
@@ -2886,6 +2972,11 @@
         </div>
       </div>
     </div>
+  </div>
+
+  <div id="system-prompt-toast" class="system-prompt-toast" aria-live="polite" aria-atomic="true">
+    <div class="system-prompt-toast-title">System Prompt Saved</div>
+    <div class="system-prompt-toast-text">Your new system prompt has been saved.</div>
   </div>
 
   <div id="vector-delete-confirm-backdrop" class="vector-confirm-backdrop hidden" aria-hidden="true">
@@ -2936,6 +3027,8 @@
     const systemPromptSave = document.getElementById('system-prompt-save');
     const systemPromptRefresh = document.getElementById('system-prompt-refresh');
     const systemPromptPath = document.getElementById('system-prompt-path');
+    const systemPromptStatus = document.getElementById('system-prompt-status');
+    const systemPromptToast = document.getElementById('system-prompt-toast');
     const filePreviewBody = document.getElementById('file-preview-body');
     const filePreviewContent = document.getElementById('file-preview-content');
     const knowledgeBtn = document.getElementById('knowledge-btn');
@@ -3008,6 +3101,8 @@
     let appMode = 'chat';
     let vectorDeleteConfirmResolver = null;
     let isSystemPromptBusy = false;
+    let systemPromptCloseTimer = null;
+    let systemPromptToastTimer = null;
     const KNOWLEDGE_DRAFT_KEY = 'ta9_knowledge_draft_html_v1';
     const vectorState = {
       collections: [],
@@ -3070,15 +3165,48 @@
       }
     }
 
+    function setSystemPromptStatus(message, isError = false) {
+      if (!systemPromptStatus) return;
+      systemPromptStatus.textContent = message || '';
+      systemPromptStatus.classList.toggle('visible', !!message);
+      systemPromptStatus.classList.toggle('error', !!isError);
+    }
+
+    function showSystemPromptToast() {
+      if (!systemPromptToast) return;
+      if (systemPromptToastTimer) {
+        clearTimeout(systemPromptToastTimer);
+        systemPromptToastTimer = null;
+      }
+      systemPromptToast.classList.add('visible');
+      systemPromptToastTimer = setTimeout(() => {
+        systemPromptToast.classList.remove('visible');
+        systemPromptToastTimer = null;
+      }, 1800);
+    }
+
     function openSystemPromptModal() {
       if (!systemPromptBackdrop) return;
+      if (systemPromptCloseTimer) {
+        clearTimeout(systemPromptCloseTimer);
+        systemPromptCloseTimer = null;
+      }
+      setSystemPromptStatus('');
       systemPromptBackdrop.classList.remove('hidden');
       systemPromptBackdrop.setAttribute('aria-hidden', 'false');
+      if (systemPromptEditor) {
+        systemPromptEditor.value = 'Loading current prompt...';
+      }
       loadSystemPrompt();
     }
 
     function closeSystemPromptModal() {
       if (!systemPromptBackdrop) return;
+      if (systemPromptCloseTimer) {
+        clearTimeout(systemPromptCloseTimer);
+        systemPromptCloseTimer = null;
+      }
+      setSystemPromptStatus('');
       systemPromptBackdrop.classList.add('hidden');
       systemPromptBackdrop.setAttribute('aria-hidden', 'true');
     }
@@ -3094,11 +3222,17 @@
         }
         systemPromptEditor.value = String(data.template || '');
         if (systemPromptPath) {
-          systemPromptPath.textContent = data.path ? `Mounted file: ${data.path}` : '';
+          const displayPath = data.display_path || data.path || '';
+          systemPromptPath.textContent = displayPath ? `Live file: ${displayPath}` : '';
         }
+        systemPromptEditor.focus();
+        systemPromptEditor.setSelectionRange(0, 0);
       } catch (err) {
         console.error('System prompt load error:', err);
-        showKnowledgeToast((err && err.message) ? err.message : 'Failed to load system prompt.', true);
+        if (systemPromptEditor) {
+          systemPromptEditor.value = '';
+        }
+        setSystemPromptStatus((err && err.message) ? err.message : 'Failed to load system prompt.', true);
       } finally {
         setSystemPromptBusy(false);
       }
@@ -3119,12 +3253,15 @@
         }
         systemPromptEditor.value = String(data.template || systemPromptEditor.value || '');
         if (systemPromptPath) {
-          systemPromptPath.textContent = data.path ? `Mounted file: ${data.path}` : '';
+          const displayPath = data.display_path || data.path || '';
+          systemPromptPath.textContent = displayPath ? `Live file: ${displayPath}` : '';
         }
-        showKnowledgeToast('System prompt saved. New chats will use it immediately.', false);
+        setSystemPromptStatus('');
+        closeSystemPromptModal();
+        showSystemPromptToast();
       } catch (err) {
         console.error('System prompt save error:', err);
-        showKnowledgeToast((err && err.message) ? err.message : 'Failed to save system prompt.', true);
+        setSystemPromptStatus((err && err.message) ? err.message : 'Failed to save system prompt.', true);
       } finally {
         setSystemPromptBusy(false);
       }

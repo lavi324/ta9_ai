@@ -75,6 +75,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_URL = os.getenv("OPENAI_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
 OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+OPENAI_RERANK_MODEL = os.getenv("OPENAI_RERANK_MODEL", OPENAI_CHAT_MODEL)
 LOG_FULL_EMBEDDINGS = os.getenv("LOG_FULL_EMBEDDINGS", "false").lower() in ("1", "true", "yes")
 EMBED_PREVIEW_COUNT = int(os.getenv("EMBED_PREVIEW_COUNT", "8"))
 
@@ -86,6 +87,7 @@ KNOWLEDGE_DIR = os.getenv("KNOWLEDGE_DIR", WIKI_ROOT)
 
 CHROMA_DIR = os.getenv("CHROMA_DIR", "/app/chroma_db")
 SYSTEM_PROMPT_FILE = os.getenv("SYSTEM_PROMPT_FILE", "/app/system_prompt_template.txt")
+SYSTEM_PROMPT_DISPLAY_PATH = os.getenv("SYSTEM_PROMPT_DISPLAY_PATH", "backend/system_prompt_template.txt")
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
@@ -124,14 +126,7 @@ DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
     "12. For Intsight or system configuration guidance, prioritize instructions that use Admin Studio (UI-based configuration) by default.\n"
     "13. Provide database-level (DB) configuration instructions only when the user explicitly asks for DB configuration, SQL/database changes, or backend table-level steps.\n"
     "14. Never hard-refuse when at least partial context exists; provide the best grounded answer possible, explicitly flag uncertainty, and ask one focused clarifying question if needed.\n"
-    "{foundational_instruction}"
-    "{ta9_instruction}\n"
-    "{combined_context}\n\n"
-    "Question: {question}\n\n"
-    "Answer:\n"
 )
-
-SYSTEM_PROMPT_REQUIRED_FIELDS = {"combined_context", "question"}
 
 app = FastAPI(title="Wiki RAG API")
 
@@ -145,36 +140,10 @@ conversation_store: Dict[str, Deque[Dict[str, str]]] = defaultdict(
 )
 
 
-class _PromptTemplateValues(dict):
-    def __missing__(self, key: str) -> str:
-        return ""
-
-
 def _validate_system_prompt_template(template: str) -> str:
     candidate = str(template or "")
     if not candidate.strip():
         raise ValueError("System prompt template cannot be empty.")
-
-    missing_fields = [field for field in sorted(SYSTEM_PROMPT_REQUIRED_FIELDS) if f"{{{field}}}" not in candidate]
-    if missing_fields:
-        raise ValueError(
-            "System prompt template is missing required placeholders: "
-            + ", ".join(f"{{{field}}}" for field in missing_fields)
-        )
-
-    try:
-        candidate.format_map(
-            _PromptTemplateValues(
-                {
-                    "foundational_instruction": "",
-                    "ta9_instruction": "",
-                    "combined_context": "test context",
-                    "question": "test question",
-                }
-            )
-        )
-    except Exception as exc:
-        raise ValueError(f"System prompt template is invalid: {exc}") from exc
 
     return candidate
 
@@ -207,20 +176,21 @@ def _build_system_prompt(
     foundational_instruction: str = "",
     ta9_instruction: str = "",
 ) -> str:
-    template = _read_system_prompt_template()
-    values = _PromptTemplateValues(
-        {
-            "foundational_instruction": foundational_instruction,
-            "ta9_instruction": ta9_instruction,
-            "combined_context": combined_context,
-            "question": question,
-        }
-    )
-    try:
-        return template.format_map(values)
-    except Exception as exc:
-        print(f"[PROMPT][WARN] Failed to render custom system prompt template, falling back to default: {exc}")
-        return DEFAULT_SYSTEM_PROMPT_TEMPLATE.format_map(values)
+    template = _read_system_prompt_template().strip()
+    sections: List[str] = [template]
+
+    if foundational_instruction and foundational_instruction.strip():
+        sections.append(foundational_instruction.strip())
+
+    if ta9_instruction and ta9_instruction.strip():
+        sections.append(ta9_instruction.strip())
+
+    if combined_context and combined_context.strip():
+        sections.append(combined_context.strip())
+
+    sections.append(f"Question: {question}")
+    sections.append("Answer:")
+    return "\n\n".join(section for section in sections if section)
 
 
 # ---------------------------------------------------------------------
@@ -264,13 +234,14 @@ def embed_text(text: str) -> List[float]:
     return emb
 
 
-def call_llm(prompt: str, temperature: float = 0.2) -> str:
+def call_llm(prompt: str, temperature: float = 0.2, model: Optional[str] = None) -> str:
     """Call OpenAI chat for final answer."""
-    print(f"[LLM] Calling OpenAI chat model={OPENAI_CHAT_MODEL} prompt_len={len(prompt)} temp={temperature}")
+    selected_model = (model or OPENAI_CHAT_MODEL).strip() or OPENAI_CHAT_MODEL
+    print(f"[LLM] Calling OpenAI chat model={selected_model} prompt_len={len(prompt)} temp={temperature}")
     start = time.time()
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     body = {
-        "model": OPENAI_CHAT_MODEL,
+        "model": selected_model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
     }
@@ -529,9 +500,20 @@ def _extract_structured_text_from_image(image_ref: str, source_label: str = "ima
                         {
                             "type": "text",
                             "text": (
-                                "Extract all readable text from this image exactly as it appears. "
-                                "If there are tables, output each table in markdown table format and preserve row/column values. "
-                                "Do not summarize. Do not omit rows. If text is unclear, mark it as [unclear]."
+                                "You are an OCR and UI analysis extractor. Return useful context from this image even when text is sparse. "
+                                "Follow this exact output structure:\n"
+                                "[IMAGE_SUMMARY]\n"
+                                "1-3 concise sentences describing what this screenshot/image shows.\n\n"
+                                "[VISIBLE_TEXT]\n"
+                                "List all readable labels, values, menu names, buttons, error text, and headings exactly as seen. "
+                                "Use one item per line. If none, write: <none>.\n\n"
+                                "[TABLES]\n"
+                                "If a table/grid exists, output it in markdown preserving row/column values. If none, write: <none>.\n\n"
+                                "[UI_ELEMENTS]\n"
+                                "List important non-text UI elements (map, panel, checkbox state, selected layer, marker, chart, etc.).\n\n"
+                                "[TECHNICAL_SIGNALS]\n"
+                                "List technical clues helpful for troubleshooting (screen/page type, selected filters, visible warnings, state).\n\n"
+                                "Rules: do not refuse, do not say you cannot extract text, do not invent unseen details, and mark unclear content as [unclear]."
                             ),
                         },
                         {"type": "image_url", "image_url": {"url": image_ref}},
@@ -553,6 +535,52 @@ def _extract_structured_text_from_image(image_ref: str, source_label: str = "ima
     except Exception as e:
         print(f"[VISION][WARN] OCR extraction error for {source_label}: {e}")
         return ""
+
+
+def _normalize_image_base64_payload(payload: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return (normalized_b64, mime_type_if_present) from either raw base64 or data URI."""
+    raw = (payload or "").strip()
+    if not raw:
+        return None, None
+
+    mime_type = None
+    if raw.startswith("data:") and "," in raw:
+        header, raw = raw.split(",", 1)
+        match = re.match(r"^data:([^;]+);base64$", header, re.IGNORECASE)
+        if match:
+            mime_type = (match.group(1) or "").lower()
+
+    # Remove whitespace/newlines and normalize padding.
+    raw = re.sub(r"\s+", "", raw)
+    if not raw:
+        return None, mime_type
+    padding = len(raw) % 4
+    if padding:
+        raw += "=" * (4 - padding)
+
+    return raw, mime_type
+
+
+def _is_low_signal_image_context(text: str) -> bool:
+    candidate = (text or "").strip().lower()
+    if not candidate:
+        return True
+
+    low_signal_markers = [
+        "unable to extract text",
+        "cannot extract text",
+        "can't extract text",
+        "no readable text",
+        "image analysis unavailable",
+        "i cannot",
+        "i can't",
+        "<none>",
+    ]
+    if any(marker in candidate for marker in low_signal_markers):
+        return True
+
+    # Very short outputs are typically not enough for troubleshooting context.
+    return len(candidate) < 80
 
 
 def _normalize_table_rows(rows: List[List[Any]]) -> List[List[str]]:
@@ -743,12 +771,16 @@ def process_uploaded_file(file_data: Dict[str, str], describe_image_func=None) -
 def _process_image_file(file_name: str, file_b64: str, file_type: Optional[str] = None, describe_func=None) -> str:
     """Process image file using OpenAI Vision API or fallback."""
     try:
-        if not describe_func:
-            return f"[Image file {file_name} - processing not available]"
+        if not OPENAI_API_KEY:
+            return f"[Image file {file_name} - OPENAI_API_KEY is not configured]"
+
+        normalized_b64, payload_mime = _normalize_image_base64_payload(file_b64)
+        if not normalized_b64:
+            return f"[Image file {file_name} - invalid base64 data]"
 
         # Decode base64 to bytes for potential conversion
         try:
-            file_bytes = base64.b64decode(file_b64)
+            file_bytes = base64.b64decode(normalized_b64)
         except Exception as e:
             print(f"[FILE] Failed to decode base64 for image {file_name}: {e}")
             return f"[Image file {file_name} - invalid base64 data]"
@@ -757,6 +789,8 @@ def _process_image_file(file_name: str, file_b64: str, file_type: Optional[str] 
         mime_type = None
         if file_type and file_type.startswith("image/"):
             mime_type = file_type
+        if not mime_type and payload_mime and payload_mime.startswith("image/"):
+            mime_type = payload_mime
         if not mime_type:
             mime_type = mimetypes.guess_type(file_name)[0]
         if not mime_type:
@@ -780,14 +814,27 @@ def _process_image_file(file_name: str, file_b64: str, file_type: Optional[str] 
             else:
                 return f"[Image file {file_name} - unsupported format for analysis]"
         else:
-            data_uri = f"data:{mime_type};base64,{file_b64}"
+            data_uri = f"data:{mime_type};base64,{normalized_b64}"
 
-        image_description = _extract_structured_text_from_image(data_uri, source_label=file_name)
-        if not image_description and describe_func:
-            image_description = describe_func(data_uri)
-        if not image_description:
-            image_description = "[Image analysis unavailable]"
-        return f"[Image Content from {file_name}]\n{image_description}"
+        extracted = _extract_structured_text_from_image(data_uri, source_label=file_name)
+        fallback_desc = ""
+        if describe_func and _is_low_signal_image_context(extracted):
+            fallback_desc = (describe_func(data_uri) or "").strip()
+
+        merged_parts: List[str] = []
+        if extracted:
+            merged_parts.append(extracted.strip())
+        if fallback_desc:
+            extracted_lc = (extracted or "").strip().lower()
+            fallback_lc = fallback_desc.lower()
+            if fallback_lc and fallback_lc not in extracted_lc:
+                merged_parts.append("[VISUAL_FALLBACK]\n" + fallback_desc)
+
+        image_context = "\n\n".join(part for part in merged_parts if part).strip()
+        if not image_context:
+            image_context = "[Image analysis unavailable]"
+
+        return f"[Image Content from {file_name}]\n{image_context}"
     except Exception as e:
         print(f"[FILE] Vision API failed for {file_name}: {e}")
         return f"[Image file {file_name} - analysis failed: {e}]"
@@ -1880,7 +1927,9 @@ def _is_ta9_question(question: str) -> bool:
     ta9_terms = [
         "ta9", "intsight", "int-sight", "intsight", "platform", "system",
         "features", "capabilities", "modules", "use cases", "overview",
-        "dashboard", "admin studio", "data model", "dm"
+        "dashboard", "admin studio", "data model", "dm",
+        "situational awareness", "incident", "incidents", "map", "layer", "layers",
+        "camera", "cameras", "protocol", "federated search", "ontology","kyc"
     ]
     return any(t in q for t in ta9_terms)
 
@@ -2079,13 +2128,28 @@ def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
     normalized = _normalize_question(question)
     if normalized and normalized not in variants:
         variants.append(normalized)
-    if ta9_mode:
+
+    q_low = (question or "").lower()
+    procedural_intent = _question_has_procedural_intent(question)
+    if any(term in q_low for term in ["camera", "cameras", "layer", "layers", "situational awareness", "incident", "map"]):
+        map_ops_boost = (
+            "situational awareness map layers camera request surrounding cameras "
+            "view actions map toolbar layers panel"
+        )
+        variants.append(f"{base}\n\n{map_ops_boost}" if base else map_ops_boost)
+
+    if procedural_intent:
+        procedural_boost = "step by step instructions procedure configure setup admin tools system configuration"
+        variants.append(f"{base}\n\n{procedural_boost}" if base else procedural_boost)
+
+    # Avoid broad TA9 expansion for already-specific procedural questions because it dilutes retrieval.
+    if ta9_mode and not procedural_intent and len(_tokenize_normalized(question)) <= 6:
         ta9_boost = (
             "TA9 / IntSight platform features, capabilities, modules, "
             "system overview, dashboards, admin studio, data model"
         )
         variants.append(f"{base}\n\n{ta9_boost}" if base else ta9_boost)
-    return variants[:3]
+    return variants[:4]
 
 def augment_question(question: str) -> str:
     """
@@ -2116,6 +2180,94 @@ def augment_question(question: str) -> str:
     return augmented
 
 
+def _question_has_procedural_intent(question: str) -> bool:
+    q = (question or "").lower()
+    if not q:
+        return False
+    procedural_terms = [
+        "how to", "step by step", "step-by-step", "steps", "procedure", "configure",
+        "configuration", "setup", "set up", "create", "add", "edit", "change",
+        "update", "install", "enable", "disable", "fix", "resolve",
+    ]
+    return any(term in q for term in procedural_terms)
+
+
+_LEXICAL_STOPWORDS = {
+    "the", "is", "are", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with", "by",
+    "from", "as", "at", "be", "this", "that", "these", "those", "it", "its", "if", "then",
+    "how", "what", "when", "where", "why", "who", "can", "could", "should", "would", "do",
+    "does", "did", "i", "we", "you", "they", "he", "she", "my", "our", "your", "their",
+    "about", "into", "through", "using", "use", "want", "need", "like", "please",
+}
+
+
+def _normalize_term(term: str) -> str:
+    t = (term or "").strip().lower()
+    t = re.sub(r"[^a-z0-9_\-]", "", t)
+    if not t:
+        return ""
+    # Light stemming to match camera/cameras, layer/layers, etc.
+    if len(t) > 5 and t.endswith("ies"):
+        t = t[:-3] + "y"
+    elif len(t) > 4 and t.endswith("es"):
+        t = t[:-2]
+    elif len(t) > 3 and t.endswith("s"):
+        t = t[:-1]
+    return t
+
+
+def _tokenize_normalized(text: str) -> List[str]:
+    raw_tokens = re.findall(r"[a-zA-Z0-9_\-]+", (text or "").lower())
+    out: List[str] = []
+    for token in raw_tokens:
+        norm = _normalize_term(token)
+        if len(norm) <= 2 or norm in _LEXICAL_STOPWORDS:
+            continue
+        out.append(norm)
+    return out
+
+
+def _extract_key_phrases(question: str, max_phrases: int = 6) -> List[str]:
+    q = (question or "").strip().lower()
+    if not q:
+        return []
+
+    phrases: List[str] = []
+    # Quoted phrases should be treated as high-signal hints.
+    for quoted in re.findall(r'"([^"]{3,80})"', q):
+        cleaned = " ".join(quoted.split()).strip()
+        if cleaned:
+            phrases.append(cleaned)
+
+    tokens = _tokenize_normalized(q)
+    # Add bigrams/trigrams for intent like "situational awareness", "camera request".
+    for n in (3, 2):
+        for i in range(0, max(0, len(tokens) - n + 1)):
+            candidate = " ".join(tokens[i:i + n])
+            if len(candidate) >= 8:
+                phrases.append(candidate)
+            if len(phrases) >= max_phrases:
+                break
+        if len(phrases) >= max_phrases:
+            break
+
+    deduped: List[str] = []
+    seen = set()
+    for item in phrases:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+        if len(deduped) >= max_phrases:
+            break
+    return deduped
+
+
+def _normalize_compact_text(text: str) -> str:
+    normalized = _normalize_question(text or "")
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
 def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
     """
     Simple, general-purpose lexical score.
@@ -2124,16 +2276,50 @@ def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
     if doc is None:
         doc = ""
     
-    q = question.lower()
-    d = doc.lower()
+    q = (question or "").lower()
+    d = (doc or "").lower()
     source = str(meta.get("source", "")).lower()
     score = 0.0
-    
-    # Basic lexical overlap reward
-    q_tokens = set([t for t in q.replace("\n", " ").split() if len(t) > 3])
-    matched = sum(1 for t in q_tokens if t in d)
+
+    # Normalized overlap reward with light stemming for singular/plural variants.
+    q_tokens = set(_tokenize_normalized(q))
+    d_tokens = set(_tokenize_normalized(d))
+    matched = len(q_tokens & d_tokens)
     if matched > 0:
-        score += min(3.0, matched * 0.5)
+        score += min(4.0, matched * 0.65)
+
+    # Exact key phrase match is a strong relevance signal for long manuals.
+    key_phrases = _extract_key_phrases(q)
+    phrase_hits = 0
+    for phrase in key_phrases:
+        if phrase in d:
+            phrase_hits += 1
+    if phrase_hits > 0:
+        score += min(3.0, phrase_hits * 1.2)
+
+    normalized_question = _normalize_compact_text(q)
+    normalized_doc = _normalize_compact_text(d)
+    if normalized_question and normalized_doc:
+        if normalized_question in normalized_doc:
+            score += 6.0
+        elif len(normalized_question) >= 24:
+            question_terms = normalized_question.split()
+            for size in range(min(6, len(question_terms)), 2, -1):
+                spans = [" ".join(question_terms[i:i + size]) for i in range(0, len(question_terms) - size + 1)]
+                if any(span and span in normalized_doc for span in spans):
+                    score += min(4.0, size * 0.7)
+                    break
+
+    # Prioritize chunks where heading lines contain query terms.
+    heading_hits = 0
+    heading_lines = re.findall(r"(?m)^\s*(?:\d+(?:\.\d+)*\.?\s+)?[^\n]{3,120}$", d)
+    if heading_lines and q_tokens:
+        for line in heading_lines[:10]:
+            line_tokens = set(_tokenize_normalized(line))
+            if line_tokens and len(q_tokens & line_tokens) >= 2:
+                heading_hits += 1
+    if heading_hits > 0:
+        score += min(2.0, heading_hits * 0.8)
     
     # Source name match
     for tok in q_tokens:
@@ -2310,6 +2496,17 @@ def rerank_results(
         )
     )
 
+    # Safeguard for very specific questions: keep the strongest lexical-overlap chunks first.
+    overlap_ranked = sorted(
+        items,
+        key=lambda x: _lexical_overlap_ratio(question, x["doc"]),
+        reverse=True,
+    )
+    pinned = [it for it in overlap_ranked[:4] if _lexical_overlap_ratio(question, it["doc"]) >= 0.18]
+    if pinned:
+        pinned_ids = {it["id"] for it in pinned}
+        items = pinned + [it for it in items if it["id"] not in pinned_ids]
+
     print("[RERANK] Top 10 after rerank (score, dist, id, source, chunk):")
     for it in items[:10]:
         print(f"         score={it['score']:.2f} dist={it['dist']} id={it['id']} source={it['meta'].get('source')} chunk={it['meta'].get('chunk')}")
@@ -2329,8 +2526,8 @@ def _lexical_overlap_ratio(question: str, doc: str) -> float:
     # Extra safety: handle None explicitly
     if doc is None or question is None:
         return 0.0
-    q_tokens = {t.lower() for t in str(question).split() if len(t) > 3}
-    d_tokens = {t.lower() for t in str(doc).split() if len(t) > 3}
+    q_tokens = set(_tokenize_normalized(str(question)))
+    d_tokens = set(_tokenize_normalized(str(doc)))
     if not q_tokens or not d_tokens:
         return 0.0
     inter = len(q_tokens & d_tokens)
@@ -3060,6 +3257,412 @@ def _build_updated_chunk_records(source: str, content: str, existing_metas: List
     return ids_to_add, docs_to_add, metas_to_add, embeddings_to_add
 
 
+def _resolve_collection_name_from_meta(meta: Optional[dict]) -> str:
+    label = str((meta or {}).get("collection") or "").strip().lower()
+    if label == "user_knowledge":
+        return MEMORY_COLLECTION_NAME
+    return COLLECTION_NAME
+
+
+def _count_procedural_markers(text: str) -> int:
+    candidate = str(text or "")
+    if not candidate:
+        return 0
+
+    markers = 0
+    if re.search(r"(?mi)^\s*step\s*\d+", candidate):
+        markers += 3
+    if re.search(r"(?mi)^\s*\d+\.\s+", candidate):
+        markers += 2
+    if re.search(r"(?i)\b(step-by-step|procedure|instructions?|configure|configuration|setup|set up)\b", candidate):
+        markers += 1
+    return markers
+
+
+def _count_exact_phrase_hits(question: str, text: str) -> int:
+    if not question or not text:
+        return 0
+    lowered_text = str(text or "").lower()
+    hits = 0
+    for phrase in _extract_key_phrases(question, max_phrases=8):
+        if phrase and phrase in lowered_text:
+            hits += 1
+    normalized_question = _normalize_compact_text(question)
+    normalized_text = _normalize_compact_text(text)
+    if normalized_question and normalized_text and normalized_question in normalized_text:
+        hits += 3
+    return hits
+
+
+def _is_generic_source_title(title: str, source: str = "") -> bool:
+    candidate = f"{title} {source}".lower()
+    generic_markers = [
+        "user guide", "user-guide", "manual", "overview", "general", "introduction",
+        "getting started", "guide", "documentation",
+    ]
+    return any(marker in candidate for marker in generic_markers)
+
+
+def _should_lock_primary_source(question: str, candidates: List[dict]) -> bool:
+    if not _question_has_procedural_intent(question) or not candidates:
+        return False
+
+    primary = candidates[0]
+    secondary = candidates[1] if len(candidates) > 1 else None
+    primary_overlap = float(primary.get("overlap_ratio") or 0.0)
+    primary_title_overlap = float(primary.get("title_overlap") or 0.0)
+    primary_phrase_hits = int(primary.get("phrase_hits") or 0)
+    primary_procedural = int(primary.get("procedural_markers") or 0)
+    primary_score = float(primary.get("score") or 0.0)
+    secondary_score = float((secondary or {}).get("score") or 0.0)
+    is_generic_primary = _is_generic_source_title(
+        str(primary.get("title") or ""),
+        str(primary.get("source") or ""),
+    )
+
+    strong_primary = (
+        primary_phrase_hits >= 2
+        or primary_overlap >= 0.38
+        or primary_title_overlap >= 0.5
+        or (primary_procedural >= 2 and primary_overlap >= 0.24)
+    )
+    clear_margin = primary_score >= secondary_score + 2.5
+    return strong_primary and not is_generic_primary and (secondary is None or clear_margin)
+
+
+def _build_source_context_candidates(
+    question: str,
+    docs: List[str],
+    metas: List[dict],
+    distances: Optional[List[float]] = None,
+    ids: Optional[List[str]] = None,
+    max_sources: int = 6,
+) -> List[dict]:
+    if not docs:
+        return []
+
+    grouped: Dict[Tuple[str, str], dict] = {}
+    for idx, (doc, meta) in enumerate(zip(docs, metas)):
+        safe_meta = meta or {}
+        source = str(safe_meta.get("source") or "").strip()
+        if not source or not doc:
+            continue
+
+        collection_name = _resolve_collection_name_from_meta(safe_meta)
+        key = (collection_name, source)
+        distance = None if distances is None or idx >= len(distances) else distances[idx]
+        chunk_score = lexical_boost_score(question, doc, safe_meta)
+        overlap_score = _lexical_overlap_ratio(question, doc) * 5.0
+        position_bonus = max(0.0, 3.0 - (idx * 0.12))
+        distance_bonus = 0.0 if distance is None else max(0.0, 1.5 - (float(distance) * 3.0))
+
+        entry = grouped.setdefault(
+            key,
+            {
+                "collection_name": collection_name,
+                "source": source,
+                "best_distance": distance,
+                "chunk_signal_scores": [],
+                "seed_meta": safe_meta,
+                "matched_chunk_ids": [],
+            },
+        )
+        entry["chunk_signal_scores"].append(chunk_score + overlap_score + position_bonus + distance_bonus)
+        if distance is not None and (entry["best_distance"] is None or float(distance) < float(entry["best_distance"])):
+            entry["best_distance"] = distance
+        if ids is not None and idx < len(ids) and ids[idx] is not None:
+            entry["matched_chunk_ids"].append(ids[idx])
+
+    if not grouped:
+        return []
+
+    question_is_procedural = _question_has_procedural_intent(question)
+    prelim_ranked = sorted(
+        grouped.values(),
+        key=lambda item: (
+            -sum(sorted(item["chunk_signal_scores"], reverse=True)[:3]),
+            (item["best_distance"] if item["best_distance"] is not None else 999.0),
+        ),
+    )[: max(max_sources * 2, 8)]
+
+    source_candidates: List[dict] = []
+    for entry in prelim_ranked:
+        try:
+            rows = _get_sorted_document_rows(entry["collection_name"], entry["source"], include_embeddings=False)
+        except Exception as exc:
+            print(
+                f"[SOURCE_RERANK][WARN] Failed to load source={entry['source']} "
+                f"collection={entry['collection_name']}: {exc}"
+            )
+            continue
+
+        if not rows:
+            continue
+
+        full_content = _merge_chunk_texts([row["content"] for row in rows])
+        excerpt_limit = 2600 if question_is_procedural else 1800
+        excerpt = _merge_chunk_texts([row["content"] for row in rows], max_chars=excerpt_limit)
+        seed_meta = rows[0]["metadata"] or entry["seed_meta"]
+        top_chunk_signals = sorted(entry.get("chunk_signal_scores") or [0.0], reverse=True)[:3]
+        chunk_signal_strength = sum(top_chunk_signals)
+        overlap_ratio = _lexical_overlap_ratio(question, full_content)
+        lexical_score = lexical_boost_score(question, full_content, seed_meta)
+        procedural_markers = _count_procedural_markers(full_content)
+        procedural_bonus = min(4.0, procedural_markers * 0.8) if question_is_procedural else 0.0
+        title = _build_document_title(entry["source"], rows[0]["content"] if rows else "")
+        title_overlap = _lexical_overlap_ratio(question, title)
+        source_overlap = _lexical_overlap_ratio(question, entry["source"])
+        phrase_hits = _count_exact_phrase_hits(question, f"{title}\n{full_content}")
+        chunk_count_penalty = min(6.0, math.log(max(1, len(rows)), 2) * 0.9) if len(rows) > 8 else 0.0
+        generic_penalty = 4.5 if question_is_procedural and _is_generic_source_title(title, entry["source"]) else 0.0
+        source_score = (
+            chunk_signal_strength
+            + lexical_score
+            + (overlap_ratio * 8.0)
+            + (title_overlap * 5.0)
+            + (source_overlap * 4.0)
+            + procedural_bonus
+            + (phrase_hits * 1.5)
+            - chunk_count_penalty
+            - generic_penalty
+        )
+
+        source_candidates.append(
+            {
+                "collection_name": entry["collection_name"],
+                "source": entry["source"],
+                "title": title,
+                "full_content": full_content,
+                "excerpt": excerpt,
+                "chunk_count": len(rows),
+                "best_distance": entry["best_distance"],
+                "score": round(source_score, 4),
+                "source_overlap": round(source_overlap, 4),
+                "overlap_ratio": round(overlap_ratio, 4),
+                "title_overlap": round(title_overlap, 4),
+                "phrase_hits": phrase_hits,
+                "procedural_markers": procedural_markers,
+                "lexical_score": round(lexical_score, 4),
+                "chunk_signal_strength": round(chunk_signal_strength, 4),
+                "chunk_count_penalty": round(chunk_count_penalty, 4),
+                "generic_penalty": generic_penalty,
+                "matched_chunk_ids": entry["matched_chunk_ids"],
+            }
+        )
+
+    source_candidates.sort(
+        key=lambda item: (
+            -item["score"],
+            (item["best_distance"] if item["best_distance"] is not None else 999.0),
+            item["title"].lower(),
+        )
+    )
+
+    print("[SOURCE_RERANK] Top source candidates:")
+    for candidate in source_candidates[:10]:
+        print(
+            f"[SOURCE_RERANK] score={candidate['score']:.2f} dist={candidate['best_distance']} "
+            f"collection={candidate['collection_name']} source={candidate['source']} chunks={candidate['chunk_count']}"
+        )
+
+    return source_candidates[:max_sources]
+
+
+def _build_global_lexical_source_candidates(question: str, max_sources: int = 6) -> List[dict]:
+    if not question:
+        return []
+
+    question_is_procedural = _question_has_procedural_intent(question)
+    collected: List[dict] = []
+    for collection_name in (MEMORY_COLLECTION_NAME, COLLECTION_NAME):
+        try:
+            target_collection = _get_vector_collection(collection_name)
+            raw = target_collection.get(include=["documents", "metadatas"])
+        except Exception as exc:
+            print(f"[LEXICAL_RESCUE][WARN] Failed to load collection={collection_name}: {exc}")
+            continue
+
+        docs = list(raw.get("documents", []) or [])
+        metas = list(raw.get("metadatas", []) or [])
+        grouped: Dict[str, List[dict]] = {}
+        for doc_text, meta in zip(docs, metas):
+            safe_meta = meta or {}
+            source = str(safe_meta.get("source") or "").strip()
+            if not source or not doc_text:
+                continue
+            grouped.setdefault(source, []).append(
+                {
+                    "content": doc_text,
+                    "chunk": int(safe_meta.get("chunk", 0) or 0),
+                    "metadata": safe_meta,
+                }
+            )
+
+        for source, rows in grouped.items():
+            sorted_rows = sorted(rows, key=lambda item: item["chunk"])
+            excerpt = _merge_chunk_texts([row["content"] for row in sorted_rows], max_chars=3200)
+            if not excerpt:
+                continue
+            title = _build_document_title(source, sorted_rows[0]["content"] if sorted_rows else "")
+            title_overlap = _lexical_overlap_ratio(question, title)
+            excerpt_overlap = _lexical_overlap_ratio(question, excerpt)
+            source_overlap = _lexical_overlap_ratio(question, source)
+            lexical_score = lexical_boost_score(question, f"{title}\n{excerpt}", sorted_rows[0]["metadata"])
+            phrase_hits = _count_exact_phrase_hits(question, f"{title}\n{excerpt}")
+            procedural_markers = _count_procedural_markers(excerpt)
+            procedural_bonus = min(4.0, procedural_markers * 0.8) if question_is_procedural else 0.0
+            chunk_count_penalty = min(6.0, math.log(max(1, len(sorted_rows)), 2) * 0.9) if len(sorted_rows) > 8 else 0.0
+            generic_penalty = 4.5 if question_is_procedural and _is_generic_source_title(title, source) else 0.0
+            score = (
+                lexical_score
+                + (title_overlap * 7.0)
+                + (excerpt_overlap * 8.5)
+                + (source_overlap * 4.0)
+                + (phrase_hits * 1.3)
+                + procedural_bonus
+                - chunk_count_penalty
+                - generic_penalty
+            )
+            if score <= 0:
+                continue
+
+            collected.append(
+                {
+                    "collection_name": collection_name,
+                    "source": source,
+                    "title": title,
+                    "excerpt": excerpt,
+                    "full_content": excerpt,
+                    "chunk_count": len(sorted_rows),
+                    "best_distance": None,
+                    "score": round(score, 4),
+                    "source_overlap": round(source_overlap, 4),
+                    "overlap_ratio": round(excerpt_overlap, 4),
+                    "title_overlap": round(title_overlap, 4),
+                    "phrase_hits": phrase_hits,
+                    "procedural_markers": procedural_markers,
+                    "lexical_score": round(lexical_score, 4),
+                    "chunk_count_penalty": round(chunk_count_penalty, 4),
+                    "generic_penalty": generic_penalty,
+                    "matched_chunk_ids": [],
+                    "origin": "lexical_rescue",
+                }
+            )
+
+    collected.sort(key=lambda item: (-item["score"], item["title"].lower()))
+    print("[LEXICAL_RESCUE] Top source candidates:")
+    for candidate in collected[:10]:
+        print(
+            f"[LEXICAL_RESCUE] score={candidate['score']:.2f} collection={candidate['collection_name']} "
+            f"source={candidate['source']} chunks={candidate['chunk_count']}"
+        )
+    return collected[:max_sources]
+
+
+def _merge_source_candidate_lists(*candidate_lists: List[dict], max_sources: int = 6) -> List[dict]:
+    merged: Dict[Tuple[str, str], dict] = {}
+    for candidate_list in candidate_lists:
+        for candidate in candidate_list or []:
+            key = (candidate.get("collection_name"), candidate.get("source"))
+            if not key[0] or not key[1]:
+                continue
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = dict(candidate)
+                continue
+
+            existing["score"] = round(float(existing.get("score") or 0.0) + float(candidate.get("score") or 0.0), 4)
+            if existing.get("best_distance") is None and candidate.get("best_distance") is not None:
+                existing["best_distance"] = candidate.get("best_distance")
+            elif existing.get("best_distance") is not None and candidate.get("best_distance") is not None:
+                existing["best_distance"] = min(float(existing.get("best_distance")), float(candidate.get("best_distance")))
+
+            if len(str(candidate.get("full_content") or "")) > len(str(existing.get("full_content") or "")):
+                existing["full_content"] = candidate.get("full_content")
+            if len(str(candidate.get("excerpt") or "")) > len(str(existing.get("excerpt") or "")):
+                existing["excerpt"] = candidate.get("excerpt")
+
+            existing_ids = list(existing.get("matched_chunk_ids") or [])
+            for chunk_id in list(candidate.get("matched_chunk_ids") or []):
+                if chunk_id not in existing_ids:
+                    existing_ids.append(chunk_id)
+            existing["matched_chunk_ids"] = existing_ids
+
+            origins = set(filter(None, [existing.get("origin"), candidate.get("origin")]))
+            existing["origin"] = ",".join(sorted(origins)) if origins else existing.get("origin")
+
+    ranked = sorted(
+        merged.values(),
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            (item.get("best_distance") if item.get("best_distance") is not None else 999.0),
+            str(item.get("title") or "").lower(),
+        ),
+    )
+    return ranked[:max_sources]
+
+
+def _llm_select_source_candidates(question: str, candidates: List[dict], max_sources: int = 4) -> List[dict]:
+    if not OPENAI_API_KEY or len(candidates) <= 1:
+        return candidates[:max_sources]
+
+    shortlist = candidates[: min(6, len(candidates))]
+    candidate_lines: List[str] = []
+    for idx, candidate in enumerate(shortlist, start=1):
+        candidate_lines.append(
+            f"Candidate {idx}:\n"
+            f"Collection: {candidate.get('collection_name')}\n"
+            f"Title: {candidate.get('title')}\n"
+            f"Source: {candidate.get('source')}\n"
+            f"Chunks: {candidate.get('chunk_count')}\n"
+            f"Heuristic score: {candidate.get('score')}\n"
+            f"Excerpt:\n{str(candidate.get('excerpt') or '')[:2200]}"
+        )
+
+    candidates_block = "\n\n".join(candidate_lines)
+
+    selector_prompt = (
+        "You are a retrieval ranking specialist for a RAG system.\n"
+        "Pick the document candidates that best answer the user question.\n"
+        "Prefer candidates that directly contain the exact procedure, exact configuration steps, exact field names, or exact command/config examples asked for.\n"
+        "De-prioritize broad overview or generic admin guides when a narrower exact guide exists.\n"
+        "Return strict JSON with this shape only: {\"ordered_candidates\":[1,2],\"reason\":\"short reason\"}.\n\n"
+        f"Question:\n{question}\n\n"
+        f"Candidates:\n\n{candidates_block}\n"
+    )
+
+    try:
+        verdict_text = call_llm(selector_prompt, temperature=0.0, model=OPENAI_RERANK_MODEL)
+        try:
+            parsed = json.loads(verdict_text)
+        except json.JSONDecodeError:
+            json_match = re.search(r"\{[\s\S]*\}", verdict_text)
+            if not json_match:
+                raise
+            parsed = json.loads(json_match.group(0))
+        ordered = parsed.get("ordered_candidates") or []
+        ranked: List[dict] = []
+        seen = set()
+        for raw_idx in ordered:
+            try:
+                candidate_index = int(raw_idx) - 1
+            except Exception:
+                continue
+            if 0 <= candidate_index < len(shortlist) and candidate_index not in seen:
+                ranked.append(shortlist[candidate_index])
+                seen.add(candidate_index)
+            if len(ranked) >= max_sources:
+                break
+        if ranked:
+            ranked.extend([item for idx, item in enumerate(shortlist) if idx not in seen])
+            print(f"[LLM_RERANK] Applied LLM source ordering reason={parsed.get('reason', '')}")
+            return ranked[:max_sources]
+    except Exception as exc:
+        print(f"[LLM_RERANK][WARN] Failed to rerank source candidates: {exc}")
+
+    return shortlist[:max_sources]
+
+
 # ---------------------------------------------------------------------
 # API Models
 # ---------------------------------------------------------------------
@@ -3324,6 +3927,7 @@ def get_system_prompt():
     return {
         "template": template,
         "path": SYSTEM_PROMPT_FILE,
+        "display_path": SYSTEM_PROMPT_DISPLAY_PATH,
     }
 
 
@@ -3342,6 +3946,7 @@ def update_system_prompt(req: SystemPromptUpdateRequest):
         "message": "System prompt saved successfully.",
         "template": template,
         "path": SYSTEM_PROMPT_FILE,
+        "display_path": SYSTEM_PROMPT_DISPLAY_PATH,
     }
 
 
@@ -4061,6 +4666,7 @@ def chat(req: ChatRequest):
         return ChatResponse(answer=answer, sources=[])
 
     docs, metas, distances, ids = rerank_results(question, docs, metas, distances=distances, ids=ids)
+    question_is_procedural = _question_has_procedural_intent(question)
 
     # Confidence-based behavior: avoid hard refusals and answer in best-effort mode when confidence is low
     final_profile = _context_confidence_profile(question, docs, distances)
@@ -4077,21 +4683,93 @@ def chat(req: ChatRequest):
 
     context_blocks: List[str] = []
     source_strings: List[str] = []
+    source_candidates = _build_source_context_candidates(
+        question,
+        docs,
+        metas,
+        distances=distances,
+        ids=ids,
+        max_sources=5,
+    )
 
-    # More context improves answer success rate
-    MAX_CONTEXT_DOCS = 12
-    print(f"[API][CHAT] Building context with MAX_CONTEXT_DOCS={MAX_CONTEXT_DOCS}")
+    # Source-level lexical rescue helps when the exact guide is present in the collection
+    # but was not ranked high enough by embeddings alone.
+    should_run_lexical_rescue = (
+        question_is_procedural
+        or final_profile["confidence"] < 0.68
+        or final_profile["max_overlap"] < 0.32
+    )
+    if should_run_lexical_rescue:
+        lexical_candidates = _build_global_lexical_source_candidates(
+            question,
+            max_sources=6 if question_is_procedural else 4,
+        )
+        source_candidates = _merge_source_candidate_lists(
+            source_candidates,
+            lexical_candidates,
+            max_sources=6 if question_is_procedural else 5,
+        )
 
-    # Build context blocks: prioritize retrieved knowledge, then add selected ticket as supplemental context
-    remaining_slots = MAX_CONTEXT_DOCS - (1 if selected_ticket_text else 0)
-    for i, (doc, meta) in enumerate(list(zip(docs, metas))[:remaining_slots]):
-        id_val = ids[i] if i < len(ids) else None
-        dist_val = distances[i] if i < len(distances) else None
-        src = f"{meta.get('source')} (chunk {meta.get('chunk', 0)}) id={id_val} dist={dist_val}"
-        source_strings.append(src)
-        snippet = doc[:200].replace("\n", " ")
-        print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
-        context_blocks.append(f"Source: {src}\n{doc}")
+    should_run_llm_rerank = (
+        len(source_candidates) > 1
+        and (question_is_procedural or final_profile["confidence"] < 0.8)
+    )
+    if should_run_llm_rerank:
+        source_candidates = _llm_select_source_candidates(
+            question,
+            source_candidates,
+            max_sources=5,
+        )
+
+    lock_primary_source = _should_lock_primary_source(question, source_candidates)
+    if lock_primary_source and source_candidates:
+        print(
+            f"[API][CHAT] Locking procedural answer to primary source "
+            f"collection={source_candidates[0].get('collection_name')} source={source_candidates[0].get('source')}"
+        )
+        source_candidates = source_candidates[:1]
+
+    # More context improves answer success rate, but for procedural questions fewer full-source documents
+    # are better than many disconnected chunks.
+    MAX_CONTEXT_SOURCES = 4 if question_is_procedural else 5
+    print(f"[API][CHAT] Building context with MAX_CONTEXT_SOURCES={MAX_CONTEXT_SOURCES}")
+
+    if source_candidates:
+        if question_is_procedural and len(source_candidates) > 1 and not lock_primary_source:
+            lead_score = source_candidates[0]["score"]
+            second_score = source_candidates[1]["score"]
+            if lead_score >= second_score + 2.0:
+                source_candidates = source_candidates[: min(3, MAX_CONTEXT_SOURCES)]
+
+        remaining_slots = MAX_CONTEXT_SOURCES - (1 if selected_ticket_text else 0)
+        for idx, candidate in enumerate(source_candidates[:remaining_slots]):
+            match_label = "PRIMARY MATCH" if idx == 0 else "SUPPLEMENTAL MATCH"
+            src = (
+                f"{candidate['collection_name']}::{candidate['source']} "
+                f"({candidate['chunk_count']} chunks, best_dist={candidate['best_distance']})"
+            )
+            source_strings.append(src)
+            snippet = candidate["excerpt"][:200].replace("\n", " ")
+            candidate_content = candidate["excerpt"]
+            if idx == 0 and question_is_procedural:
+                candidate_content = _merge_chunk_texts([str(candidate.get("full_content") or "")], max_chars=6000)
+            print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
+            context_blocks.append(
+                f"{match_label}: {src}\n"
+                f"Title: {candidate['title']}\n"
+                f"{candidate_content}"
+            )
+    else:
+        # Fallback to chunk-level context if source consolidation could not be built.
+        remaining_slots = 10 - (1 if selected_ticket_text else 0)
+        for i, (doc, meta) in enumerate(list(zip(docs, metas))[:remaining_slots]):
+            id_val = ids[i] if i < len(ids) else None
+            dist_val = distances[i] if i < len(distances) else None
+            src = f"{meta.get('source')} (chunk {meta.get('chunk', 0)}) id={id_val} dist={dist_val}"
+            source_strings.append(src)
+            snippet = doc[:200].replace("\n", " ")
+            print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
+            context_blocks.append(f"Source: {src}\n{doc}")
 
     if selected_ticket_text:
         src = f"azure-devops:{selected_ticket_id} (selected ticket)"
@@ -4139,16 +4817,23 @@ def chat(req: ChatRequest):
             f"{selected_ticket_text}\n"
         )
     
-    # Only include RAG context if files are NOT attached or if context is highly relevant
-    # When user attaches files, they want analysis of those files, not wiki docs
+    # Include KB context as reference even with files for how-to/procedural questions.
+    # Screenshot-only context is often insufficient for actionable guidance.
     should_include_rag_context = True
     if file_context:
-        # Files attached: only include RAG context if it's highly relevant (very short distance)
-        # Check if best doc has good relevance
+        question_lc = (question or "").lower()
+        procedural_intent = any(term in question_lc for term in [
+            "how", "step", "steps", "add", "create", "configure", "setup", "set up"
+        ])
         best_distance = distances[0] if distances else 1.0
-        should_include_rag_context = best_distance < 0.5  # Very strict: only highly relevant docs
+        top_overlap = _lexical_overlap_ratio(question, docs[0]) if docs else 0.0
+        # More permissive threshold so attached screenshots still benefit from the manual/KB.
+        should_include_rag_context = procedural_intent or ta9_mode or best_distance < 0.75 or top_overlap >= 0.10
         if not should_include_rag_context:
-            print(f"[API][CHAT] Skipping RAG context: best_distance={best_distance} (>= 0.5 threshold). User has file context, prioritizing that.")
+            print(
+                "[API][CHAT] Skipping RAG context with file attachment: "
+                f"best_distance={best_distance} top_overlap={top_overlap}."
+            )
     
     if context_text and should_include_rag_context:
         # Wiki context is always supplemental
@@ -4156,6 +4841,27 @@ def chat(req: ChatRequest):
         context_sections.append(
             f"=== KNOWLEDGE BASE ({priority_label}) ===\n"
             f"{context_text}\n"
+        )
+
+    if lock_primary_source and source_candidates:
+        context_sections.append(
+            "=== STRICT SOURCE SELECTION ===\n"
+            "A single high-confidence procedure document was selected for this question. "
+            "Answer only from that PRIMARY MATCH document unless the user explicitly asks for alternatives or the selected document clearly lacks the requested detail.\n"
+        )
+
+    if source_candidates and question_is_procedural:
+        context_sections.append(
+            "=== RETRIEVAL PRIORITY ===\n"
+            "For exact how-to or configuration questions, follow the PRIMARY MATCH document first when it contains a concrete procedure. "
+            "Use supplemental matches only to fill missing details, and do not replace a specific procedure with more generic guidance unless the primary source is incomplete.\n"
+        )
+
+    if file_context and should_include_rag_context:
+        context_sections.append(
+            "=== ANSWERING STRATEGY ===\n"
+            "Use the screenshot to identify the current UI state, and use knowledge-base chunks to provide concrete step-by-step instructions.\n"
+            "If the exact button/path is not visible in screenshot but appears in KB, state that clearly as KB-based guidance.\n"
         )
 
     if low_confidence_mode:
