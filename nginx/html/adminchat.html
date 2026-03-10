@@ -139,6 +139,196 @@
       align-items: center;
       gap: 12px;
       width: 100%;
+      --ticket-clear-width: 84px;
+    }
+
+    .ticket-select-wrap {
+      position: relative;
+      flex: 1;
+      min-width: 400px;
+    }
+
+    .ticket-select-wrap.loading .ticket-select-trigger {
+      border-color: #0c3d6b;
+      box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.08);
+      background: linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
+    }
+
+    .ticket-select-native {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      padding: 0;
+      border: 0;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+    }
+
+    .ticket-select-trigger {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      width: 100%;
+      min-width: 400px;
+      border: 1px solid #d4dae3;
+      border-radius: 8px;
+      padding: 11px 14px;
+      font-size: 14px;
+      font-family: "Segoe UI", Arial, sans-serif;
+      color: #1f2d3d;
+      background: #ffffff;
+      transition: all 0.2s ease;
+      outline: none;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .ticket-select-trigger:hover {
+      border-color: #0c3d6b;
+    }
+
+    .ticket-select-trigger:focus {
+      border-color: #0c3d6b;
+      box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.1);
+    }
+
+    .ticket-select-trigger-label {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .ticket-select-trigger.placeholder .ticket-select-trigger-label {
+      color: #6b7b8c;
+    }
+
+    .ticket-select-chevron {
+      width: 10px;
+      height: 10px;
+      border-right: 2px solid #56708a;
+      border-bottom: 2px solid #56708a;
+      transform: rotate(45deg) translateY(-1px);
+      transition: transform 0.2s ease;
+      flex: 0 0 auto;
+    }
+
+    .ticket-select-wrap.open .ticket-select-chevron {
+      transform: rotate(-135deg) translateX(-1px);
+    }
+
+    .ticket-fetch-popover {
+      position: absolute;
+      left: 0;
+      right: calc(-1 * (var(--ticket-clear-width) + 12px));
+      top: calc(100% + 8px);
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 14px;
+      background: #eef4fb;
+      color: #0c1d37;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid #cfe0f2;
+      box-shadow: 0 14px 30px rgba(12, 29, 55, 0.14);
+      z-index: 30;
+      white-space: normal;
+      box-sizing: border-box;
+    }
+
+    #clear-ticket {
+      flex: 0 0 var(--ticket-clear-width);
+      width: var(--ticket-clear-width);
+      min-width: var(--ticket-clear-width);
+    }
+
+    .ticket-fetch-popover.visible {
+      display: block;
+    }
+
+    .ticket-fetch-spinner {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      border: 2px solid rgba(12, 61, 107, 0.18);
+      border-top-color: #0c3d6b;
+      animation: knowledge-spin 0.9s linear infinite;
+      flex-shrink: 0;
+    }
+
+    .ticket-fetch-text {
+      line-height: 1.35;
+    }
+
+    .ticket-dropdown-content {
+      width: 100%;
+    }
+
+    .ticket-dropdown-loading,
+    .ticket-dropdown-empty {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .ticket-dropdown-empty {
+      color: #4b6177;
+    }
+
+    .ticket-dropdown-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+
+    .ticket-dropdown-item {
+      display: block;
+      width: 100%;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.92);
+      color: #10233f;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+    }
+
+    .ticket-dropdown-item:hover,
+    .ticket-dropdown-item:focus {
+      border-color: #b8d0e9;
+      background: #f7fbff;
+      transform: translateY(-1px);
+      outline: none;
+    }
+
+    .ticket-dropdown-item.selected {
+      border-color: #0c3d6b;
+      background: linear-gradient(180deg, #eef6ff 0%, #ffffff 100%);
+    }
+
+    .ticket-dropdown-item-id {
+      display: block;
+      margin-bottom: 3px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #0c3d6b;
+    }
+
+    .ticket-dropdown-item-title {
+      display: block;
+      font-size: 13px;
+      line-height: 1.35;
+      color: #17314d;
     }
 
     .ghost-btn {
@@ -348,25 +538,6 @@
       border-color: #0c3d6b;
       box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.12);
       background: #ffffff;
-    }
-
-    .system-prompt-meta {
-      font-size: 12px;
-      color: #64748b;
-      word-break: break-all;
-    }
-
-    .system-prompt-label {
-      font-size: 13px;
-      font-weight: 600;
-      color: #10243f;
-      margin-bottom: 6px;
-    }
-
-    .system-prompt-submeta {
-      font-size: 13px;
-      color: #334155;
-      line-height: 1.6;
     }
 
     .system-prompt-status {
@@ -1783,6 +1954,7 @@
     }
 
     #ticket-select {
+      width: 100%;
       flex: 1;
       min-width: 400px;
       border: 1px solid #d4dae3;
@@ -2720,9 +2892,18 @@
       <div class="ticket-card">
         <label for="ticket-select" class="ticket-label">Select Support Ticket (Optional)</label>
         <div class="ticket-controls">
-          <select id="ticket-select">
-            <option value="" hidden selected></option>
-          </select>
+          <div id="ticket-select-wrap" class="ticket-select-wrap">
+            <select id="ticket-select" class="ticket-select-native">
+              <option value="" hidden selected></option>
+            </select>
+            <button id="ticket-select-trigger" type="button" class="ticket-select-trigger placeholder" aria-haspopup="listbox" aria-expanded="false" aria-controls="ticket-fetch-popover">
+              <span id="ticket-select-trigger-label" class="ticket-select-trigger-label">Select a support ticket</span>
+              <span class="ticket-select-chevron" aria-hidden="true"></span>
+            </button>
+            <div id="ticket-fetch-popover" class="ticket-fetch-popover" aria-live="polite" aria-hidden="true">
+              <div id="ticket-dropdown-content" class="ticket-dropdown-content">Select the ticket field to load current tickets.</div>
+            </div>
+          </div>
           <button id="clear-ticket" type="button" class="ghost-btn" title="Remove selected ticket" disabled>Clear</button>
         </div>
       </div>
@@ -2755,7 +2936,7 @@
             <div id="vector-collection-name" class="vector-selected-name">-</div>
           </div>
           <div class="vector-toolbar-right">
-            <input id="vector-search" type="text" class="vector-search" placeholder="Search by text">
+            <input id="vector-search" type="text" class="vector-search" placeholder="Search by text, phrase, or file name">
             <button id="vector-search-btn" type="button" class="ghost-btn">Search</button>
             <button id="vector-refresh-btn" type="button" class="ghost-btn">Refresh</button>
           </div>
@@ -2778,7 +2959,7 @@
           <section id="vector-detail" class="vector-detail-card">
             <div class="vector-empty-state">
               <h3>Select a document</h3>
-              <p>Select a document to inspect its content, chunks, and metadata.</p>
+              <p>Select a document to inspect its content and metadata.</p>
             </div>
           </section>
         </div>
@@ -2960,11 +3141,8 @@
         <h3 id="system-prompt-title">System Prompt</h3>
         <button id="system-prompt-close" type="button" class="knowledge-modal-close" aria-label="Close">×</button>
       </div>
-      <div id="system-prompt-path" class="system-prompt-meta"></div>
-      <div class="system-prompt-label">Current prompt</div>
-      <div class="system-prompt-submeta">This file contains only the editable system prompt text. Runtime context, question, and answer markers are added by the backend automatically.</div>
       <div id="system-prompt-status" class="system-prompt-status" aria-live="polite"></div>
-      <textarea id="system-prompt-editor" class="system-prompt-editor" spellcheck="false" placeholder="Loading current prompt..."></textarea>
+      <textarea id="system-prompt-editor" class="system-prompt-editor" spellcheck="false" placeholder="Loading..."></textarea>
       <div class="modal-actions">
         <button id="system-prompt-refresh" type="button" class="knowledge-action-btn clear">Refresh</button>
         <div class="modal-actions-right">
@@ -3005,6 +3183,11 @@
     const chatHistory = document.getElementById('chat-history');
     const answerSection = document.getElementById('answer-section');
     const ticketSelect = document.getElementById('ticket-select');
+    const ticketSelectWrap = document.getElementById('ticket-select-wrap');
+    const ticketSelectTrigger = document.getElementById('ticket-select-trigger');
+    const ticketSelectTriggerLabel = document.getElementById('ticket-select-trigger-label');
+    const ticketFetchPopover = document.getElementById('ticket-fetch-popover');
+    const ticketDropdownContent = document.getElementById('ticket-dropdown-content');
     const clearTicketBtn = document.getElementById('clear-ticket');
     
     // File upload elements
@@ -3026,7 +3209,6 @@
     const systemPromptEditor = document.getElementById('system-prompt-editor');
     const systemPromptSave = document.getElementById('system-prompt-save');
     const systemPromptRefresh = document.getElementById('system-prompt-refresh');
-    const systemPromptPath = document.getElementById('system-prompt-path');
     const systemPromptStatus = document.getElementById('system-prompt-status');
     const systemPromptToast = document.getElementById('system-prompt-toast');
     const filePreviewBody = document.getElementById('file-preview-body');
@@ -3103,6 +3285,9 @@
     let isSystemPromptBusy = false;
     let systemPromptCloseTimer = null;
     let systemPromptToastTimer = null;
+    let ticketLoadPromise = null;
+    let ticketItems = [];
+    let isTicketDropdownOpen = false;
     const KNOWLEDGE_DRAFT_KEY = 'ta9_knowledge_draft_html_v1';
     const vectorState = {
       collections: [],
@@ -3195,7 +3380,7 @@
       systemPromptBackdrop.classList.remove('hidden');
       systemPromptBackdrop.setAttribute('aria-hidden', 'false');
       if (systemPromptEditor) {
-        systemPromptEditor.value = 'Loading current prompt...';
+        systemPromptEditor.value = 'Loading...';
       }
       loadSystemPrompt();
     }
@@ -3221,10 +3406,6 @@
           throw new Error((data && (data.detail || data.message)) || 'Failed to load system prompt.');
         }
         systemPromptEditor.value = String(data.template || '');
-        if (systemPromptPath) {
-          const displayPath = data.display_path || data.path || '';
-          systemPromptPath.textContent = displayPath ? `Live file: ${displayPath}` : '';
-        }
         systemPromptEditor.focus();
         systemPromptEditor.setSelectionRange(0, 0);
       } catch (err) {
@@ -3252,10 +3433,6 @@
           throw new Error((data && (data.detail || data.message)) || 'Failed to save system prompt.');
         }
         systemPromptEditor.value = String(data.template || systemPromptEditor.value || '');
-        if (systemPromptPath) {
-          const displayPath = data.display_path || data.path || '';
-          systemPromptPath.textContent = displayPath ? `Live file: ${displayPath}` : '';
-        }
         setSystemPromptStatus('');
         closeSystemPromptModal();
         showSystemPromptToast();
@@ -5348,22 +5525,196 @@
       return pair;
     }
 
-    async function loadTickets() {
-      try {
-        const resp = await fetch('/adminchat/api/azure/tickets?tag=CC');
+    function setTicketDropdownOpen(isOpen) {
+      isTicketDropdownOpen = isOpen;
+      if (ticketFetchPopover) {
+        ticketFetchPopover.classList.toggle('visible', isOpen);
+        ticketFetchPopover.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+      }
+      if (ticketSelectWrap) {
+        ticketSelectWrap.classList.toggle('open', isOpen);
+      }
+      if (ticketSelectTrigger) {
+        ticketSelectTrigger.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      }
+    }
+
+    function renderTicketLoadingState(message = 'Fetching current tickets...') {
+      if (!ticketDropdownContent) {
+        return;
+      }
+      ticketDropdownContent.innerHTML = '';
+      const loading = document.createElement('div');
+      loading.className = 'ticket-dropdown-loading';
+
+      const spinner = document.createElement('span');
+      spinner.className = 'ticket-fetch-spinner';
+      spinner.setAttribute('aria-hidden', 'true');
+
+      const text = document.createElement('span');
+      text.className = 'ticket-fetch-text';
+      text.textContent = message;
+
+      loading.appendChild(spinner);
+      loading.appendChild(text);
+      ticketDropdownContent.appendChild(loading);
+    }
+
+    function renderTicketEmptyState(message) {
+      if (!ticketDropdownContent) {
+        return;
+      }
+      ticketDropdownContent.innerHTML = '';
+      const empty = document.createElement('div');
+      empty.className = 'ticket-dropdown-empty';
+      empty.textContent = message;
+      ticketDropdownContent.appendChild(empty);
+    }
+
+    function syncTicketTriggerLabel() {
+      if (!ticketSelectTrigger || !ticketSelectTriggerLabel) {
+        return;
+      }
+
+      const selectedOption = ticketSelect.options[ticketSelect.selectedIndex];
+      if (ticketSelect.value && selectedOption) {
+        ticketSelectTriggerLabel.textContent = selectedOption.textContent || 'Select a support ticket';
+        ticketSelectTrigger.classList.remove('placeholder');
+      } else {
+        ticketSelectTriggerLabel.textContent = 'Select a support ticket';
+        ticketSelectTrigger.classList.add('placeholder');
+      }
+    }
+
+    function renderTicketDropdownItems() {
+      if (!ticketDropdownContent) {
+        return;
+      }
+
+      ticketDropdownContent.innerHTML = '';
+
+      if (!ticketItems.length) {
+        renderTicketEmptyState('No current tickets found.');
+        return;
+      }
+
+      const list = document.createElement('div');
+      list.className = 'ticket-dropdown-list';
+      list.setAttribute('role', 'listbox');
+
+      for (const item of ticketItems) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'ticket-dropdown-item';
+        if (ticketSelect.value === item.url) {
+          button.classList.add('selected');
+        }
+        button.setAttribute('role', 'option');
+        button.setAttribute('aria-selected', ticketSelect.value === item.url ? 'true' : 'false');
+
+        const id = document.createElement('span');
+        id.className = 'ticket-dropdown-item-id';
+        id.textContent = `#${item.id}`;
+
+        const title = document.createElement('span');
+        title.className = 'ticket-dropdown-item-title';
+        title.textContent = item.title;
+
+        button.appendChild(id);
+        button.appendChild(title);
+        button.addEventListener('click', () => {
+          ticketSelect.value = item.url;
+          ticketSelect.dispatchEvent(new Event('change'));
+          setTicketDropdownOpen(false);
+        });
+        list.appendChild(button);
+      }
+
+      ticketDropdownContent.appendChild(list);
+    }
+
+    function setTicketLoading(isLoading, message = 'Fetching current tickets...') {
+      if (ticketSelectWrap) {
+        ticketSelectWrap.classList.toggle('loading', isLoading);
+      }
+      ticketSelect.setAttribute('aria-busy', isLoading ? 'true' : 'false');
+      if (isLoading) {
+        setTicketDropdownOpen(true);
+        renderTicketLoadingState(message);
+      }
+    }
+
+    function renderTicketOptions(items, selectedValue) {
+      ticketItems = items;
+      ticketSelect.innerHTML = '<option value="" hidden selected></option>';
+      let selectedStillExists = false;
+
+      for (const it of items) {
+        const opt = document.createElement('option');
+        opt.value = it.url;
+        opt.textContent = `#${it.id} | ${it.title}`;
+        ticketSelect.appendChild(opt);
+        if (selectedValue && it.url === selectedValue) {
+          selectedStillExists = true;
+        }
+      }
+
+      if (selectedValue && selectedStillExists) {
+        ticketSelect.value = selectedValue;
+      } else {
+        if (selectedValue && ticketFirstQuestionAsked[selectedValue]) {
+          delete ticketFirstQuestionAsked[selectedValue];
+        }
+        ticketSelect.value = '';
+      }
+
+      syncTicketTriggerLabel();
+      renderTicketDropdownItems();
+    }
+
+    async function loadTickets(options = {}) {
+      if (ticketLoadPromise) {
+        return ticketLoadPromise;
+      }
+
+      const previousValue = ticketSelect.value;
+      const showLoading = options.showLoading !== false;
+
+      if (showLoading) {
+        setTicketLoading(true, 'Refreshing current tickets...');
+      }
+
+      ticketLoadPromise = (async () => {
+        const resp = await fetch('/adminchat/api/azure/tickets?tag=CC', { cache: 'no-store' });
+        if (!resp.ok) {
+          throw new Error(`Ticket fetch failed with status ${resp.status}`);
+        }
+
         const data = await resp.json();
         const items = (data && data.items) || [];
-        // Reset options with a hidden placeholder (not shown in dropdown list)
-        ticketSelect.innerHTML = '<option value="" hidden selected></option>';
-        for (const it of items) {
-          const opt = document.createElement('option');
-          opt.value = it.url;
-          opt.textContent = `#${it.id} | ${it.title}`;
-          ticketSelect.appendChild(opt);
-        }
+        renderTicketOptions(items, previousValue);
+      })();
+
+      try {
+        await ticketLoadPromise;
       } catch (e) {
         console.warn('Failed to load tickets', e);
+        ticketSelect.value = previousValue || '';
+        syncTicketTriggerLabel();
+        renderTicketEmptyState('Unable to load tickets right now. Click again to retry.');
+        setTicketDropdownOpen(true);
+      } finally {
+        ticketLoadPromise = null;
+        setTicketLoading(false);
+        updateClearVisibility();
       }
+    }
+
+    function refreshTicketsOnDropdownOpen() {
+      if (ticketLoadPromise) {
+        return;
+      }
+      void loadTickets({ showLoading: true });
     }
 
     function updateClearVisibility() {
@@ -5372,6 +5723,8 @@
       } else {
         clearTicketBtn.disabled = false;
       }
+      syncTicketTriggerLabel();
+      renderTicketDropdownItems();
     }
 
     clearTicketBtn.addEventListener('click', () => {
@@ -5385,10 +5738,33 @@
       if (oldTicket && ticketFirstQuestionAsked[oldTicket]) {
         delete ticketFirstQuestionAsked[oldTicket];
       }
-      updateClearVisibility();
+      ticketSelect.dispatchEvent(new Event('change'));
     });
 
     ticketSelect.addEventListener('change', updateClearVisibility);
+    ticketSelectTrigger.addEventListener('click', () => {
+      if (isTicketDropdownOpen) {
+        setTicketDropdownOpen(false);
+        return;
+      }
+      refreshTicketsOnDropdownOpen();
+    });
+    ticketSelectTrigger.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        if (!isTicketDropdownOpen) {
+          refreshTicketsOnDropdownOpen();
+        }
+      } else if (e.key === 'Escape' && isTicketDropdownOpen) {
+        e.preventDefault();
+        setTicketDropdownOpen(false);
+      }
+    });
+    document.addEventListener('click', (e) => {
+      if (!ticketSelectWrap.contains(e.target)) {
+        setTicketDropdownOpen(false);
+      }
+    });
 
     // Handle Enter to submit, Shift+Enter for newline
     questionInput.addEventListener('keydown', (e) => {
@@ -5501,7 +5877,7 @@
 
     // Initial load
     loadKnowledgeDraft();
-    loadTickets().then(updateClearVisibility);
+    updateClearVisibility();
 
     stopBtn.addEventListener('click', () => {
       if (currentController) {

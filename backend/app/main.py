@@ -4,7 +4,6 @@ import pathlib
 import time
 import traceback
 from typing import List, Optional, Tuple, Dict, Any, Deque
-import random
 from collections import defaultdict, deque
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -41,11 +40,7 @@ try:
 except ImportError:
     HAS_OPENPYXL = False
 
-try:
-    import csv
-    HAS_CSV = True
-except ImportError:
-    HAS_CSV = False
+import csv
 
 try:
     import pdfplumber
@@ -1074,78 +1069,6 @@ def build_file_context(files: Optional[List[Dict[str, str]]], describe_image_fun
     return combined
 
 
-def _safe_resolve_path(root_dir: str, rel_path: str) -> str:
-    """Resolve a relative path safely within root_dir."""
-    root_abs = os.path.abspath(root_dir)
-    candidate = os.path.abspath(os.path.join(root_abs, rel_path))
-    if not candidate.startswith(root_abs + os.sep) and candidate != root_abs:
-        raise RuntimeError("Invalid path outside knowledge directory")
-    return candidate
-
-
-def _list_server_files(root_dir: str) -> List[dict]:
-    """List files under the knowledge directory for server-file selection."""
-    allowed_exts = {
-        ".md", ".markdown", ".txt", ".rst", ".csv", ".tsv", ".log", ".ini", ".cfg", ".conf", ".properties",
-        ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".sql",
-        ".pdf", ".doc", ".docx", ".rtf", ".odt", ".eml", ".msg",
-        ".xlsx", ".xls", ".xlsm", ".xltx", ".xltm", ".xlsb", ".ods",
-        ".ppt", ".pptx", ".odp",
-        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".ico", ".heic", ".heif", ".avif", ".jfif",
-        ".zip", ".rar", ".7z", ".tar", ".gz",
-        ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac",
-        ".mp4", ".mkv", ".mov", ".avi", ".wmv", ".webm",
-    }
-    files = []
-    root_abs = os.path.abspath(root_dir)
-    for base, _, names in os.walk(root_abs):
-        for name in names:
-            ext = os.path.splitext(name)[1].lower()
-            if allowed_exts and ext not in allowed_exts:
-                continue
-            abs_path = os.path.join(base, name)
-            rel_path = os.path.relpath(abs_path, root_abs)
-            try:
-                stat = os.stat(abs_path)
-                files.append({
-                    "path": rel_path.replace("\\", "/"),
-                    "size": stat.st_size,
-                    "modified": int(stat.st_mtime),
-                })
-            except Exception:
-                continue
-    files.sort(key=lambda x: x["path"].lower())
-    return files
-
-
-def _process_local_file(file_path: str) -> str:
-    """Process a local file path into text for ingestion."""
-    file_name = os.path.basename(file_path)
-    ext = os.path.splitext(file_name)[1].lower().lstrip(".")
-    try:
-        with open(file_path, "rb") as f:
-            file_bytes = f.read()
-    except Exception as e:
-        return f"[ERROR] Failed to read file {file_name}: {e}"
-
-    if ext in POPULAR_IMAGE_EXTS:
-        desc = _describe_local_image_via_vision(file_path)
-        if not desc:
-            return f"[Image file {file_name} - analysis unavailable]"
-        return f"[Image Content from {file_name}]\n{desc}"
-    if ext in POPULAR_EXCEL_EXTS:
-        return _process_excel_file(file_name, file_bytes)
-    if ext == "csv":
-        return _process_csv_file(file_name, file_bytes)
-    if ext == "pdf":
-        return _process_pdf_file(file_name, file_bytes)
-    if ext in {"doc", "docx"}:
-        return _process_word_file(file_name, file_bytes)
-    if ext in POPULAR_OTHER_EXTS:
-        return _process_unstructured_popular_file(file_name, ext)
-    return _process_text_file(file_name, file_bytes)
-
-
 # ---------------------------------------------------------------------
 # ADO Helpers (continued)
 # ---------------------------------------------------------------------
@@ -1297,12 +1220,14 @@ def generate_professional_ticket_report(ticket: dict) -> str:
 def ado_list_tickets(tag_contains: str = "CC") -> List[dict]:
     """Run WIQL and return a list of work items with details (id,title,state,tags,url)."""
     url = f"{_ado_base()}/_apis/wit/wiql?api-version=7.1-preview.2"
-    # WIQL: State <> Closed and Tags contains tag_contains
+    # WIQL aligned with the Azure DevOps query:
+    # State <> Closed, Tags contains tag_contains, Work Item Type <> Bug.
     wiql = (
         "SELECT [System.Id] FROM WorkItems "
         "WHERE [System.TeamProject] = @project "
         "AND [System.State] <> 'Closed' "
         f"AND [System.Tags] CONTAINS '{tag_contains}' "
+        "AND [System.WorkItemType] <> 'Bug' "
         "ORDER BY [System.ChangedDate] DESC"
     )
     try:
@@ -2335,7 +2260,7 @@ def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
     return score
 
 
-def _content_similarity(text1: str, text2: str, threshold: float = 0.7) -> float:
+def _content_similarity(text1: str, text2: str) -> float:
     """
     Calculate similarity between two texts based on overlapping tokens.
     Returns a value between 0 and 1.
@@ -2412,7 +2337,7 @@ def _smart_deduplicate_and_diversify(
             elif doc_len > 500 or seen_len > 500:
                 adaptive_threshold = 0.60  # More lenient for comprehensive docs
             
-            sim = _content_similarity(doc, seen_doc, threshold=adaptive_threshold)
+            sim = _content_similarity(doc, seen_doc)
             if sim > adaptive_threshold:
                 print(f"[DEDUP] Skipping doc {idx} (similarity={sim:.3f} > {adaptive_threshold:.3f})")
                 is_duplicate = True
@@ -2633,85 +2558,6 @@ def _context_confidence_profile(
         "max_overlap": round(max_overlap, 4),
         "is_short": is_short,
     }
-
-
-def _is_context_relevant(
-    question: str,
-    docs: List[str],
-    distances: Optional[List[float]],
-    max_distance: float = 0.50,
-    min_overlap: float = 0.05,
-) -> bool:
-    """
-    Intelligent answerability gate with adaptive thresholds.
-    Pure query-length based: short queries get lenient thresholds universally.
-    """
-    if not docs:
-        return False
-    
-    # Only query length matters - no domain-specific checks
-    is_short = _is_short_query(question)
-    
-    # For short queries, be much more lenient (this fixes "add new department" issue)
-    if is_short:
-        effective_max_distance = 0.60  # Very lenient for short queries
-        effective_min_overlap = 0.01   # Accept 1% word overlap
-    else:
-        effective_max_distance = max_distance
-        effective_min_overlap = min_overlap
-    
-    # Check semantic distance
-    best_dist = None
-    if distances:
-        best_dist = min(distances)
-    if best_dist is not None and best_dist > effective_max_distance:
-        return False
-    
-    # Check lexical overlap
-    top_docs = [d for d in docs[:5] if d is not None]
-    if not top_docs:
-        return False
-    
-    max_overlap = max((_lexical_overlap_ratio(question, d) for d in top_docs), default=0.0)
-    return max_overlap >= effective_min_overlap
-
-
-def _generate_contextual_rejection(question: str, docs: List[str] = None) -> str:
-    """
-    Generate an intelligent, question-aware rejection response using the LLM.
-    Makes the rejection feel natural and contextual rather than robotic.
-    """
-    if not OPENAI_API_KEY:
-        return (
-            "I don't have enough information in the knowledge base to answer that. "
-            "Could you provide more context or ask about a specific technical issue?"
-        )
-    
-    try:
-        # Build a prompt that generates a flexible, natural rejection
-        rejection_prompt = (
-            "You are a helpful technical support assistant. The user asked a question, but there isn't "
-            "relevant information in the knowledge base to answer it properly.\n\n"
-            f"User's question: {question}\n\n"
-            "Generate a SHORT (1-2 sentences), friendly response that:\n"
-            "- Acknowledges what they're asking about\n"
-            "- Explains you don't have specific information on this topic\n"
-            "- Suggests they provide more context or ask about technical documentation/issues\n\n"
-            "Be conversational and helpful. Don't mention \"viewing images\" or \"can't view\" - just focus on not having information.\n"
-            "Response:"
-        )
-        
-        rejection = call_llm(rejection_prompt, temperature=0.3)
-        return rejection.strip() if rejection else (
-            "I don't have specific information about that in the knowledge base. "
-            "Could you provide more details or ask about a technical issue I can help with?"
-        )
-    except Exception as e:
-        print(f"[REJECTION][WARN] Failed to generate contextual rejection: {e}")
-        return (
-            "I don't have information about that in the knowledge base. "
-            "Could you provide more context about the technical issue you're facing?"
-        )
 
 
 def _ground_answer_against_context(question: str, context_text: str, draft_answer: str) -> str:
@@ -3048,20 +2894,6 @@ def _build_chunk_page(rows: List[dict], limit: int, offset: int, include_embeddi
     return chunk_items, safe_limit, safe_offset
 
 
-def _get_vector_dimensions(collection_name: str, chunk_id: Optional[str]) -> int:
-    if not chunk_id:
-        return 0
-    target_collection = _get_vector_collection(collection_name)
-    raw = target_collection.get(ids=[chunk_id], include=["embeddings"])
-    raw_embeddings = raw.get("embeddings")
-    if raw_embeddings is None:
-        return 0
-    embeddings = list(raw_embeddings)
-    if not embeddings:
-        return 0
-    return len(_safe_embedding_to_list(embeddings[0]))
-
-
 def _count_collection_documents(collection_name: str) -> int:
     target_collection = _get_vector_collection(collection_name)
     raw = target_collection.get(include=["metadatas"])
@@ -3142,11 +2974,115 @@ def _group_collection_documents(collection_name: str) -> List[dict]:
                 "token_count": _count_text_tokens(merged_content),
                 "input_type": input_type,
                 "updated_at": payload["updated_at"] or None,
+                "_search_content": merged_content,
             }
         )
 
     summaries.sort(key=lambda item: ((item["updated_at"] or ""), item["title"].lower()), reverse=True)
     return summaries
+
+
+def _normalize_vector_search_value(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9_\-\s]", " ", str(text or "").lower())).strip()
+
+
+def _build_vector_search_preview(content: str, query: str, fallback_preview: str) -> str:
+    text = re.sub(r"\s+", " ", str(content or "")).strip()
+    if not text:
+        return fallback_preview
+
+    raw_query = str(query or "").strip().lower()
+    normalized_terms = [term for term in _tokenize_normalized(query) if term]
+    lower_text = text.lower()
+
+    hit_index = -1
+    if raw_query:
+        hit_index = lower_text.find(raw_query)
+    if hit_index < 0:
+        for term in normalized_terms:
+            hit_index = lower_text.find(term.lower())
+            if hit_index >= 0:
+                break
+
+    if hit_index < 0:
+        return fallback_preview or (text[:VECTOR_DB_PREVIEW_CHARS].rstrip() + "..." if len(text) > VECTOR_DB_PREVIEW_CHARS else text)
+
+    window = max(80, VECTOR_DB_PREVIEW_CHARS // 2)
+    start = max(0, hit_index - window)
+    end = min(len(text), hit_index + window)
+    snippet = text[start:end].strip()
+
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(text):
+        snippet = snippet + "..."
+    return snippet
+
+
+def _score_vector_document_summary(item: dict, query: str) -> Optional[dict]:
+    query_text = str(query or "").strip()
+    normalized_query = _normalize_vector_search_value(query_text)
+    query_terms = [term for term in _tokenize_normalized(query_text) if term]
+    if not normalized_query and not query_terms:
+        return None
+
+    title = str(item.get("title") or "")
+    source = str(item.get("source") or "")
+    display_source = str(item.get("display_source") or "")
+    search_content = str(item.get("_search_content") or "")
+
+    title_normalized = _normalize_vector_search_value(title)
+    source_normalized = _normalize_vector_search_value(f"{display_source} {source}")
+    content_normalized = _normalize_vector_search_value(search_content)
+
+    title_terms = set(_tokenize_normalized(title))
+    source_terms = set(_tokenize_normalized(f"{display_source} {source}"))
+    content_terms = set(_tokenize_normalized(search_content))
+    combined_terms = title_terms | source_terms | content_terms
+
+    matched_terms = [term for term in query_terms if term in combined_terms]
+    if normalized_query:
+        exact_in_title = normalized_query in title_normalized
+        exact_in_source = normalized_query in source_normalized
+        exact_in_content = normalized_query in content_normalized
+    else:
+        exact_in_title = False
+        exact_in_source = False
+        exact_in_content = False
+
+    has_any_match = exact_in_title or exact_in_source or exact_in_content or bool(matched_terms)
+    if not has_any_match:
+        return None
+
+    all_terms_matched = bool(query_terms) and len(matched_terms) == len(query_terms)
+    score = 0.0
+
+    if exact_in_title:
+        score += 220.0
+    if exact_in_source:
+        score += 170.0
+    if exact_in_content:
+        score += 120.0
+
+    title_term_hits = sum(1 for term in query_terms if term in title_terms)
+    source_term_hits = sum(1 for term in query_terms if term in source_terms)
+    content_term_hits = sum(1 for term in query_terms if term in content_terms)
+
+    score += title_term_hits * 40.0
+    score += source_term_hits * 24.0
+    score += content_term_hits * 12.0
+
+    if all_terms_matched:
+        score += 90.0
+    elif query_terms:
+        score += (len(matched_terms) / len(query_terms)) * 25.0
+
+    preview = _build_vector_search_preview(search_content, query_text, str(item.get("preview") or ""))
+    return {
+        "score": score,
+        "all_terms_matched": all_terms_matched,
+        "preview": preview,
+    }
 
 
 def _build_vector_document_detail(
@@ -3758,23 +3694,38 @@ def vector_db_documents(
     safe_limit = max(1, min(limit, 100))
     safe_offset = max(0, offset)
     summaries = _group_collection_documents(collection_name)
-    search_value = (search or "").strip().lower()
+    search_value = (search or "").strip()
     if search_value:
-        filtered_summaries = []
+        full_term_matches: List[dict] = []
+        partial_matches: List[dict] = []
         for item in summaries:
-            haystack = " ".join(
-                [
-                    item.get("title") or "",
-                    item.get("source") or "",
-                    item.get("display_source") or "",
-                    item.get("preview") or "",
-                ]
-            ).lower()
-            if search_value in haystack:
-                filtered_summaries.append(item)
-        summaries = filtered_summaries
+            match_meta = _score_vector_document_summary(item, search_value)
+            if not match_meta:
+                continue
 
-    page_items = summaries[safe_offset:safe_offset + safe_limit]
+            matched_item = dict(item)
+            matched_item["preview"] = match_meta["preview"]
+            matched_item["_search_score"] = match_meta["score"]
+
+            if match_meta["all_terms_matched"] or not _tokenize_normalized(search_value):
+                full_term_matches.append(matched_item)
+            else:
+                partial_matches.append(matched_item)
+
+        active_matches = full_term_matches if full_term_matches else partial_matches
+        active_matches.sort(
+            key=lambda item: (
+                -float(item.get("_search_score") or 0.0),
+                str(item.get("updated_at") or ""),
+                str(item.get("title") or "").lower(),
+            )
+        )
+        summaries = active_matches
+
+    page_items = [
+        {key: value for key, value in item.items() if not key.startswith("_")}
+        for item in summaries[safe_offset:safe_offset + safe_limit]
+    ]
     return {
         "collection_name": collection_name,
         "total": len(summaries),
@@ -4475,8 +4426,6 @@ def chat(req: ChatRequest):
     if selected_ticket_text:
         # Keep a short hint to enrich similarity search without overwhelming the question
         ticket_context_hint = (selected_ticket_text[:800] or "").strip()
-
-    emb_results = []
 
     primary_emb = None
     agg_ids: List[str] = []
