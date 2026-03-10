@@ -670,6 +670,107 @@ def _extract_text_from_pypdf2_page(page: Any) -> str:
         return ""
 
 
+def _looks_like_command_or_code_line(line: str) -> bool:
+    candidate = str(line or "").strip()
+    if not candidate:
+        return False
+
+    upper_candidate = candidate.upper()
+    if upper_candidate in {"SQL", "BASH", "SHELL", "CMD", "POWERSHELL", "PYTHON"}:
+        return True
+
+    sql_markers = (
+        "CREATE TABLE", "ALTER TABLE", "DROP TABLE", "INSERT INTO", "UPDATE ", "DELETE FROM",
+        "SELECT ", "FROM ", "WHERE ", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "PRIMARY KEY",
+        "FOREIGN KEY", "UNIQUE KEY", "ENGINE=", "COLLATE=", "DEFAULT CHARSET=", "NOT NULL",
+    )
+    if any(marker in upper_candidate for marker in sql_markers):
+        return True
+
+    shell_markers = ("sudo ", "docker ", "kubectl ", "python ", "pip ", "npm ", "yarn ", "git ", "curl ", "wget ")
+    if any(candidate.startswith(marker) for marker in shell_markers):
+        return True
+
+    if re.search(r'[`{}();=<>"]', candidate):
+        return True
+    if re.match(r"^\s*(--|#|/\*|\*)", candidate):
+        return True
+    if re.match(r"^[A-Za-z0-9_.-]+\s*=\s*.+$", candidate):
+        return True
+    return False
+
+
+def _normalize_pdf_extracted_text(text: str) -> str:
+    raw_lines = [line.rstrip() for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    normalized_lines: List[str] = []
+    paragraph_parts: List[str] = []
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_parts
+        if paragraph_parts:
+            paragraph = " ".join(part for part in paragraph_parts if part).strip()
+            if paragraph:
+                normalized_lines.append(paragraph)
+            paragraph_parts = []
+
+    for raw_line in raw_lines:
+        line = raw_line.strip()
+        if not line:
+            flush_paragraph()
+            if normalized_lines and normalized_lines[-1] != "":
+                normalized_lines.append("")
+            continue
+
+        heading_like = bool(re.match(r"^(?:---\s*Page\s+\d+\s*---|\[Table\s+\d+\]|Table:\s|\d+\.\s+|#+\s+)", line))
+        code_like = _looks_like_command_or_code_line(line)
+
+        if heading_like or code_like:
+            flush_paragraph()
+            normalized_lines.append(line)
+            continue
+
+        if paragraph_parts and paragraph_parts[-1].endswith("-"):
+            paragraph_parts[-1] = paragraph_parts[-1][:-1] + line
+        else:
+            paragraph_parts.append(line)
+
+    flush_paragraph()
+
+    collapsed: List[str] = []
+    previous_blank = False
+    for line in normalized_lines:
+        if line == "":
+            if not previous_blank:
+                collapsed.append(line)
+            previous_blank = True
+        else:
+            collapsed.append(line)
+            previous_blank = False
+
+    return "\n".join(collapsed).strip()
+
+
+def _extract_text_from_pymupdf_page(page: Any) -> str:
+    try:
+        blocks = page.get_text("blocks", sort=True) or []
+    except Exception:
+        try:
+            return _normalize_pdf_extracted_text(page.get_text("text", sort=True) or "")
+        except Exception:
+            return ""
+
+    block_texts: List[str] = []
+    for block in blocks:
+        text = str(block[4] or "").strip() if len(block) > 4 else ""
+        if not text:
+            continue
+        normalized = _normalize_pdf_extracted_text(text)
+        if normalized:
+            block_texts.append(normalized)
+
+    return "\n\n".join(block_texts).strip()
+
+
 def _strip_html(text: str) -> str:
     try:
         txt = re.sub(r"<[^>]+>", " ", text or "")
@@ -928,7 +1029,7 @@ def _process_pdf_file(file_name: str, file_bytes: bytes) -> str:
                 print(f"[FILE][PDF][WARN] pdfplumber open failed for {file_name}: {e}")
 
         pymupdf_doc = None
-        if HAS_PYMUPDF and PDF_OCR_ENABLED and OPENAI_API_KEY:
+        if HAS_PYMUPDF:
             try:
                 pymupdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
             except Exception as e:
@@ -938,7 +1039,16 @@ def _process_pdf_file(file_name: str, file_bytes: bytes) -> str:
             page = reader.pages[page_idx]
             page_lines: List[str] = [f"\n--- Page {page_idx + 1} ---"]
 
-            text = _extract_text_from_pypdf2_page(page)
+            text = ""
+            if pymupdf_doc and page_idx < len(pymupdf_doc):
+                try:
+                    text = _extract_text_from_pymupdf_page(pymupdf_doc.load_page(page_idx))
+                except Exception as e:
+                    print(f"[FILE][PDF][WARN] PyMuPDF text extraction failed page={page_idx + 1}: {e}")
+
+            if not text.strip():
+                text = _normalize_pdf_extracted_text(_extract_text_from_pypdf2_page(page))
+
             if text and text.strip():
                 page_lines.append(text)
 
@@ -963,6 +1073,8 @@ def _process_pdf_file(file_name: str, file_bytes: bytes) -> str:
 
             should_try_ocr = (
                 pymupdf_doc is not None
+                and PDF_OCR_ENABLED
+                and OPENAI_API_KEY
                 and page_idx < max(0, PDF_OCR_MAX_PAGES)
                 and (not text.strip() or table_count == 0)
             )
@@ -4068,7 +4180,7 @@ def _find_similar_knowledge_sources(text: str, limit: int = 5, max_distance: flo
 
 @app.post("/knowledge/prepare")
 def knowledge_prepare(req: KnowledgeAddRequest):
-    """Prepare user content for RAG and return the normalized text."""
+    """Prepare user content for RAG and return the normalized text without validating it."""
     try:
         text_part = (req.text or "").strip()
         file_part = ""
@@ -4078,14 +4190,6 @@ def knowledge_prepare(req: KnowledgeAddRequest):
         raw_content = "\n\n".join([p for p in [text_part, file_part] if p])
         if not raw_content.strip():
             raise HTTPException(status_code=400, detail="No content to prepare")
-
-        is_valid_ta9_content, rejection_reason = _validate_ta9_knowledge_content(raw_content)
-        if not is_valid_ta9_content:
-            return {
-                "approved": False,
-                "message": rejection_reason,
-                "prepared_text": raw_content,
-            }
 
         prepared_content = _prepare_rag_content(raw_content)
         final_content = prepared_content if prepared_content.strip() else raw_content

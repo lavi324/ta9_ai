@@ -2472,6 +2472,8 @@
       flex-direction: column;
       gap: 18px;
       min-height: calc(100vh - 320px);
+      height: calc(100vh - 120px);
+      max-height: calc(100vh - 120px);
       min-width: 0;
       overflow: hidden;
     }
@@ -2581,6 +2583,7 @@
       flex-direction: column;
       gap: 10px;
       flex: 1 1 auto;
+      min-height: 0;
     }
 
     .vector-section-title {
@@ -2596,21 +2599,43 @@
     }
 
     .vector-document-editor {
+      flex: 1 1 auto;
       width: 100%;
       max-width: 100%;
-      min-height: 100%;
+      min-height: 0;
       border-radius: 16px;
       border: 1px solid #d8e3f3;
       background: #fbfdff;
       padding: 18px;
       font-size: 15px;
       line-height: 1.8;
-      resize: vertical;
+      resize: none;
       color: #1f2d3d;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       outline: none;
+      overflow: auto;
       overflow-wrap: anywhere;
       word-break: break-word;
+    }
+
+    .vector-document-view {
+      flex: 1 1 auto;
+      margin: 0;
+      width: 100%;
+      max-width: 100%;
+      min-height: 0;
+      border-radius: 16px;
+      border: 1px solid #d8e3f3;
+      background: #fbfdff;
+      padding: 18px;
+      font-size: 15px;
+      line-height: 1.8;
+      color: #1f2d3d;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      overflow: auto;
     }
 
     .vector-document-editor.editing {
@@ -3915,18 +3940,22 @@
           <div class="vector-section-head">
             <div class="vector-section-title">Document text</div>
           </div>
-          <textarea id="vector-document-editor" class="vector-document-editor${isEditing ? ' editing' : ''}" ${isEditing ? '' : 'readonly'}></textarea>
+          ${isEditing
+            ? '<textarea id="vector-document-editor" class="vector-document-editor editing"></textarea>'
+            : '<pre id="vector-document-view" class="vector-document-view"></pre>'}
         </div>
       `;
 
       const editor = document.getElementById('vector-document-editor');
+      const documentView = document.getElementById('vector-document-view');
+      if (documentView) {
+        documentView.textContent = contentValue;
+      }
       if (editor) {
         editor.value = contentValue;
-        if (isEditing) {
-          editor.addEventListener('input', () => {
-            vectorState.draftContent = editor.value;
-          });
-        }
+        editor.addEventListener('input', () => {
+          vectorState.draftContent = editor.value;
+        });
       }
 
       const editBtn = document.getElementById('vector-edit-document-btn');
@@ -4170,7 +4199,7 @@
     }
 
     function showKnowledgeLoading(message, allowCancel, options = {}) {
-      const title = options && options.title ? options.title : 'Checking TA9 context';
+      const title = options && options.title ? options.title : 'Processing knowledge';
       const showProgress = !!(options && options.showProgress);
       const showSpinner = options && Object.prototype.hasOwnProperty.call(options, 'showSpinner')
         ? !!options.showSpinner
@@ -4180,7 +4209,7 @@
         knowledgeLoadingTitle.textContent = title;
       }
       if (knowledgeLoadingText) {
-        knowledgeLoadingText.textContent = message || 'Waiting for AI approval before adding knowledge.';
+        knowledgeLoadingText.textContent = message || 'Processing knowledge. Please wait.';
       }
       if (knowledgeLoadingProgress) {
         knowledgeLoadingProgress.classList.toggle('hidden', !showProgress);
@@ -4212,10 +4241,10 @@
       }
       resetKnowledgeSteps();
       if (knowledgeLoadingTitle) {
-        knowledgeLoadingTitle.textContent = 'Checking TA9 context';
+        knowledgeLoadingTitle.textContent = 'Processing knowledge';
       }
       if (knowledgeLoadingText) {
-        knowledgeLoadingText.textContent = 'Waiting for AI approval before adding knowledge.';
+        knowledgeLoadingText.textContent = 'Processing knowledge. Please wait.';
       }
     }
 
@@ -4841,12 +4870,12 @@
 
         try {
           showKnowledgeLoading(
-            'Step 1 of 2: checking if this file is valid TA9 knowledge.',
+            'Step 1 of 2: preparing file content for RAG.',
             false,
             { title: 'Adding knowledge file', showProgress: true, showSpinner: false }
           );
-          setKnowledgeStepState('check', 'running', 'Checking in progress...');
-          setKnowledgeStepState('upload', 'pending', 'Waiting for knowledge check.');
+          setKnowledgeStepState('check', 'running', 'Preparing content...');
+          setKnowledgeStepState('upload', 'pending', 'Waiting for validation and upload.');
 
           const payloadFiles = [];
           for (const file of files) {
@@ -4868,7 +4897,7 @@
           if (!prepareResp.ok) {
             setKnowledgeStepState('check', 'error', 'Failed.');
             setKnowledgeStepState('upload', 'pending', 'Not started.');
-            showKnowledgeDecisionMessage((prepareData && (prepareData.message || prepareData.detail)) || 'Knowledge check failed');
+            showKnowledgeDecisionMessage((prepareData && (prepareData.message || prepareData.detail)) || 'Knowledge preparation failed');
             return;
           }
 
@@ -4880,9 +4909,9 @@
           }
 
           setKnowledgeStepState('check', 'done', 'Completed.');
-          setKnowledgeStepState('upload', 'running', 'Uploading and embedding...');
+          setKnowledgeStepState('upload', 'running', 'Validating, uploading, and embedding...');
           if (knowledgeLoadingText) {
-            knowledgeLoadingText.textContent = 'Step 2 of 2: uploading and embedding file.';
+            knowledgeLoadingText.textContent = 'Step 2 of 2: validating, uploading, and embedding file.';
           }
 
           const addResp = await fetch('/adminchat/api/knowledge/add', {
@@ -5120,8 +5149,11 @@
       const isPrepareRequest = !!replaceEditor;
       const loadingMessage = isPrepareRequest
         ? 'Preparing content for RAG. Please wait...'
-        : 'Checking if content is meaningful. Please wait...';
-      showKnowledgeLoading(loadingMessage, isPrepareRequest);
+        : 'Validating TA9 or IntSight context and adding knowledge. Please wait...';
+      const loadingOptions = isPrepareRequest
+        ? { title: 'Preparing for RAG' }
+        : { title: 'Adding knowledge' };
+      showKnowledgeLoading(loadingMessage, isPrepareRequest, loadingOptions);
 
       activeKnowledgeRequestController = new AbortController();
 
