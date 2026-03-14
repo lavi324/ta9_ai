@@ -1,6 +1,6 @@
 services:
   wiki_rag_api:
-    image: wiki-rag-api:1.3.9
+    image: wiki-rag-api:1.5.8
     networks:
       - shared-ai-net
     environment:
@@ -9,6 +9,22 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_URL: ${OPENAI_URL}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL}
+      OPENAI_VISION_MODEL: ${OPENAI_VISION_MODEL}
+      CHUNK_SIZE: ${CHUNK_SIZE}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP}
+      PDF_MAX_PAGES: ${PDF_MAX_PAGES}
+      PDF_OCR_ENABLED: ${PDF_OCR_ENABLED}
+      PDF_OCR_MAX_PAGES: ${PDF_OCR_MAX_PAGES}
+      PDF_TABLE_EXTRACTION_ENABLED: ${PDF_TABLE_EXTRACTION_ENABLED}
+      PDF_IMAGE_EXTRACTION_ENABLED: ${PDF_IMAGE_EXTRACTION_ENABLED}
+      PDF_MAX_IMAGES_PER_PAGE: ${PDF_MAX_IMAGES_PER_PAGE}
+      PDF_MIN_IMAGE_AREA_RATIO: ${PDF_MIN_IMAGE_AREA_RATIO}
+      VISION_MAX_TOKENS: ${VISION_MAX_TOKENS}
+      VISION_TIMEOUT_SECONDS: ${VISION_TIMEOUT_SECONDS}
+      VISION_RETRY_COUNT: ${VISION_RETRY_COUNT}
+      DETAILED_INGEST_LOGS: ${DETAILED_INGEST_LOGS}
+      MAX_FILE_SIZE_TOKENS: ${MAX_FILE_SIZE_TOKENS}
+      BLOCK_PROCESSING_ENABLED: ${BLOCK_PROCESSING_ENABLED}
       ADO_ORG: ${ADO_ORG}
       ADO_PROJECT: ${ADO_PROJECT}
       ADO_PROJECT_TICKET_SUMMARY: ${ADO_PROJECT_TICKET_SUMMARY}
@@ -23,6 +39,11 @@ services:
       replicas: 1
       restart_policy:
         condition: on-failure
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
 
   wiki_rag_nginx:
     image: nginx:1.27-alpine

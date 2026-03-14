@@ -26,6 +26,7 @@ import json
 import mimetypes
 from io import BytesIO
 from urllib.parse import unquote
+import threading
 
 # Try to import optional dependencies
 try:
@@ -71,6 +72,7 @@ OPENAI_URL = os.getenv("OPENAI_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
 OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 OPENAI_RERANK_MODEL = os.getenv("OPENAI_RERANK_MODEL", OPENAI_CHAT_MODEL)
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o")
 LOG_FULL_EMBEDDINGS = os.getenv("LOG_FULL_EMBEDDINGS", "false").lower() in ("1", "true", "yes")
 EMBED_PREVIEW_COUNT = int(os.getenv("EMBED_PREVIEW_COUNT", "8"))
 
@@ -84,18 +86,39 @@ CHROMA_DIR = os.getenv("CHROMA_DIR", "/app/chroma_db")
 SYSTEM_PROMPT_FILE = os.getenv("SYSTEM_PROMPT_FILE", "/app/system_prompt_template.txt")
 SYSTEM_PROMPT_DISPLAY_PATH = os.getenv("SYSTEM_PROMPT_DISPLAY_PATH", "backend/system_prompt_template.txt")
 
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 200
+# Chunk configuration optimized for large files (2M+ tokens)
+# Larger chunks = fewer embeddings = faster processing of massive files
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "2000"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "300"))
+
 COLLECTION_NAME = "Intsight"
 MEMORY_COLLECTION_NAME = "New_Knowledge"
 VECTOR_DB_PREVIEW_CHARS = 280
 VECTOR_DB_DEFAULT_CHUNK_LIMIT = 25
 VECTOR_DB_MAX_CHUNK_LIMIT = 100
+
+# PDF processing: optimized for large files
+# PDF_MAX_PAGES=0 means unlimited (process entire file)
 PDF_MAX_PAGES = int(os.getenv("PDF_MAX_PAGES", "0"))
 PDF_OCR_ENABLED = os.getenv("PDF_OCR_ENABLED", "true").lower() in ("1", "true", "yes")
-PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "25"))
+# For image-heavy PDFs, analyze ALL pages with vision model (not just first 50)
+PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "0"))  # 0 = unlimited = analyze all pages
 PDF_TABLE_EXTRACTION_ENABLED = os.getenv("PDF_TABLE_EXTRACTION_ENABLED", "true").lower() in ("1", "true", "yes")
-VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "1200"))
+# Aggressive image extraction from ALL PDF pages (not just fallback)
+PDF_IMAGE_EXTRACTION_ENABLED = os.getenv("PDF_IMAGE_EXTRACTION_ENABLED", "true").lower() in ("1", "true", "yes")
+PDF_MAX_IMAGES_PER_PAGE = int(os.getenv("PDF_MAX_IMAGES_PER_PAGE", "4"))
+PDF_MIN_IMAGE_AREA_RATIO = float(os.getenv("PDF_MIN_IMAGE_AREA_RATIO", "0.015"))
+
+# Vision model configuration
+VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "2500"))
+VISION_TIMEOUT_SECONDS = int(os.getenv("VISION_TIMEOUT_SECONDS", "120"))
+VISION_RETRY_COUNT = int(os.getenv("VISION_RETRY_COUNT", "2"))
+
+# Large file processing support (10M+ tokens for 55MB+ PDFs)
+MAX_FILE_SIZE_TOKENS = int(os.getenv("MAX_FILE_SIZE_TOKENS", "10000000"))
+BLOCK_PROCESSING_ENABLED = os.getenv("BLOCK_PROCESSING_ENABLED", "true").lower() in ("1", "true", "yes")
+DETAILED_INGEST_LOGS = os.getenv("DETAILED_INGEST_LOGS", "true").lower() in ("1", "true", "yes")
+
 TABLE_ROW_START_TAG = "[TABLE_ROW]"
 TABLE_ROW_END_TAG = "[/TABLE_ROW]"
 
@@ -108,7 +131,8 @@ DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
     "3. For images: Provide a comprehensive explanation of what is shown in the provided analysis. Highlight key details, technical context, and likely causes when relevant.\n"
     "4. When a ticket is selected, use it to understand the user's issue and provide relevant solutions.\n"
     "5. Use knowledge base context to supplement your answer or provide additional related information.\n"
-    "6. Use fenced code blocks (```bash, ```python, ```sql, etc.) for any commands or code snippets.\n"
+    "6. Use fenced code blocks (```bash, ```python, ```sql, etc.) only for real commands, code, SQL, JSON, config, or other text the user may copy exactly as-is.\n"
+    "6.1 Do NOT use fenced code blocks for UI navigation, button names, field labels, prose examples, or short key-value notes such as 'Source: ...' or 'Type: ...'. Render those as normal text or bullets.\n"
     "7. If the context contains redundant or overlapping information, synthesize it into a single coherent answer.\n"
     "8. Do NOT repeat information from different sources - intelligently merge related points.\n"
     "8.1 Use a balanced approach across both collections (Intsight and New_Knowledge) and do not assume one is always better.\n"
@@ -133,6 +157,134 @@ MAX_CONVERSATION_MESSAGES = 12
 conversation_store: Dict[str, Deque[Dict[str, str]]] = defaultdict(
     lambda: deque(maxlen=MAX_CONVERSATION_MESSAGES)
 )
+
+# In-memory cancellation flags for long-running knowledge ingestion requests.
+knowledge_cancel_lock = threading.Lock()
+knowledge_cancel_flags: Dict[str, bool] = {}
+
+# In-memory job store so knowledge_add returns immediately and the UI polls for the result.
+knowledge_job_store: Dict[str, dict] = {}
+knowledge_job_store_lock = threading.Lock()
+
+# In-memory cache of merged vector document content for large document viewing.
+VECTOR_DOCUMENT_CACHE_MAX_ITEMS = int(os.getenv("VECTOR_DOCUMENT_CACHE_MAX_ITEMS", "24"))
+vector_document_cache: Dict[str, dict] = {}
+vector_document_cache_lock = threading.Lock()
+
+
+def _request_log_prefix(request_id: Optional[str]) -> str:
+    return f"[rid={request_id}]" if request_id else "[rid=-]"
+
+
+def _ingest_log(message: str, request_id: Optional[str] = None, force: bool = False) -> None:
+    if DETAILED_INGEST_LOGS or force:
+        print(f"[INGEST]{_request_log_prefix(request_id)} {message}")
+
+
+def _mark_knowledge_request_started(request_id: Optional[str]) -> None:
+    if not request_id:
+        return
+    with knowledge_cancel_lock:
+        # If cancel arrived first, do not overwrite it.
+        if knowledge_cancel_flags.get(request_id) is True:
+            _ingest_log("request start observed after cancel signal; keeping canceled=true", request_id, force=True)
+            return
+        knowledge_cancel_flags[request_id] = False
+    _ingest_log("request marked active", request_id)
+
+
+def _cancel_knowledge_request(request_id: Optional[str]) -> bool:
+    if not request_id:
+        return False
+    with knowledge_cancel_lock:
+        existed = request_id in knowledge_cancel_flags
+        knowledge_cancel_flags[request_id] = True
+    _ingest_log(f"cancel signal stored (was_active={existed})", request_id, force=True)
+    return existed
+
+
+def _is_knowledge_request_cancelled(request_id: Optional[str]) -> bool:
+    if not request_id:
+        return False
+    with knowledge_cancel_lock:
+        return bool(knowledge_cancel_flags.get(request_id, False))
+
+
+def _clear_knowledge_request(request_id: Optional[str]) -> None:
+    if not request_id:
+        return
+    with knowledge_cancel_lock:
+        knowledge_cancel_flags.pop(request_id, None)
+    _ingest_log("request state cleared", request_id)
+
+
+def _store_job_result(request_id: Optional[str], result: dict) -> None:
+    if not request_id:
+        return
+    with knowledge_job_store_lock:
+        # Evict very old completed jobs (older than 24 h) to keep memory bounded.
+        cutoff = datetime.utcnow().isoformat()
+        keys_to_remove = [
+            k for k, v in knowledge_job_store.items()
+            if v.get("status") == "done" and v.get("stored_at", cutoff) < cutoff
+        ]
+        # Keep at most 100 completed jobs regardless of age.
+        done_jobs = [k for k, v in knowledge_job_store.items() if v.get("status") == "done"]
+        if len(done_jobs) > 100:
+            keys_to_remove += done_jobs[:-100]
+        for k in keys_to_remove:
+            knowledge_job_store.pop(k, None)
+        result["stored_at"] = datetime.utcnow().isoformat() + "Z"
+        knowledge_job_store[request_id] = result
+
+
+def _get_job_result(request_id: Optional[str]) -> Optional[dict]:
+    if not request_id:
+        return None
+    with knowledge_job_store_lock:
+        return knowledge_job_store.get(request_id)
+
+
+def _vector_document_cache_key(collection_name: str, source: str) -> str:
+    return f"{collection_name}::{source}"
+
+
+def _get_cached_vector_document_payload(collection_name: str, source: str) -> Optional[dict]:
+    key = _vector_document_cache_key(collection_name, source)
+    with vector_document_cache_lock:
+        payload = vector_document_cache.get(key)
+        if payload is None:
+            return None
+        # Refresh insertion order for simple LRU behavior.
+        vector_document_cache.pop(key, None)
+        vector_document_cache[key] = payload
+        return dict(payload)
+
+
+def _store_cached_vector_document_payload(
+    collection_name: str,
+    source: str,
+    full_content: str,
+    token_count: int,
+) -> None:
+    key = _vector_document_cache_key(collection_name, source)
+    payload = {
+        "full_content": full_content,
+        "token_count": int(token_count or 0),
+        "cached_at": datetime.utcnow().isoformat() + "Z",
+    }
+    with vector_document_cache_lock:
+        vector_document_cache.pop(key, None)
+        vector_document_cache[key] = payload
+        while len(vector_document_cache) > VECTOR_DOCUMENT_CACHE_MAX_ITEMS:
+            oldest_key = next(iter(vector_document_cache))
+            vector_document_cache.pop(oldest_key, None)
+
+
+def _invalidate_cached_vector_document_payload(collection_name: str, source: str) -> None:
+    key = _vector_document_cache_key(collection_name, source)
+    with vector_document_cache_lock:
+        vector_document_cache.pop(key, None)
 
 
 def _validate_system_prompt_template(template: str) -> str:
@@ -270,7 +422,8 @@ def call_llm(prompt: str, temperature: float = 0.2, model: Optional[str] = None)
 # ---------------------------------------------------------------------
 
 def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
-    print(f"[CHUNK] Splitting text len={len(text)} size={size} overlap={overlap}")
+    tokens_estimate = len(text) // 4
+    print(f"[CHUNK] Splitting text len={len(text)} chars (~{tokens_estimate} tokens) size={size} overlap={overlap}")
     chunks: List[str] = []
     start_idx = 0
     while start_idx < len(text):
@@ -279,7 +432,8 @@ def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
         if chunk:
             chunks.append(chunk)
         start_idx += size - overlap
-    print(f"[CHUNK] Produced {len(chunks)} chunks")
+    total_tokens = sum(len(c) // 4 for c in chunks)
+    print(f"[CHUNK] Produced {len(chunks)} chunks (~{total_tokens} tokens total)")
     return chunks
 
 
@@ -439,8 +593,8 @@ def _extract_images_from_html(html: str) -> List[str]:
 
 def _describe_image_via_vision(image_url: str) -> str:
     """
-    Use OpenAI vision to describe an image.
-    Returns a text description of the image.
+    Use OpenAI vision (gpt-4o) to describe an image in detail.
+    Returns a comprehensive text description focusing on technical content, UI, data, and context.
     Supports both HTTP(S) URLs and data URIs (base64 encoded images).
     """
     try:
@@ -451,23 +605,36 @@ def _describe_image_via_vision(image_url: str) -> str:
         
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
         body = {
-            "model": "gpt-4o-mini",  # Vision capable model
+            "model": OPENAI_VISION_MODEL,
             "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Briefly describe what you see in this image. Focus on any technical content, errors, UI elements, or relevant details."},
+                        {
+                            "type": "text",
+                            "text": (
+                                "You are a detailed technical image analyzer. Provide a comprehensive description of this image. Include:\n"
+                                "1. What type of document/UI/diagram is this (screenshot, chart, diagram, form, etc.)\n"
+                                "2. Main content and purpose\n"
+                                "3. Any visible text, labels, headers, field names, buttons, or menu items\n"
+                                "4. Technical details: configuration settings, error messages, status indicators\n"
+                                "5. Any tables, data, metrics, or numerical values shown\n"
+                                "6. UI elements: panels, sections, checkboxes, dropdowns, input fields\n"
+                                "7. Anything that would help someone understand what's happening in this image.\n\n"
+                                "Be thorough and specific. Do not refuse to analyze. Focus on technical relevance."
+                            ),
+                        },
                         {"type": "image_url", "image_url": {"url": image_url}},
                     ],
                 }
             ],
-            "max_tokens": 300,
+            "max_tokens": 1000,
         }
-        resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=30)
+        resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=60)
         if resp.status_code == 200:
             data = resp.json()
             description = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            print(f"[VISION] Described image {image_url[:60]}... -> {description[:100]}...")
+            print(f"[VISION] Detailed image analysis ({len(description)} chars) for {image_url[:60]}...")
             return description
         else:
             print(f"[VISION][WARN] Vision call failed for {image_url}: {resp.status_code} {resp.text[:200]}")
@@ -477,17 +644,26 @@ def _describe_image_via_vision(image_url: str) -> str:
         return f"[Image analysis unavailable]"
 
 
-def _extract_structured_text_from_image(image_ref: str, source_label: str = "image") -> str:
+def _extract_structured_text_from_image(
+    image_ref: str,
+    source_label: str = "image",
+    cancel_check=None,
+) -> str:
     """
-    Extract OCR-style text from an image and preserve table content as markdown.
+    Extract OCR-style text from an image using gpt-4o vision and preserve table content as markdown.
+    Uses best OpenAI vision model for superior accuracy.
     """
     if not OPENAI_API_KEY:
+        return ""
+
+    if cancel_check and cancel_check():
+        print(f"[VISION] Skipping OCR extraction for {source_label}: canceled")
         return ""
 
     try:
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
         body = {
-            "model": "gpt-4o-mini",
+            "model": OPENAI_VISION_MODEL,
             "messages": [
                 {
                     "role": "user",
@@ -495,38 +671,65 @@ def _extract_structured_text_from_image(image_ref: str, source_label: str = "ima
                         {
                             "type": "text",
                             "text": (
-                                "You are an OCR and UI analysis extractor. Return useful context from this image even when text is sparse. "
+                                "You are an advanced OCR and visual content extractor. Extract all useful information from this image comprehensively. "
                                 "Follow this exact output structure:\n"
                                 "[IMAGE_SUMMARY]\n"
-                                "1-3 concise sentences describing what this screenshot/image shows.\n\n"
+                                "2-4 detailed sentences describing what this screenshot/image shows, its purpose, and context.\n\n"
                                 "[VISIBLE_TEXT]\n"
-                                "List all readable labels, values, menu names, buttons, error text, and headings exactly as seen. "
-                                "Use one item per line. If none, write: <none>.\n\n"
+                                "Extract ALL readable text: labels, values, menu names, buttons, error text, headings, configuration keys, field names, etc. "
+                                "Preserve the exact text and format. Use one item per line. If none, write: <none>.\n\n"
                                 "[TABLES]\n"
-                                "If a table/grid exists, output it in markdown preserving row/column values. If none, write: <none>.\n\n"
+                                "If a table/grid/matrix exists, output it in markdown format preserving all row/column values and structure exactly. If none, write: <none>.\n\n"
+                                "[DATA_VALUES]\n"
+                                "Extract any numbers, metrics, timestamps, thresholds, or measurable data shown. Include context (e.g., 'CPU: 85%').\n\n"
                                 "[UI_ELEMENTS]\n"
-                                "List important non-text UI elements (map, panel, checkbox state, selected layer, marker, chart, etc.).\n\n"
+                                "List all important UI components: buttons, panels, tabs, sections, checkboxes, dropdowns, input fields, dialogs, and their states.\n\n"
                                 "[TECHNICAL_SIGNALS]\n"
-                                "List technical clues helpful for troubleshooting (screen/page type, selected filters, visible warnings, state).\n\n"
-                                "Rules: do not refuse, do not say you cannot extract text, do not invent unseen details, and mark unclear content as [unclear]."
+                                "Identify technical details: screen/page type, selected items, active filters, visible warnings, error codes, status indicators, configuration mode.\n\n"
+                                "Rules: Extract everything visible. Do not refuse. Do not invent unseen details. Mark unclear or illegible content as [unclear]. "
+                                "This is for technical documentation and troubleshooting support."
                             ),
                         },
                         {"type": "image_url", "image_url": {"url": image_ref}},
                     ],
                 }
             ],
-            "max_tokens": VISION_MAX_TOKENS,
+            "max_tokens": min(VISION_MAX_TOKENS, 2500),
             "temperature": 0,
         }
-        resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=120)
-        if resp.status_code != 200:
-            print(f"[VISION][WARN] OCR extraction failed for {source_label}: {resp.status_code} {resp.text[:200]}")
-            return ""
-        data = resp.json()
-        text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        if text:
-            print(f"[VISION] OCR extraction success for {source_label}, len={len(text)}")
-        return text
+        for attempt in range(VISION_RETRY_COUNT + 1):
+            if cancel_check and cancel_check():
+                print(f"[VISION] Stopping OCR extraction for {source_label}: canceled")
+                return ""
+            try:
+                resp = requests.post(
+                    f"{OPENAI_URL}/chat/completions",
+                    json=body,
+                    headers=headers,
+                    timeout=VISION_TIMEOUT_SECONDS,
+                )
+            except requests.exceptions.ReadTimeout as e:
+                if attempt >= VISION_RETRY_COUNT:
+                    print(f"[VISION][WARN] OCR extraction timeout for {source_label} after retries: {e}")
+                    return ""
+                wait_sec = (attempt + 1) * 2
+                print(f"[VISION][WARN] OCR timeout for {source_label}, retry {attempt + 1}/{VISION_RETRY_COUNT} in {wait_sec}s")
+                time.sleep(wait_sec)
+                continue
+            except Exception as e:
+                print(f"[VISION][WARN] OCR extraction error for {source_label}: {e}")
+                return ""
+
+            if resp.status_code != 200:
+                print(f"[VISION][WARN] OCR extraction failed for {source_label}: {resp.status_code} {resp.text[:200]}")
+                return ""
+
+            data = resp.json()
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if text:
+                print(f"[VISION] OCR extraction success for {source_label} using {OPENAI_VISION_MODEL}, len={len(text)}")
+            return text
+        return ""
     except Exception as e:
         print(f"[VISION][WARN] OCR extraction error for {source_label}: {e}")
         return ""
@@ -771,6 +974,108 @@ def _extract_text_from_pymupdf_page(page: Any) -> str:
     return "\n\n".join(block_texts).strip()
 
 
+def _extract_layout_ordered_segments_from_pymupdf_page(
+    page: Any,
+    file_name: str,
+    page_number: int,
+    allow_image_analysis: bool,
+    cancel_check=None,
+    request_id: Optional[str] = None,
+) -> List[str]:
+    """Extract page content in visual reading order (text and images interleaved)."""
+    try:
+        data = page.get_text("dict", sort=True) or {}
+        blocks = data.get("blocks", []) or []
+    except Exception as e:
+        print(f"[FILE][PDF][WARN] Layout extraction failed page={page_number}: {e}")
+        return []
+
+    segments: List[str] = []
+    image_count = 0
+    page_rect = getattr(page, "rect", None)
+    page_area = 0.0
+    if page_rect is not None:
+        page_area = max(1.0, float(page_rect.width) * float(page_rect.height))
+
+    for block_idx, block in enumerate(blocks):
+        if cancel_check and cancel_check():
+            _ingest_log(f"pdf page={page_number}: layout extraction canceled", request_id, force=True)
+            break
+        block_type = int(block.get("type", 0))
+        bbox = block.get("bbox") or []
+        if DETAILED_INGEST_LOGS:
+            kind = "text" if block_type == 0 else ("image" if block_type == 1 else f"type-{block_type}")
+            _ingest_log(
+                f"pdf page={page_number}: scanning block={block_idx + 1}/{len(blocks)} kind={kind} bbox={bbox if len(bbox) == 4 else 'n/a'}",
+                request_id,
+            )
+
+        if block_type == 0:
+            text_parts: List[str] = []
+            for line in block.get("lines", []) or []:
+                spans = line.get("spans", []) or []
+                line_text = "".join(str(span.get("text", "")) for span in spans).strip()
+                if line_text:
+                    text_parts.append(line_text)
+            text = "\n".join(text_parts).strip()
+            if text:
+                normalized = _normalize_pdf_extracted_text(text)
+                if normalized:
+                    segments.append(normalized)
+                    _ingest_log(
+                        f"pdf page={page_number}: text block accepted len={len(normalized)} -> queued for embedding",
+                        request_id,
+                    )
+            continue
+
+        if block_type != 1 or not allow_image_analysis:
+            continue
+
+        if PDF_MAX_IMAGES_PER_PAGE > 0 and image_count >= PDF_MAX_IMAGES_PER_PAGE:
+            continue
+
+        bbox = block.get("bbox") or []
+        if len(bbox) != 4:
+            continue
+
+        x0, y0, x1, y1 = [float(v) for v in bbox]
+        width = max(0.0, x1 - x0)
+        height = max(0.0, y1 - y0)
+        block_area = width * height
+        area_ratio = block_area / page_area if page_area else 0.0
+
+        if area_ratio < PDF_MIN_IMAGE_AREA_RATIO:
+            _ingest_log(
+                f"pdf page={page_number}: image block skipped ratio={area_ratio:.4f} (< {PDF_MIN_IMAGE_AREA_RATIO:.4f})",
+                request_id,
+            )
+            continue
+
+        try:
+            clip = fitz.Rect(x0, y0, x1, y1)
+            pix = page.get_pixmap(clip=clip, dpi=200, alpha=False)
+            image_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+            data_uri = f"data:image/png;base64,{image_b64}"
+            image_text = _extract_structured_text_from_image(
+                data_uri,
+                source_label=f"{file_name}:page-{page_number}:image-{block_idx + 1}",
+                cancel_check=cancel_check,
+            )
+            if image_text:
+                image_count += 1
+                segments.append("[IMAGE_BLOCK_ANALYSIS]\n" + image_text)
+                _ingest_log(
+                    f"pdf page={page_number}: image block analyzed with vision block={block_idx + 1} ratio={area_ratio:.3f} desc_len={len(image_text)} -> queued for embedding",
+                    request_id,
+                )
+        except Exception as e:
+            print(
+                f"[FILE][PDF][WARN] Inline image block extraction failed page={page_number} block={block_idx + 1}: {e}"
+            )
+
+    return segments
+
+
 def _strip_html(text: str) -> str:
     try:
         txt = re.sub(r"<[^>]+>", " ", text or "")
@@ -810,7 +1115,12 @@ def _process_unstructured_popular_file(file_name: str, file_ext: str) -> str:
         f"[NOTICE] .{file_ext} is accepted for upload, but automatic text extraction is not available yet for this type."
     )
 
-def process_uploaded_file(file_data: Dict[str, str], describe_image_func=None) -> str:
+def process_uploaded_file(
+    file_data: Dict[str, str],
+    describe_image_func=None,
+    cancel_check=None,
+    request_id: Optional[str] = None,
+) -> str:
     """
     Process an uploaded file (base64 encoded) and extract its content.
     Supports: images (via OCR/vision), Excel, CSV, PDF, text, Word docs.
@@ -823,6 +1133,10 @@ def process_uploaded_file(file_data: Dict[str, str], describe_image_func=None) -
         Extracted text content
     """
     try:
+        if cancel_check and cancel_check():
+            _ingest_log("file processing skipped due to cancel before start", request_id, force=True)
+            return "[CANCELED] Upload processing stopped by user."
+
         file_name = file_data.get("name", "unknown")
         file_type = file_data.get("type", "")
         file_b64 = file_data.get("data", "")
@@ -840,6 +1154,7 @@ def process_uploaded_file(file_data: Dict[str, str], describe_image_func=None) -
             return f"[ERROR] Failed to decode file: {file_name}"
         
         print(f"[FILE] Processing {file_name} (ext={file_ext}, size={len(file_bytes)} bytes)")
+        _ingest_log(f"file begin name='{file_name}' ext={file_ext} size_bytes={len(file_bytes)}", request_id, force=True)
         
         # Route to appropriate handler
         if file_ext in POPULAR_IMAGE_EXTS or (file_type and file_type.startswith("image/")):
@@ -849,7 +1164,7 @@ def process_uploaded_file(file_data: Dict[str, str], describe_image_func=None) -
         elif file_ext == "csv":
             return _process_csv_file(file_name, file_bytes)
         elif file_ext == "pdf":
-            return _process_pdf_file(file_name, file_bytes)
+            return _process_pdf_file(file_name, file_bytes, cancel_check=cancel_check, request_id=request_id)
         elif file_ext in POPULAR_TEXT_EXTS:
             return _process_text_file(file_name, file_bytes)
         elif file_ext in ["doc", "docx"]:
@@ -1007,7 +1322,7 @@ def _process_csv_file(file_name: str, file_bytes: bytes) -> str:
         return f"**File: {file_name}** [Error reading CSV: {str(e)}]"
 
 
-def _process_pdf_file(file_name: str, file_bytes: bytes) -> str:
+def _process_pdf_file(file_name: str, file_bytes: bytes, cancel_check=None, request_id: Optional[str] = None) -> str:
     """Extract text from PDF file."""
     try:
         import PyPDF2
@@ -1018,6 +1333,12 @@ def _process_pdf_file(file_name: str, file_bytes: bytes) -> str:
         pages_to_process = total_pages
         if PDF_MAX_PAGES > 0:
             pages_to_process = min(total_pages, PDF_MAX_PAGES)
+
+        _ingest_log(
+            f"pdf begin file='{file_name}' pages_total={total_pages} pages_to_process={pages_to_process}",
+            request_id,
+            force=True,
+        )
 
         content_lines = [f"**File: {file_name}** ({total_pages} pages)\n"]
 
@@ -1036,21 +1357,58 @@ def _process_pdf_file(file_name: str, file_bytes: bytes) -> str:
                 print(f"[FILE][PDF][WARN] PyMuPDF open failed for {file_name}: {e}")
 
         for page_idx in range(pages_to_process):
+            if cancel_check and cancel_check():
+                _ingest_log(
+                    f"cancel acknowledged during PDF parse at page={page_idx + 1}; stopping parse",
+                    request_id,
+                    force=True,
+                )
+                content_lines.append("\n[CANCELED] PDF processing stopped by user.")
+                break
             page = reader.pages[page_idx]
             page_lines: List[str] = [f"\n--- Page {page_idx + 1} ---"]
+            _ingest_log(f"pdf page={page_idx + 1}: start top-to-bottom scan", request_id)
+            allow_image_analysis = (
+                PDF_IMAGE_EXTRACTION_ENABLED
+                and PDF_OCR_ENABLED
+                and OPENAI_API_KEY
+                and (PDF_OCR_MAX_PAGES == 0 or page_idx < PDF_OCR_MAX_PAGES)
+            )
 
             text = ""
+            used_layout_segments = False
             if pymupdf_doc and page_idx < len(pymupdf_doc):
                 try:
-                    text = _extract_text_from_pymupdf_page(pymupdf_doc.load_page(page_idx))
+                    pymupdf_page = pymupdf_doc.load_page(page_idx)
+                    ordered_segments = _extract_layout_ordered_segments_from_pymupdf_page(
+                        pymupdf_page,
+                        file_name=file_name,
+                        page_number=page_idx + 1,
+                        allow_image_analysis=allow_image_analysis,
+                        cancel_check=cancel_check,
+                        request_id=request_id,
+                    )
+                    if ordered_segments:
+                        used_layout_segments = True
+                        page_lines.append("\n\n".join(ordered_segments))
+                        _ingest_log(
+                            f"pdf page={page_idx + 1}: ordered segments ready count={len(ordered_segments)}",
+                            request_id,
+                        )
+                    else:
+                        text = _extract_text_from_pymupdf_page(pymupdf_page)
                 except Exception as e:
                     print(f"[FILE][PDF][WARN] PyMuPDF text extraction failed page={page_idx + 1}: {e}")
 
-            if not text.strip():
+            if not used_layout_segments and not text.strip():
                 text = _normalize_pdf_extracted_text(_extract_text_from_pypdf2_page(page))
 
             if text and text.strip():
                 page_lines.append(text)
+                _ingest_log(
+                    f"pdf page={page_idx + 1}: fallback text extracted len={len(text)} -> queued for embedding",
+                    request_id,
+                )
 
             table_count = 0
             if plumber_doc and page_idx < len(plumber_doc.pages):
@@ -1061,6 +1419,10 @@ def _process_pdf_file(file_name: str, file_bytes: bytes) -> str:
                         if table_md:
                             table_count += 1
                             page_lines.append(f"\n[Table {table_idx}]\n{table_md}")
+                            _ingest_log(
+                                f"pdf page={page_idx + 1}: table extracted idx={table_idx} len={len(table_md)} -> queued for embedding",
+                                request_id,
+                            )
                             row_blocks = _format_table_rows_as_blocks(
                                 table_rows,
                                 page_number=page_idx + 1,
@@ -1073,10 +1435,8 @@ def _process_pdf_file(file_name: str, file_bytes: bytes) -> str:
 
             should_try_ocr = (
                 pymupdf_doc is not None
-                and PDF_OCR_ENABLED
-                and OPENAI_API_KEY
-                and page_idx < max(0, PDF_OCR_MAX_PAGES)
-                and (not text.strip() or table_count == 0)
+                and allow_image_analysis
+                and len(page_lines) == 1
             )
 
             if should_try_ocr:
@@ -1089,16 +1449,23 @@ def _process_pdf_file(file_name: str, file_bytes: bytes) -> str:
                     ocr_text = _extract_structured_text_from_image(
                         data_uri,
                         source_label=f"{file_name}:page-{page_idx + 1}",
+                        cancel_check=cancel_check,
                     )
                     if ocr_text:
-                        page_lines.append("\n[OCR Content]\n" + ocr_text)
+                        page_lines.append("\n[PAGE_IMAGE_ANALYSIS_FALLBACK]\n" + ocr_text)
+                        print(f"[FILE][PDF] Fallback page image analysis extracted from page {page_idx + 1}")
+                        _ingest_log(
+                            f"pdf page={page_idx + 1}: fallback full-page vision len={len(ocr_text)} -> queued for embedding",
+                            request_id,
+                        )
                 except Exception as e:
-                    print(f"[FILE][PDF][WARN] OCR fallback failed page={page_idx + 1}: {e}")
+                    print(f"[FILE][PDF][WARN] Image extraction failed page={page_idx + 1}: {e}")
 
             if len(page_lines) == 1:
                 page_lines.append("[No extractable text found on this page]")
 
             content_lines.append("\n".join(page_lines))
+            _ingest_log(f"pdf page={page_idx + 1}: complete sections={max(0, len(page_lines)-1)}", request_id)
 
         if pages_to_process < total_pages:
             content_lines.append(
@@ -1155,7 +1522,12 @@ def _process_word_file(file_name: str, file_bytes: bytes) -> str:
         return f"**File: {file_name}** [Error reading Word doc: {str(e)}]"
 
 
-def build_file_context(files: Optional[List[Dict[str, str]]], describe_image_func=None) -> str:
+def build_file_context(
+    files: Optional[List[Dict[str, str]]],
+    describe_image_func=None,
+    cancel_check=None,
+    request_id: Optional[str] = None,
+) -> str:
     """
     Process all uploaded files and build a context string to include in LLM prompt.
     
@@ -1170,14 +1542,28 @@ def build_file_context(files: Optional[List[Dict[str, str]]], describe_image_fun
         return ""
     
     print(f"[FILE] Processing {len(files)} uploaded files")
+    _ingest_log(f"file batch start count={len(files)}", request_id, force=True)
     
     file_contents = []
-    for file_data in files:
-        content = process_uploaded_file(file_data, describe_image_func)
+    for idx, file_data in enumerate(files, start=1):
+        if cancel_check and cancel_check():
+            _ingest_log(f"cancel acknowledged before file index={idx}; stopping batch", request_id, force=True)
+            file_contents.append("[CANCELED] File processing stopped by user.")
+            break
+        file_name = str((file_data or {}).get("name", "unknown"))
+        _ingest_log(f"file batch item {idx}/{len(files)} begin name='{file_name}'", request_id)
+        content = process_uploaded_file(
+            file_data,
+            describe_image_func,
+            cancel_check=cancel_check,
+            request_id=request_id,
+        )
         file_contents.append(content)
+        _ingest_log(f"file batch item {idx}/{len(files)} done name='{file_name}' extracted_len={len(content)}", request_id)
     
     combined = "\n\n---FILE SEPARATOR---\n\n".join(file_contents)
     print(f"[FILE] Extracted content from {len(files)} files, total length={len(combined)}")
+    _ingest_log(f"file batch complete total_combined_len={len(combined)}", request_id, force=True)
     return combined
 
 
@@ -2040,7 +2426,7 @@ def _has_ta9_support_signal(text: str) -> bool:
         "admin", "analyst", "developer", "entity", "relation", "case", "incident", "protocol",
         "map", "graph", "gantt", "timeline", "facet", "widget", "dashboard", "federated",
         "data loader", "load file manager", "autoloader", "document viewer", "speech to text",
-        "translation", "system config", "localization",
+        "translation", "system config", "localization", "situational awareness", "situational picture", "sit pit",
     ]
     integration_terms = [
         "kerberos", "krb5", "krb5.conf", "krb5.keytab", "keytab", "spn", "realm", "kdc",
@@ -2048,11 +2434,19 @@ def _has_ta9_support_signal(text: str) -> bool:
         "authmech", "krbservicename", "krbhostfqdn", "krbauthrealm", "active directory",
         "domain controller", "dc", "ad user",
     ]
+    application_reference_terms = [
+        "integration", "integrations", "integrate", "integrated with", "connector", "connectors",
+        "application", "applications", "module", "modules", "plugin", "plugins", "supported app",
+        "supported apps", "external system", "external systems", "third-party", "third party",
+        "known as", "also known as", "alias", "aliases", "alternative name", "alternative names",
+        "naming", "mapped to", "referred to as",
+    ]
 
     workflow_hits = sum(1 for term in workflow_terms if term in t)
     technical_hits = sum(1 for term in technical_terms if term in t)
     artifact_hits = sum(1 for term in product_artifacts if term in t)
     integration_hits = sum(1 for term in integration_terms if term in t)
+    application_reference_hits = sum(1 for term in application_reference_terms if term in t)
 
     has_structured_config_pattern = bool(
         re.search(r"\b[a-z0-9_.-]+\s*=\s*[^\s].+", t)
@@ -2080,80 +2474,125 @@ def _has_ta9_support_signal(text: str) -> bool:
         return True
     if "prerequisite" in t and integration_hits >= 3:
         return True
+    # Accept IntSight application/integration reference knowledge even when it is descriptive rather than procedural.
+    if application_reference_hits >= 2 and artifact_hits >= 1:
+        return True
+    if application_reference_hits >= 1 and artifact_hits >= 2:
+        return True
+
+    return False
+
+
+def _looks_clearly_out_of_scope_knowledge(text: str) -> bool:
+    """Reject only obvious junk or clearly unrelated content."""
+    if not text:
+        return True
+
+    if _has_ta9_context(text) or _has_ta9_support_signal(text):
+        return False
+
+    candidate = str(text or "").strip()
+    lower_candidate = candidate.lower()
+    word_count = len(re.findall(r"\b\w+\b", candidate))
+
+    if word_count < 4:
+        return True
+
+    if re.fullmatch(r"[\W_]+", candidate):
+        return True
+
+    repeated_tokens = re.findall(r"\b([a-z0-9]{2,})\b", lower_candidate)
+    if repeated_tokens and len(set(repeated_tokens)) == 1 and len(repeated_tokens) >= 4:
+        return True
+
+    off_topic_terms = {
+        "food": ["banana", "recipe", "cook", "cooking", "bake", "oven", "ingredient", "meal", "diet", "nutrition"],
+        "travel": ["flight", "hotel", "vacation", "beach", "tourism", "itinerary", "passport", "resort"],
+        "entertainment": ["movie", "series", "celebrity", "song", "lyrics", "album", "netflix"],
+        "lifestyle": ["dating", "horoscope", "astrology", "workout", "gym", "fashion", "makeup"],
+        "creative": ["joke", "poem", "haiku", "story prompt", "fan fiction"],
+    }
+    off_topic_hits = 0
+    for terms in off_topic_terms.values():
+        if any(term in lower_candidate for term in terms):
+            off_topic_hits += 1
+
+    conversational_irrelevance = any(
+        phrase in lower_candidate
+        for phrase in [
+            "tell me a joke",
+            "write a poem",
+            "how to cook",
+            "how do i eat",
+            "what should i eat",
+            "travel plan",
+            "write me a joke",
+            "write me a poem",
+        ]
+    )
+
+    return off_topic_hits >= 1 or conversational_irrelevance
+
+
+def _strip_non_knowledge_markers(text: str) -> str:
+    candidate = str(text or "")
+    candidate = re.sub(r"\*\*File:\s*.+?\*\*", " ", candidate)
+    candidate = candidate.replace("---FILE SEPARATOR---", " ")
+    candidate = re.sub(r"(?mi)^\[(error|warning|notice|canceled)[^\n]*\]", " ", candidate)
+    candidate = re.sub(r"(?mi)^\[image content from [^\n]+\]", " ", candidate)
+    candidate = re.sub(r"(?mi)^\[visual_fallback\]", " ", candidate)
+    candidate = re.sub(r"(?mi)^\[image analysis unavailable\]", " ", candidate)
+    candidate = re.sub(r"\s+", " ", candidate)
+    return candidate.strip()
+
+
+def _looks_like_failed_or_empty_extraction(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return True
+
+    has_failure_marker = bool(re.search(r"(?mi)^\[(error|warning|notice|canceled)[^\n]*\]", candidate))
+    normalized = _strip_non_knowledge_markers(candidate)
+    meaningful_word_count = len(re.findall(r"\b\w+\b", normalized))
+
+    if has_failure_marker and meaningful_word_count < 8:
+        return True
+
+    if meaningful_word_count < 4:
+        return True
 
     return False
 
 
 def _validate_ta9_knowledge_content(content_text: str) -> Tuple[bool, str]:
-    """Comprehensive validation for TA9/IntSight knowledge ingestion with explicit rejection reason."""
+    """Approve by default and reject only obvious junk or irrelevant content."""
     text = (content_text or "").strip()
     if not text:
         return False, "The content is empty. Please provide TA9-related details before adding knowledge."
 
-    fallback_reason = (
-        "The content was rejected because it is not specific to TA9/IntSight. "
-        "Please include concrete IntSight/TA9 details such as module names, admin/configuration steps, "
-        "permissions, data model/entity behavior, integration settings, troubleshooting context, or procedures."
-    )
+    if _looks_like_failed_or_empty_extraction(text):
+        return False, (
+            "The new knowledge could not be extracted into usable content. "
+            "Please provide meaningful text or upload a file that contains readable, relevant information."
+        )
 
-    # Heuristic domain and substance gates (comprehensive)
-    has_strong_ta9_signal = _has_ta9_context(text)
-    has_support_signal = _has_ta9_support_signal(text)
-
-    # If both domain and support signals are strong, approve early to avoid LLM false negatives.
-    # This is especially important for technical integration/configuration runbooks.
-    if has_strong_ta9_signal and has_support_signal:
+    if _has_ta9_context(text) or _has_ta9_support_signal(text):
         return True, "Approved"
 
-    # Reject very short, low-information text unless it has very strong product context.
     text_word_count = len(re.findall(r"\b\w+\b", text))
-    if text_word_count < 12 and not (has_strong_ta9_signal and has_support_signal):
+    if text_word_count < 4:
         return False, (
-            "The content is too short to be useful for support retrieval. "
-            "Please add specific TA9/IntSight details, steps, or technical context."
+            "The content is too short to classify. "
+            "Please add a few more words so it can be stored as useful knowledge."
         )
 
-    if not has_strong_ta9_signal and not OPENAI_API_KEY:
-        return False, fallback_reason
+    if not _looks_clearly_out_of_scope_knowledge(text):
+        return True, "Approved"
 
-    # LLM gate for meaningfulness and domain relevance (authoritative verdict)
-    if OPENAI_API_KEY:
-        prompt = (
-            "You are a strict-but-practical validator for TA9/IntSight RAG ingestion. "
-            "Decide whether the submitted content is meaningful and domain-relevant for TA9.\n\n"
-            "Approval criteria (ALL required):\n"
-            "1) Clearly tied to TA9/IntSight product usage, administration, configuration, integration, troubleshooting, or operations.\n"
-            "2) Contains concrete support-relevant details such as modules, roles/permissions, fields, entities/relations, workflows, settings, queries, endpoints, errors, or procedures.\n"
-            "3) Useful for retrieval by support/admin/analyst teams (can be user-guide, runbook, config guide, FAQ, or troubleshooting instructions).\n"
-            "4) Not purely irrelevant/general text unrelated to TA9/IntSight.\n\n"
-            "If not approved, explain briefly what is missing.\n"
-            "Return ONLY valid JSON with this exact schema:\n"
-            "{\"approved\": true|false, \"reason\": \"short reason\"}\n\n"
-            f"Content to validate:\n{text}"
-        )
-        try:
-            verdict_raw = (call_llm(prompt, temperature=0.0) or "").strip()
-            verdict_text = verdict_raw
-            if verdict_text.startswith("```"):
-                verdict_text = re.sub(r"^```(?:json)?\s*", "", verdict_text)
-                verdict_text = re.sub(r"\s*```$", "", verdict_text).strip()
-            parsed = json.loads(verdict_text)
-            approved = bool(parsed.get("approved", False))
-            reason = str(parsed.get("reason") or "").strip()
-            if approved:
-                # Keep domain integrity: require explicit TA9 context OR strong support signal.
-                if not has_strong_ta9_signal and not has_support_signal:
-                    return False, (
-                        "The content appears structured but lacks clear TA9/IntSight context. "
-                        "Please mention relevant modules, workflows, admin/configuration concepts, or product terms."
-                    )
-                return True, "Approved"
-            return False, reason or fallback_reason
-        except Exception as e:
-            print(f"[KNOWLEDGE][WARN] LLM validation parse/exec failed: {e}")
-            return (False, fallback_reason) if not (has_strong_ta9_signal and has_support_signal) else (True, "Approved")
-
-    return (True, "Approved") if (has_strong_ta9_signal and has_support_signal) else (False, fallback_reason)
+    return False, (
+        "The content looks clearly out of scope for this knowledge base. "
+        "Only obvious junk or unrelated topics are blocked."
+    )
 
 
 def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
@@ -2168,6 +2607,8 @@ def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
 
     q_low = (question or "").lower()
     procedural_intent = _question_has_procedural_intent(question)
+    entity_fact_intent = _question_has_entity_fact_intent(question)
+    broad_coverage_intent = _question_requests_broad_coverage(question)
     if any(term in q_low for term in ["camera", "cameras", "layer", "layers", "situational awareness", "incident", "map"]):
         map_ops_boost = (
             "situational awareness map layers camera request surrounding cameras "
@@ -2179,8 +2620,22 @@ def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
         procedural_boost = "step by step instructions procedure configure setup admin tools system configuration"
         variants.append(f"{base}\n\n{procedural_boost}" if base else procedural_boost)
 
+    if entity_fact_intent:
+        entity_boost = (
+            "company name product names naming policy naming convention "
+            "referred to as alias aliases main platform known as"
+        )
+        variants.append(f"{base}\n\n{entity_boost}" if base else entity_boost)
+
+    if broad_coverage_intent:
+        breadth_boost = (
+            "alternative ways other methods different approaches additional options "
+            "another way supported methods available options compare distinct procedures"
+        )
+        variants.append(f"{base}\n\n{breadth_boost}" if base else breadth_boost)
+
     # Avoid broad TA9 expansion for already-specific procedural questions because it dilutes retrieval.
-    if ta9_mode and not procedural_intent and len(_tokenize_normalized(question)) <= 6:
+    if ta9_mode and not procedural_intent and not entity_fact_intent and not broad_coverage_intent and len(_tokenize_normalized(question)) <= 6:
         ta9_boost = (
             "TA9 / IntSight platform features, capabilities, modules, "
             "system overview, dashboards, admin studio, data model"
@@ -2196,12 +2651,15 @@ def augment_question(question: str) -> str:
     if not question or len(question.split()) > 15:
         # Only augment genuinely short queries
         return question
+
+    if _question_has_entity_fact_intent(question):
+        return question
     
     q_low = question.lower()
     synonyms: List[str] = []
     
     # Minimal, general augmentation for short queries
-    if "how" in q_low or "add" in q_low or "create" in q_low:
+    if (("how" in q_low and "how many" not in q_low and "how much" not in q_low) or "add" in q_low or "create" in q_low):
         synonyms.extend(["how to", "instructions", "steps", "procedure", "create", "add", "setup", "configure"])
     
     if "what" in q_low:
@@ -2227,6 +2685,158 @@ def _question_has_procedural_intent(question: str) -> bool:
         "update", "install", "enable", "disable", "fix", "resolve",
     ]
     return any(term in q for term in procedural_terms)
+
+
+def _question_requests_broad_coverage(question: str) -> bool:
+    q = (question or "").lower().strip()
+    if not q:
+        return False
+
+    explicit_patterns = [
+        r"\bis there (any )?more (ways|options|methods|approaches)\b",
+        r"\bmore (ways|options|methods|approaches)\b",
+        r"\bother (ways|options|methods|approaches)\b",
+        r"\banother (way|option|method|approach)\b",
+        r"\bdifferent (ways|options|methods|approaches)\b",
+        r"\balternative(s)?\b",
+        r"\bwhat else\b",
+        r"\bany other\b",
+        r"\blist (all )?(ways|options|methods|approaches|types|variants)\b",
+        r"\bwhat are the (ways|options|methods|approaches|types)\b",
+        r"\bwhich (ways|options|methods|approaches|types)\b",
+        r"\bsupported (ways|options|methods|approaches)\b",
+        r"\bavailable (ways|options|methods|approaches)\b",
+    ]
+    if any(re.search(pattern, q) for pattern in explicit_patterns):
+        return True
+
+    breadth_terms = ["way", "ways", "option", "options", "method", "methods", "approach", "approaches"]
+    breadth_modifiers = ["more", "other", "another", "different", "alternative", "alternatives", "available", "supported", "all"]
+    return any(term in q for term in breadth_terms) and any(modifier in q for modifier in breadth_modifiers)
+
+
+def _question_has_entity_fact_intent(question: str) -> bool:
+    q = (question or "").lower()
+    if not q:
+        return False
+
+    explicit_patterns = [
+        r"\bhow many\s+(product|products|module|modules|service|services|platform|platforms)\b",
+        r"\bwhich\s+(product|products|module|modules|service|services|platform|platforms)\b",
+        r"\bwhat\s+(product|products|module|modules|service|services|platform|platforms)\b",
+        r"\b(company|vendor|organization|brand)\s+name\b",
+        r"\bproduct\s+name(s)?\b",
+        r"\bnaming\s+(policy|convention|rule|rules)\b",
+        r"\breferred\s+to\s+as\b",
+        r"\bcalled\b",
+        r"\balias(es)?\b",
+        r"\bmain\s+platform\b",
+    ]
+    if any(re.search(pattern, q) for pattern in explicit_patterns):
+        return True
+
+    fact_terms = [
+        "company", "companies", "product", "products", "platform", "platforms",
+        "module", "modules", "vendor", "brand", "name", "names", "named",
+        "naming", "called", "alias", "aliases", "provide", "provides", "offered",
+        "offer", "offers", "created", "create",
+    ]
+    term_hits = sum(1 for term in fact_terms if term in q)
+    return term_hits >= 2
+
+
+def _broad_coverage_signal_score(question: str, text: str) -> float:
+    if not _question_requests_broad_coverage(question) or not text:
+        return 0.0
+
+    t = (text or "").lower()
+    score = 0.0
+    weighted_phrases = [
+        ("alternative", 1.8),
+        ("alternatively", 1.8),
+        ("another way", 2.0),
+        ("other way", 2.0),
+        ("different way", 2.0),
+        ("another method", 2.0),
+        ("other method", 2.0),
+        ("different method", 2.0),
+        ("another option", 1.7),
+        ("other option", 1.7),
+        ("additional option", 1.7),
+        ("additional way", 1.7),
+        ("additional method", 1.7),
+        ("supported method", 1.4),
+        ("supported option", 1.4),
+        ("available method", 1.4),
+        ("available option", 1.4),
+        ("can also be", 1.3),
+        ("can be created from", 1.5),
+        ("can be created via", 1.5),
+        ("can be configured from", 1.5),
+        ("can be done via", 1.5),
+    ]
+    for phrase, weight in weighted_phrases:
+        if phrase in t:
+            score += weight
+
+    if re.search(r"(?m)^\s*(?:[-*]|\d+\.)\s+.+", t):
+        score += 0.9
+
+    method_terms = sum(1 for term in ["way", "ways", "option", "options", "method", "methods", "approach", "approaches"] if term in t)
+    if method_terms >= 2:
+        score += min(1.6, method_terms * 0.35)
+
+    return min(score, 6.0)
+
+
+def _entity_fact_signal_score(question: str, text: str) -> float:
+    if not _question_has_entity_fact_intent(question) or not text:
+        return 0.0
+
+    q = (question or "").lower()
+    t = (text or "").lower()
+    score = 0.0
+
+    shared_pairs = [
+        ("company", 1.2),
+        ("product", 1.2),
+        ("products", 1.2),
+        ("name", 0.8),
+        ("names", 0.8),
+        ("naming", 1.0),
+        ("called", 0.9),
+        ("referred to as", 1.0),
+        ("alias", 0.9),
+        ("main platform", 1.1),
+    ]
+    for token, weight in shared_pairs:
+        if token in q and token in t:
+            score += weight
+
+    if ("company" in t or "company name" in t) and ("product" in t or "product name" in t or "product names" in t):
+        score += 1.8
+
+    high_signal_phrases = [
+        "company name",
+        "product name",
+        "product names",
+        "naming policy",
+        "naming convention",
+        "should be referred to as",
+        "should not be used as part of the product name",
+        "main platform name",
+    ]
+    for phrase in high_signal_phrases:
+        if phrase in t:
+            score += 1.4
+
+    if re.search(r"(?m)^\s*[-*]\s+.+", t) and ("product" in q or "how many" in q or "which" in q):
+        score += 0.8
+
+    if re.search(r"\b(known as|also known as|referred to as|called)\b", t):
+        score += 1.0
+
+    return min(score, 8.0)
 
 
 _LEXICAL_STOPWORDS = {
@@ -2305,10 +2915,193 @@ def _normalize_compact_text(text: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+def _extract_action_object_targets(question: str, max_targets: int = 3) -> List[Tuple[str, str]]:
+    if not question:
+        return []
+
+    normalized_question = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9_\-\s]", " ", str(question or "").lower())).strip()
+    if not normalized_question:
+        return []
+
+    action_patterns = [
+        ("set up", "set up"),
+        ("setup", "setup"),
+        ("configure", "configure"),
+        ("create", "create"),
+        ("add", "add"),
+        ("edit", "edit"),
+        ("update", "update"),
+        ("delete", "delete"),
+        ("remove", "remove"),
+        ("install", "install"),
+        ("enable", "enable"),
+        ("disable", "disable"),
+        ("fix", "fix"),
+        ("resolve", "resolve"),
+    ]
+    filler_terms = {
+        "a", "an", "the", "new", "another", "other", "more", "additional", "existing",
+        "selected", "target", "current", "available", "supported", "different",
+    }
+    boundary_pattern = re.compile(
+        r"\b(?:from|using|with|by|via|through|into|in|on|for|to|when|if|after|before|because|and|or|but)\b"
+    )
+
+    targets: List[Tuple[str, str]] = []
+    seen = set()
+    for raw_action, canonical_action in action_patterns:
+        for match in re.finditer(rf"\b{re.escape(raw_action)}\b", normalized_question):
+            tail = normalized_question[match.end():].strip()
+            if not tail:
+                continue
+            tail = boundary_pattern.split(tail, maxsplit=1)[0].strip()
+            raw_tokens = re.findall(r"[a-z0-9_\-]+", tail)
+            object_tokens: List[str] = []
+            for raw_token in raw_tokens:
+                if raw_token in filler_terms:
+                    continue
+                token = _normalize_term(raw_token)
+                if len(token) <= 2 or token in _LEXICAL_STOPWORDS:
+                    continue
+                object_tokens.append(token)
+                if len(object_tokens) >= 4:
+                    break
+            if not object_tokens:
+                continue
+            object_phrase = " ".join(object_tokens)
+            key = (canonical_action, object_phrase)
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append(key)
+            if len(targets) >= max_targets:
+                return targets
+    return targets
+
+
+def _best_local_overlap_ratio(question: str, text: str, max_segments: int = 80) -> float:
+    if not question or not text:
+        return 0.0
+
+    segments = [
+        segment.strip()
+        for segment in re.split(r"[\n\r]+|(?<=[\.;:!?])\s+", str(text or ""))
+        if segment and segment.strip()
+    ]
+    best = 0.0
+    for segment in segments[:max_segments]:
+        overlap = _lexical_overlap_ratio(question, segment)
+        if overlap > best:
+            best = overlap
+            if best >= 0.95:
+                break
+    return best
+
+
+def _procedural_alignment_score(question: str, text: str) -> float:
+    if not _question_has_procedural_intent(question) or not text:
+        return 0.0
+
+    targets = _extract_action_object_targets(question)
+    if not targets:
+        return 0.0
+
+    compact_text = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9_\-\s]", " ", str(text or "").lower())).strip()
+    if not compact_text:
+        return 0.0
+
+    filler_group = r"(?:a|an|the|new|another|other|more|additional|existing|selected|target|current)"
+    nominal_forms = {
+        "create": ["create", "creates", "created", "creating", "creation"],
+        "add": ["add", "adds", "added", "adding", "addition"],
+        "configure": ["configure", "configures", "configured", "configuring", "configuration"],
+        "setup": ["setup", "set up", "setting up"],
+        "set up": ["setup", "set up", "setting up"],
+        "edit": ["edit", "edits", "edited", "editing"],
+        "update": ["update", "updates", "updated", "updating"],
+        "delete": ["delete", "deletes", "deleted", "deleting", "deletion"],
+        "remove": ["remove", "removes", "removed", "removing", "removal"],
+        "install": ["install", "installs", "installed", "installing", "installation"],
+        "enable": ["enable", "enables", "enabled", "enabling", "enablement"],
+        "disable": ["disable", "disables", "disabled", "disabling"],
+        "fix": ["fix", "fixes", "fixed", "fixing", "resolution"],
+        "resolve": ["resolve", "resolves", "resolved", "resolving", "resolution"],
+    }
+
+    score = 0.0
+    for action, object_phrase in targets:
+        object_pattern = r"\b" + r"\s+".join(re.escape(part) for part in object_phrase.split()) + r"\b"
+        action_forms = nominal_forms.get(action, [action])
+
+        direct_patterns = [
+            rf"\b{re.escape(action_form)}\b(?:\s+{filler_group}){{0,3}}\s+{object_pattern}"
+            for action_form in action_forms
+        ]
+        nominal_patterns = [
+            rf"{object_pattern}(?:\s+{filler_group}){{0,2}}\s+\b{re.escape(action_form)}\b"
+            for action_form in action_forms
+        ]
+
+        has_direct_alignment = any(re.search(pattern, compact_text) for pattern in direct_patterns)
+        has_nominal_alignment = any(re.search(pattern, compact_text) for pattern in nominal_patterns)
+        object_present = re.search(object_pattern, compact_text) is not None
+
+        if has_direct_alignment:
+            score += 3.2
+            continue
+        if has_nominal_alignment:
+            score += 1.6
+            continue
+        if object_present:
+            score -= 1.4
+
+    return max(-4.0, min(score, 6.0))
+
+
+def _filter_low_context_source_candidates(question: str, candidates: List[dict], max_sources: int = 6) -> List[dict]:
+    if not candidates:
+        return []
+
+    question_is_procedural = _question_has_procedural_intent(question)
+    has_action_targets = bool(_extract_action_object_targets(question))
+    top_score = max(0.01, float(candidates[0].get("score") or 0.01))
+    filtered: List[dict] = []
+
+    for idx, candidate in enumerate(candidates):
+        if idx == 0:
+            filtered.append(candidate)
+            continue
+
+        score = float(candidate.get("score") or 0.0)
+        overlap_ratio = float(candidate.get("overlap_ratio") or 0.0)
+        title_overlap = float(candidate.get("title_overlap") or 0.0)
+        local_overlap_ratio = float(candidate.get("local_overlap_ratio") or 0.0)
+        phrase_hits = int(candidate.get("phrase_hits") or 0)
+        procedural_alignment = float(candidate.get("procedural_alignment") or 0.0)
+
+        should_keep = True
+        if question_is_procedural and has_action_targets:
+            if procedural_alignment <= -0.5 and phrase_hits == 0 and local_overlap_ratio < 0.34:
+                should_keep = False
+        if should_keep and question_is_procedural:
+            if score < (top_score * 0.45) and max(overlap_ratio, title_overlap, local_overlap_ratio) < 0.26 and phrase_hits == 0:
+                should_keep = False
+        elif should_keep:
+            if score < (top_score * 0.35) and max(overlap_ratio, title_overlap, local_overlap_ratio) < 0.16 and phrase_hits == 0:
+                should_keep = False
+
+        if should_keep:
+            filtered.append(candidate)
+        if len(filtered) >= max_sources:
+            break
+
+    return filtered[:max_sources]
+
+
 def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
     """
     Simple, general-purpose lexical score.
-    Avoid domain-specific biases; reward token overlap and user-added content.
+    Avoid domain-specific or collection-specific biases; reward token overlap only.
     """
     if doc is None:
         doc = ""
@@ -2357,17 +3150,13 @@ def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
                 heading_hits += 1
     if heading_hits > 0:
         score += min(2.0, heading_hits * 0.8)
+
+    score += _entity_fact_signal_score(question, f"{source}\n{d}")
     
     # Source name match
     for tok in q_tokens:
         if tok in source:
             score += 1.0
-    
-    # User-added content priority
-    if meta and meta.get("priority") in ["user_upload", "user_upload_high"]:
-        score += 2.0
-    if meta and meta.get("supersedes"):
-        score += 1.0
     
     return score
 
@@ -2425,11 +3214,8 @@ def _smart_deduplicate_and_diversify(
             continue
         
         source = meta.get("source", "unknown") if meta else "unknown"
-        col = meta.get("collection", "unknown") if meta else "unknown"
         source_key = source  # Use full source as key
-        
-        # Memory collection gets priority: allow more chunks from memory sources
-        max_allowed = 5 if col == "user_knowledge" else max_chunks_per_source
+        max_allowed = max_chunks_per_source
         
         # Check if we've already included max chunks from this source
         if source_key in source_chunk_count and source_chunk_count[source_key] >= max_allowed:
@@ -2739,6 +3525,65 @@ def _format_history_for_prompt(messages: List[Dict[str, str]], max_messages: int
     return "\n".join(lines)
 
 
+def _question_looks_like_followup(question: str) -> bool:
+    candidate = str(question or "").strip().lower()
+    if not candidate:
+        return False
+
+    followup_starters = (
+        "and ", "also ", "what about", "how about", "why ", "then ", "so ",
+        "can you elaborate", "can you explain more", "tell me more", "continue",
+        "based on that", "for that", "for this", "regarding that", "regarding this",
+    )
+    if candidate.startswith(followup_starters):
+        return True
+
+    referential_patterns = [
+        r"\bthat\b",
+        r"\bthis\b",
+        r"\bthese\b",
+        r"\bthose\b",
+        r"\bit\b",
+        r"\bthey\b",
+        r"\bthem\b",
+        r"\bthe previous\b",
+        r"\bthe last\b",
+        r"\bearlier\b",
+        r"\babove\b",
+        r"\bbefore\b",
+    ]
+    short_question = len(candidate) <= 120
+    if short_question and any(re.search(pattern, candidate) for pattern in referential_patterns):
+        return True
+
+    # Standalone questions with explicit nouns/topics should not inherit prior context.
+    return False
+
+
+def _should_use_history_for_question(
+    question: str,
+    stored_history: List[Dict[str, str]],
+    explicit_is_followup: bool = False,
+) -> bool:
+    if not stored_history:
+        return False
+
+    if _question_looks_like_followup(question):
+        return True
+
+    if not explicit_is_followup:
+        return False
+
+    if _question_has_entity_fact_intent(question) or _question_requests_broad_coverage(question):
+        return False
+
+    explicit_topic_tokens = [
+        token for token in _tokenize_normalized(question)
+        if token not in _LEXICAL_STOPWORDS and token not in {"how", "step", "steps", "way", "ways", "method", "methods"}
+    ]
+    return len(explicit_topic_tokens) < 3
+
+
 def _question_requires_specifics(question: str) -> bool:
     """Detect questions that require explicit, concrete details instead of generic guidance."""
     if not question:
@@ -2759,6 +3604,8 @@ def _question_requires_specifics(question: str) -> bool:
         r"\bcommand(s)?\b",
         r"\bpath(s)?\b",
         r"\bname(s)?\b",
+        r"\bhow many\b",
+        r"\bcount\b",
     ]
     return any(re.search(p, q) for p in patterns)
 
@@ -2778,6 +3625,7 @@ def _enforce_specific_grounded_answer(question: str, context_text: str, answer: 
         "Rules:\n"
         "1) Keep only details supported by CONTEXT.\n"
         "2) If user asks for explicit lists (columns/fields/steps/commands/etc), provide explicit bullet list.\n"
+        "2.1) If the context explicitly lists items and the user asks how many, count only those explicit items and state the count plus the item names.\n"
         "3) If exact details are missing in CONTEXT, explicitly say which exact details are missing.\n"
         "4) Do not output vague placeholders like 'necessary columns' when specifics are available.\n"
         "5) Never invent values, names, paths, or commands.\n\n"
@@ -2793,6 +3641,52 @@ def _enforce_specific_grounded_answer(question: str, context_text: str, answer: 
     except Exception as e:
         print(f"[API][CHAT][WARN] Specificity enforcement failed: {e}")
         return answer
+
+
+def _looks_like_noncode_fenced_block(language: str, content: str) -> bool:
+    lang = str(language or "").strip().lower()
+    if lang in {"bash", "sh", "shell", "zsh", "powershell", "ps1", "python", "py", "sql", "json", "yaml", "yml", "xml", "javascript", "js", "typescript", "ts", "html", "css", "ini", "toml", "diff", "dockerfile"}:
+        return False
+
+    lines = [line.rstrip() for line in str(content or "").strip().splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    code_like_count = sum(1 for line in lines if _looks_like_command_or_code_line(line))
+    ui_like_count = sum(
+        1
+        for line in lines
+        if re.search(r"\b(click|select|open|navigate|button|tab|screen|ui|portainer|admin studio|field|dropdown|checkbox|page|section)\b", line, re.IGNORECASE)
+    )
+    key_value_count = sum(1 for line in lines if re.match(r"^[A-Za-z][A-Za-z0-9_ /()-]{1,40}:\s+.+$", line))
+
+    if code_like_count == 0 and (ui_like_count > 0 or key_value_count > 0):
+        return True
+    if code_like_count <= max(1, len(lines) // 4) and lang in {"", "text", "plaintext", "plain", "md", "markdown"}:
+        return True
+    return False
+
+
+def _normalize_noncode_fenced_blocks(answer: str) -> str:
+    if not answer or "```" not in answer:
+        return answer
+
+    pattern = re.compile(r"```([A-Za-z0-9_+-]*)\n([\s\S]*?)```", re.MULTILINE)
+
+    def _replace(match: re.Match) -> str:
+        language = match.group(1) or ""
+        content = (match.group(2) or "").strip("\n")
+        if not _looks_like_noncode_fenced_block(language, content):
+            return match.group(0)
+
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        if not lines:
+            return ""
+        if all(re.match(r"^[A-Za-z][A-Za-z0-9_ /()-]{1,40}:\s+.+$", line) for line in lines):
+            return "\n".join(f"- {line}" for line in lines)
+        return "  \n".join(lines)
+
+    return pattern.sub(_replace, answer)
 
 
 def _get_vector_collection(collection_name: str):
@@ -3087,6 +3981,11 @@ def _count_text_tokens(text: str) -> int:
     return len(encoding.encode(raw_text, disallowed_special=()))
 
 
+def _estimate_rows_token_count(rows: List[dict]) -> int:
+    # Fast approximation for huge documents: avoids expensive tokenizer passes.
+    return sum(len(str((row or {}).get("content") or "")) // 4 for row in rows)
+
+
 def _count_collection_tokens(collection_name: str) -> int:
     summaries = _group_collection_documents(collection_name)
     return sum(int(item.get("token_count", 0) or 0) for item in summaries)
@@ -3283,15 +4182,29 @@ def _build_vector_document_detail(
         include_embeddings=include_embeddings,
     )
     chunk_boundaries = _build_chunk_boundaries(rows)
-    merged_content = _merge_chunk_texts([row["content"] for row in rows])
+    merged_content: Optional[str] = None
+    cached_payload: Optional[dict] = None
+    if include_full_content:
+        cached_payload = _get_cached_vector_document_payload(collection_name, source)
+        if cached_payload is not None:
+            merged_content = str(cached_payload.get("full_content") or "")
+        else:
+            merged_content = _merge_chunk_texts([row["content"] for row in rows])
     full_content = merged_content if include_full_content else None
-    token_count = _count_text_tokens(merged_content)
+    if merged_content is not None:
+        if cached_payload is not None:
+            token_count = int(cached_payload.get("token_count") or 0)
+        else:
+            token_count = _count_text_tokens(merged_content)
+            _store_cached_vector_document_payload(collection_name, source, merged_content, token_count)
+    else:
+        token_count = _estimate_rows_token_count(rows)
     title = _build_document_title(source, rows[0]["content"] if rows else "")
     input_type = _infer_vector_document_input_type(
         collection_name,
         source,
         [{"metadata": row["metadata"]} for row in rows],
-        merged_content,
+        merged_content or "",
     )
     updated_at = None
     for row in rows:
@@ -3419,6 +4332,8 @@ def _is_generic_source_title(title: str, source: str = "") -> bool:
 def _should_lock_primary_source(question: str, candidates: List[dict]) -> bool:
     if not _question_has_procedural_intent(question) or not candidates:
         return False
+    if _question_requests_broad_coverage(question):
+        return False
 
     primary = candidates[0]
     secondary = candidates[1] if len(candidates) > 1 else None
@@ -3490,6 +4405,8 @@ def _build_source_context_candidates(
         return []
 
     question_is_procedural = _question_has_procedural_intent(question)
+    entity_fact_intent = _question_has_entity_fact_intent(question)
+    broad_coverage_intent = _question_requests_broad_coverage(question)
     prelim_ranked = sorted(
         grouped.values(),
         key=lambda item: (
@@ -3513,28 +4430,42 @@ def _build_source_context_candidates(
             continue
 
         full_content = _merge_chunk_texts([row["content"] for row in rows])
-        excerpt_limit = 2600 if question_is_procedural else 1800
+        excerpt_limit = 3200 if broad_coverage_intent else (2600 if question_is_procedural else 1800)
         excerpt = _merge_chunk_texts([row["content"] for row in rows], max_chars=excerpt_limit)
         seed_meta = rows[0]["metadata"] or entry["seed_meta"]
         top_chunk_signals = sorted(entry.get("chunk_signal_scores") or [0.0], reverse=True)[:3]
         chunk_signal_strength = sum(top_chunk_signals)
+        if entity_fact_intent:
+            chunk_signal_strength = min(chunk_signal_strength, 7.5)
         overlap_ratio = _lexical_overlap_ratio(question, full_content)
+        local_overlap_ratio = _best_local_overlap_ratio(question, full_content)
         lexical_score = lexical_boost_score(question, full_content, seed_meta)
+        title = _build_document_title(entry["source"], rows[0]["content"] if rows else "")
+        entity_fact_bonus = _entity_fact_signal_score(question, f"{title}\n{full_content}")
+        broad_coverage_bonus = _broad_coverage_signal_score(question, f"{title}\n{full_content}")
+        procedural_alignment = _procedural_alignment_score(question, f"{title}\n{full_content}")
         procedural_markers = _count_procedural_markers(full_content)
         procedural_bonus = min(4.0, procedural_markers * 0.8) if question_is_procedural else 0.0
-        title = _build_document_title(entry["source"], rows[0]["content"] if rows else "")
         title_overlap = _lexical_overlap_ratio(question, title)
         source_overlap = _lexical_overlap_ratio(question, entry["source"])
         phrase_hits = _count_exact_phrase_hits(question, f"{title}\n{full_content}")
         chunk_count_penalty = min(6.0, math.log(max(1, len(rows)), 2) * 0.9) if len(rows) > 8 else 0.0
+        if entity_fact_intent and len(rows) > 4:
+            chunk_count_penalty += min(3.5, math.log(max(1, len(rows)), 2) * 0.9)
         generic_penalty = 4.5 if question_is_procedural and _is_generic_source_title(title, entry["source"]) else 0.0
+        compact_fact_bonus = 1.5 if entity_fact_intent and len(rows) <= 3 and entity_fact_bonus > 0 else 0.0
         source_score = (
             chunk_signal_strength
             + lexical_score
+            + entity_fact_bonus
+            + broad_coverage_bonus
+            + compact_fact_bonus
             + (overlap_ratio * 8.0)
+            + (local_overlap_ratio * 6.5)
             + (title_overlap * 5.0)
             + (source_overlap * 4.0)
             + procedural_bonus
+            + procedural_alignment
             + (phrase_hits * 1.5)
             - chunk_count_penalty
             - generic_penalty
@@ -3552,10 +4483,14 @@ def _build_source_context_candidates(
                 "score": round(source_score, 4),
                 "source_overlap": round(source_overlap, 4),
                 "overlap_ratio": round(overlap_ratio, 4),
+                "local_overlap_ratio": round(local_overlap_ratio, 4),
                 "title_overlap": round(title_overlap, 4),
                 "phrase_hits": phrase_hits,
                 "procedural_markers": procedural_markers,
+                "procedural_alignment": round(procedural_alignment, 4),
                 "lexical_score": round(lexical_score, 4),
+                "entity_fact_bonus": round(entity_fact_bonus, 4),
+                "broad_coverage_bonus": round(broad_coverage_bonus, 4),
                 "chunk_signal_strength": round(chunk_signal_strength, 4),
                 "chunk_count_penalty": round(chunk_count_penalty, 4),
                 "generic_penalty": generic_penalty,
@@ -3578,7 +4513,7 @@ def _build_source_context_candidates(
             f"collection={candidate['collection_name']} source={candidate['source']} chunks={candidate['chunk_count']}"
         )
 
-    return source_candidates[:max_sources]
+    return _filter_low_context_source_candidates(question, source_candidates, max_sources=max_sources)
 
 
 def _build_global_lexical_source_candidates(question: str, max_sources: int = 6) -> List[dict]:
@@ -3586,8 +4521,10 @@ def _build_global_lexical_source_candidates(question: str, max_sources: int = 6)
         return []
 
     question_is_procedural = _question_has_procedural_intent(question)
+    entity_fact_intent = _question_has_entity_fact_intent(question)
+    broad_coverage_intent = _question_requests_broad_coverage(question)
     collected: List[dict] = []
-    for collection_name in (MEMORY_COLLECTION_NAME, COLLECTION_NAME):
+    for collection_name in sorted((COLLECTION_NAME, MEMORY_COLLECTION_NAME)):
         try:
             target_collection = _get_vector_collection(collection_name)
             raw = target_collection.get(include=["documents", "metadatas"])
@@ -3619,20 +4556,32 @@ def _build_global_lexical_source_candidates(question: str, max_sources: int = 6)
             title = _build_document_title(source, sorted_rows[0]["content"] if sorted_rows else "")
             title_overlap = _lexical_overlap_ratio(question, title)
             excerpt_overlap = _lexical_overlap_ratio(question, excerpt)
+            local_overlap_ratio = _best_local_overlap_ratio(question, excerpt)
             source_overlap = _lexical_overlap_ratio(question, source)
             lexical_score = lexical_boost_score(question, f"{title}\n{excerpt}", sorted_rows[0]["metadata"])
+            entity_fact_bonus = _entity_fact_signal_score(question, f"{title}\n{excerpt}")
+            broad_coverage_bonus = _broad_coverage_signal_score(question, f"{title}\n{excerpt}")
+            procedural_alignment = _procedural_alignment_score(question, f"{title}\n{excerpt}")
             phrase_hits = _count_exact_phrase_hits(question, f"{title}\n{excerpt}")
             procedural_markers = _count_procedural_markers(excerpt)
             procedural_bonus = min(4.0, procedural_markers * 0.8) if question_is_procedural else 0.0
             chunk_count_penalty = min(6.0, math.log(max(1, len(sorted_rows)), 2) * 0.9) if len(sorted_rows) > 8 else 0.0
+            if entity_fact_intent and len(sorted_rows) > 4:
+                chunk_count_penalty += min(3.5, math.log(max(1, len(sorted_rows)), 2) * 0.9)
             generic_penalty = 4.5 if question_is_procedural and _is_generic_source_title(title, source) else 0.0
+            compact_fact_bonus = 1.5 if entity_fact_intent and len(sorted_rows) <= 3 and entity_fact_bonus > 0 else 0.0
             score = (
                 lexical_score
+                + entity_fact_bonus
+                + broad_coverage_bonus
+                + compact_fact_bonus
                 + (title_overlap * 7.0)
                 + (excerpt_overlap * 8.5)
+                + (local_overlap_ratio * 6.0)
                 + (source_overlap * 4.0)
                 + (phrase_hits * 1.3)
                 + procedural_bonus
+                + procedural_alignment
                 - chunk_count_penalty
                 - generic_penalty
             )
@@ -3651,10 +4600,14 @@ def _build_global_lexical_source_candidates(question: str, max_sources: int = 6)
                     "score": round(score, 4),
                     "source_overlap": round(source_overlap, 4),
                     "overlap_ratio": round(excerpt_overlap, 4),
+                    "local_overlap_ratio": round(local_overlap_ratio, 4),
                     "title_overlap": round(title_overlap, 4),
                     "phrase_hits": phrase_hits,
                     "procedural_markers": procedural_markers,
+                    "procedural_alignment": round(procedural_alignment, 4),
                     "lexical_score": round(lexical_score, 4),
+                    "entity_fact_bonus": round(entity_fact_bonus, 4),
+                    "broad_coverage_bonus": round(broad_coverage_bonus, 4),
                     "chunk_count_penalty": round(chunk_count_penalty, 4),
                     "generic_penalty": generic_penalty,
                     "matched_chunk_ids": [],
@@ -3669,7 +4622,7 @@ def _build_global_lexical_source_candidates(question: str, max_sources: int = 6)
             f"[LEXICAL_RESCUE] score={candidate['score']:.2f} collection={candidate['collection_name']} "
             f"source={candidate['source']} chunks={candidate['chunk_count']}"
         )
-    return collected[:max_sources]
+    return _filter_low_context_source_candidates(question, collected, max_sources=max_sources)
 
 
 def _merge_source_candidate_lists(*candidate_lists: List[dict], max_sources: int = 6) -> List[dict]:
@@ -3694,6 +4647,11 @@ def _merge_source_candidate_lists(*candidate_lists: List[dict], max_sources: int
                 existing["full_content"] = candidate.get("full_content")
             if len(str(candidate.get("excerpt") or "")) > len(str(existing.get("excerpt") or "")):
                 existing["excerpt"] = candidate.get("excerpt")
+
+            for field_name in ("overlap_ratio", "local_overlap_ratio", "title_overlap", "source_overlap", "procedural_alignment"):
+                existing[field_name] = max(float(existing.get(field_name) or 0.0), float(candidate.get(field_name) or 0.0))
+            existing["phrase_hits"] = max(int(existing.get("phrase_hits") or 0), int(candidate.get("phrase_hits") or 0))
+            existing["procedural_markers"] = max(int(existing.get("procedural_markers") or 0), int(candidate.get("procedural_markers") or 0))
 
             existing_ids = list(existing.get("matched_chunk_ids") or [])
             for chunk_id in list(candidate.get("matched_chunk_ids") or []):
@@ -3720,6 +4678,7 @@ def _llm_select_source_candidates(question: str, candidates: List[dict], max_sou
         return candidates[:max_sources]
 
     shortlist = candidates[: min(6, len(candidates))]
+    broad_coverage_intent = _question_requests_broad_coverage(question)
     candidate_lines: List[str] = []
     for idx, candidate in enumerate(shortlist, start=1):
         candidate_lines.append(
@@ -3738,7 +4697,17 @@ def _llm_select_source_candidates(question: str, candidates: List[dict], max_sou
         "You are a retrieval ranking specialist for a RAG system.\n"
         "Pick the document candidates that best answer the user question.\n"
         "Prefer candidates that directly contain the exact procedure, exact configuration steps, exact field names, or exact command/config examples asked for.\n"
+        "For naming, company/product identity, alias, or count/list questions, prefer candidates that explicitly define or enumerate those facts, even if they are shorter than broad manuals.\n"
+        "Reject adjacent-task candidates that share keywords but answer a different task. For example, if the question is how to create a data model, a document about creating entities from a data model is not a valid candidate.\n"
         "De-prioritize broad overview or generic admin guides when a narrower exact guide exists.\n"
+    )
+    if broad_coverage_intent:
+        selector_prompt += (
+            "When the user asks for more ways, alternatives, other options, supported methods, or broader coverage, "
+            "keep multiple distinct candidates that cover different valid approaches. Do not collapse to a single "
+            "candidate unless the rest are duplicates.\n"
+        )
+    selector_prompt += (
         "Return strict JSON with this shape only: {\"ordered_candidates\":[1,2],\"reason\":\"short reason\"}.\n\n"
         f"Question:\n{question}\n\n"
         f"Candidates:\n\n{candidates_block}\n"
@@ -3798,6 +4767,11 @@ class KnowledgeAddRequest(BaseModel):
     mode: str  # "content"
     text: Optional[str] = None
     files: Optional[List[Dict[str, str]]] = None
+    request_id: Optional[str] = None
+
+
+class KnowledgeCancelRequest(BaseModel):
+    request_id: str
 
 
 class ChatResponse(BaseModel):
@@ -4015,6 +4989,8 @@ def vector_db_update_document(req: VectorDbDocumentUpdateRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to update document: {exc}")
 
+    _invalidate_cached_vector_document_payload(req.collection_name, req.source)
+
     return {
         "message": "Document updated successfully.",
         "source": req.source,
@@ -4044,6 +5020,8 @@ def vector_db_delete_document(req: VectorDbDocumentDeleteRequest):
         print(f"[API][VECTOR_DB][ERROR] delete failed: {exc}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to delete document: {exc}")
+
+    _invalidate_cached_vector_document_payload(req.collection_name, req.source)
 
     return {
         "message": "Document deleted successfully.",
@@ -4108,106 +5086,183 @@ def update_system_prompt(req: SystemPromptUpdateRequest):
     }
 
 
-@app.post("/knowledge/add")
-def knowledge_add(req: KnowledgeAddRequest):
-    """Add a knowledge item from user-provided content."""
-    try:
-        mode = (req.mode or "").strip().lower()
-        content_text = ""
-        source_name = ""
-        target_collection = memory_collection
-        collection_label = "user_knowledge"
+def _knowledge_add_process(req: KnowledgeAddRequest, request_id: Optional[str]) -> dict:
+    """Core knowledge ingestion logic — runs in a background thread.
+    Returns a result dict with at least {approved: bool}; may include {canceled: bool}.
+    """
+    _ingest_log("knowledge_add start", request_id, force=True)
+    content_text = ""
+    source_name = ""
+    collection_label = "user_knowledge"
+    mode = (req.mode or "").strip().lower()
 
-        if mode == "content":
-            text_part = (req.text or "").strip()
-            file_part = ""
-            if req.files:
-                file_part = build_file_context(req.files, describe_image_func=_describe_image_via_vision)
-            content_text = "\n\n".join([p for p in [text_part, file_part] if p])
-            source_name = f"user:content:{uuid.uuid4()}"
-        else:
-            raise HTTPException(status_code=400, detail="mode must be content")
+    if mode == "content":
+        text_part = (req.text or "").strip()
+        file_part = ""
+        if req.files:
+            file_part = build_file_context(
+                req.files,
+                describe_image_func=_describe_image_via_vision,
+                cancel_check=lambda: _is_knowledge_request_cancelled(request_id),
+                request_id=request_id,
+            )
+        content_text = "\n\n".join([p for p in [text_part, file_part] if p])
+        source_name = f"user:content:{uuid.uuid4()}"
+    else:
+        return {"approved": False, "message": "mode must be content"}
 
-        if not content_text.strip():
-            raise HTTPException(status_code=400, detail="No content to ingest")
+    if not content_text.strip():
+        return {"approved": False, "message": "No content to ingest"}
 
-        similar_sources = _find_similar_knowledge_sources(content_text)
-        priority = "user_upload_high" if similar_sources else "user_upload"
+    if _is_knowledge_request_cancelled(request_id):
+        _ingest_log("knowledge_add canceled before embedding started", request_id, force=True)
+        return {"approved": False, "message": "Upload stopped by user.", "canceled": True}
 
-        # Strict TA9 meaningfulness validation
-        is_valid_ta9_content, rejection_reason = _validate_ta9_knowledge_content(content_text)
-        if not is_valid_ta9_content:
+    _ingest_log(f"knowledge_add content_ready len={len(content_text)}", request_id, force=True)
+
+    # Validation policy: reject unusable or clearly irrelevant knowledge for both free text and files.
+    is_valid_ta9_content, rejection_reason = _validate_ta9_knowledge_content(content_text)
+    if not is_valid_ta9_content:
+        return {"approved": False, "message": rejection_reason}
+
+    # Chunk, embed, and add with the same retrieval weight as every other document.
+    input_type = "file" if req.files or _looks_like_uploaded_file_content(content_text) else "free_text"
+    chunks = chunk_text_preserve_table_rows(content_text) if input_type == "file" else chunk_text(content_text)
+    if not chunks:
+        return {"approved": False, "message": "No chunks generated from content"}
+
+    _ingest_log(f"embedding phase start chunks_total={len(chunks)} input_type={input_type}", request_id, force=True)
+
+    ids: List[str] = []
+    docs: List[str] = []
+    metas: List[dict] = []
+    embeds: List[List[float]] = []
+    uploaded_at = datetime.utcnow().isoformat() + "Z"
+
+    for i, ch in enumerate(chunks):
+        if _is_knowledge_request_cancelled(request_id):
+            _ingest_log(
+                f"cancel acknowledged during embedding at chunk={i + 1}/{len(chunks)} partial_chunks_added={len(ids)}",
+                request_id,
+                force=True,
+            )
             return {
                 "approved": False,
-                "message": rejection_reason,
-            }
-
-        # Chunk + embed + add to collection with priority metadata
-        input_type = "file" if req.files or _looks_like_uploaded_file_content(content_text) else "free_text"
-        chunks = chunk_text_preserve_table_rows(content_text) if input_type == "file" else chunk_text(content_text)
-        if not chunks:
-            raise HTTPException(status_code=400, detail="No chunks generated from content")
-
-        ids: List[str] = []
-        docs: List[str] = []
-        metas: List[dict] = []
-        embeds: List[List[float]] = []
-        uploaded_at = datetime.utcnow().isoformat() + "Z"
-
-        for i, ch in enumerate(chunks):
-            try:
-                emb = embed_text(ch)
-            except Exception as e:
-                print(f"[KNOWLEDGE][ERROR] Embedding failed chunk={i}: {e}")
-                traceback.print_exc()
-                continue
-            metadata = {
+                "message": "Embedding stopped by user.",
+                "chunks_added": len(ids),
                 "source": source_name,
-                "chunk": i,
-                "priority": priority,
-                "uploaded_at": uploaded_at,
-                "mode": mode,
-                "input_type": input_type,
-                "path": "",
-                "collection": collection_label,
+                "canceled": True,
             }
+        try:
+            chunk_kind = "text"
             if ch.startswith(TABLE_ROW_START_TAG):
-                metadata["chunk_type"] = "table_row"
-                metadata.update(extract_table_row_metadata(ch))
-            else:
-                metadata["chunk_type"] = "text"
-            if similar_sources:
-                metadata["supersedes"] = similar_sources
-            ids.append(str(uuid.uuid4()))
-            docs.append(ch)
-            metas.append(metadata)
-            embeds.append(emb)
-
-        if not ids:
-            raise HTTPException(status_code=500, detail="Failed to embed any chunks")
-
-        target_collection.add(ids=ids, documents=docs, metadatas=metas, embeddings=embeds)
-        return {
-            "approved": True,
-            "message": "Knowledge added successfully and prioritized.",
-            "chunks_added": len(ids),
+                chunk_kind = "table_row"
+            elif "[IMAGE_BLOCK_ANALYSIS]" in ch or "[PAGE_IMAGE_ANALYSIS_FALLBACK]" in ch:
+                chunk_kind = "image_description"
+            _ingest_log(
+                f"embedding chunk={i + 1}/{len(chunks)} kind={chunk_kind} chars={len(ch)}",
+                request_id,
+            )
+            emb = embed_text(ch)
+        except Exception as e:
+            print(f"[KNOWLEDGE][ERROR] Embedding failed chunk={i}: {e}")
+            traceback.print_exc()
+            return {
+                "approved": False,
+                "message": "Knowledge upload failed during embedding. Nothing was saved to the database.",
+                "failed_chunk": i,
+                "source": source_name,
+            }
+        metadata = {
             "source": source_name,
-            "priority": priority,
-            "supersedes": similar_sources,
+            "chunk": i,
+            "uploaded_at": uploaded_at,
+            "mode": mode,
+            "input_type": input_type,
+            "path": "",
+            "collection": collection_label,
         }
+        if ch.startswith(TABLE_ROW_START_TAG):
+            metadata["chunk_type"] = "table_row"
+            metadata.update(extract_table_row_metadata(ch))
+        else:
+            metadata["chunk_type"] = "text"
+        ids.append(str(uuid.uuid4()))
+        docs.append(ch)
+        metas.append(metadata)
+        embeds.append(emb)
+
+    if not ids:
+        return {"approved": False, "message": "Failed to embed any chunks"}
+
+    memory_collection.add(ids=ids, documents=docs, metadatas=metas, embeddings=embeds)
+    _ingest_log(f"knowledge_add complete chunks_added={len(ids)}", request_id, force=True)
+    return {
+        "approved": True,
+        "message": "Knowledge added successfully.",
+        "chunks_added": len(ids),
+        "source": source_name,
+    }
+
+
+@app.post("/knowledge/add")
+def knowledge_add(req: KnowledgeAddRequest):
+    """Start knowledge ingestion in a background thread and return immediately.
+    Poll GET /knowledge/status/{request_id} for progress and the final result.
+    """
+    mode = (req.mode or "").strip().lower()
+    if mode != "content":
+        raise HTTPException(status_code=400, detail="mode must be content")
+
+    request_id = (req.request_id or "").strip() or str(uuid.uuid4())
+    try:
+        _mark_knowledge_request_started(request_id)
+        _store_job_result(request_id, {"status": "processing", "started_at": datetime.utcnow().isoformat() + "Z"})
+        _ingest_log("knowledge_add queued as background job", request_id, force=True)
+
+        def _run() -> None:
+            try:
+                result = _knowledge_add_process(req, request_id)
+                _store_job_result(request_id, {"status": "done", **result})
+            except Exception as exc:
+                print(f"[API][KNOWLEDGE][ERROR] background job exception: {exc}")
+                traceback.print_exc()
+                _store_job_result(request_id, {"status": "done", "approved": False, "message": f"Processing error: {exc}"})
+            finally:
+                _clear_knowledge_request(request_id)
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"status": "processing", "request_id": request_id}
     except HTTPException:
         raise
     except Exception as exc:
-        print(f"[API][KNOWLEDGE][ERROR] add failed: {exc}")
+        print(f"[API][KNOWLEDGE][ERROR] knowledge_add setup failed: {exc}")
         traceback.print_exc()
+        _clear_knowledge_request(request_id)
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+# Maximum characters to send to LLM for content prep (stays within 128k token context)
+# ~400k chars ≈ 100k tokens, safe for any OpenAI model
+_LLM_PREP_MAX_CHARS = int(os.getenv("LLM_PREP_MAX_CHARS", "400000"))
+
+
 def _prepare_rag_content(raw_text: str) -> str:
-    """Normalize and structure knowledge content for better RAG ingestion."""
+    """Normalize and structure knowledge content for better RAG ingestion.
+    
+    For large files (>400k chars), LLM prep is skipped — the raw extracted text is already
+    high quality from PyMuPDF + vision analysis and does not need LLM restructuring.
+    Chunking handles large content; LLM prep is only useful for short user-typed content.
+    """
     if not raw_text.strip():
         return ""
     if not OPENAI_API_KEY:
+        return raw_text
+
+    # Skip LLM prep for large files — sending 1M+ tokens to LLM would crash.
+    # Large files (PDFs etc.) are already well-structured from extraction pipeline.
+    if len(raw_text) > _LLM_PREP_MAX_CHARS:
+        print(f"[KNOWLEDGE] Content too large for LLM prep ({len(raw_text)} chars > {_LLM_PREP_MAX_CHARS}), skipping — using raw extracted text directly.")
         return raw_text
 
     prep_prompt = (
@@ -4243,13 +5298,22 @@ def _prepare_rag_content(raw_text: str) -> str:
 
 
 def _find_similar_knowledge_sources(text: str, limit: int = 5, max_distance: float = 0.28) -> List[str]:
-    """Find existing knowledge sources that are highly similar to the provided text."""
+    """Find existing knowledge sources that are highly similar to the provided text.
+    
+    The OpenAI embedding API has an 8,191 token limit per request (~32,000 chars).
+    For large files, we sample the first representative chunk only.
+    """
     if not text.strip():
         return []
     if not OPENAI_API_KEY:
         return []
     try:
-        emb = embed_text(text)
+        # Truncate to embedding API limit: 8191 tokens ≈ 32,000 characters
+        _EMBED_MAX_CHARS = 32000
+        sample_text = text[:_EMBED_MAX_CHARS]
+        if len(text) > _EMBED_MAX_CHARS:
+            print(f"[KNOWLEDGE] Truncating text for similarity check: {len(text)} -> {_EMBED_MAX_CHARS} chars")
+        emb = embed_text(sample_text)
         similar_sources: List[str] = []
         for col in (memory_collection, collection):
             results = col.query(query_embeddings=[emb], n_results=limit, include=["metadatas", "distances"])
@@ -4277,14 +5341,30 @@ def _find_similar_knowledge_sources(text: str, limit: int = 5, max_distance: flo
 def knowledge_prepare(req: KnowledgeAddRequest):
     """Prepare user content for RAG and return the normalized text without validating it."""
     try:
+        request_id = (req.request_id or "").strip() or None
+        _mark_knowledge_request_started(request_id)
+        _ingest_log("knowledge_prepare start", request_id, force=True)
         text_part = (req.text or "").strip()
         file_part = ""
         if req.files:
-            file_part = build_file_context(req.files, describe_image_func=_describe_image_via_vision)
+            file_part = build_file_context(
+                req.files,
+                describe_image_func=_describe_image_via_vision,
+                cancel_check=lambda: _is_knowledge_request_cancelled(request_id),
+                request_id=request_id,
+            )
 
         raw_content = "\n\n".join([p for p in [text_part, file_part] if p])
         if not raw_content.strip():
             raise HTTPException(status_code=400, detail="No content to prepare")
+
+        if _is_knowledge_request_cancelled(request_id):
+            _ingest_log("knowledge_prepare canceled", request_id, force=True)
+            return {
+                "approved": False,
+                "message": "Preparation stopped by user.",
+                "canceled": True,
+            }
 
         prepared_content = _prepare_rag_content(raw_content)
         final_content = prepared_content if prepared_content.strip() else raw_content
@@ -4299,6 +5379,36 @@ def knowledge_prepare(req: KnowledgeAddRequest):
         print(f"[API][KNOWLEDGE][ERROR] prepare failed: {exc}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        _clear_knowledge_request((req.request_id or "").strip() or None)
+
+
+@app.post("/knowledge/cancel")
+def knowledge_cancel(req: KnowledgeCancelRequest):
+    request_id = (req.request_id or "").strip()
+    if not request_id:
+        raise HTTPException(status_code=400, detail="request_id is required")
+    existed = _cancel_knowledge_request(request_id)
+    _ingest_log(f"/knowledge/cancel accepted (was_active={existed})", request_id, force=True)
+    return {
+        "ok": True,
+        "message": "Cancellation requested.",
+        "request_id": request_id,
+        "was_active": existed,
+    }
+
+
+@app.get("/knowledge/status/{request_id}")
+def knowledge_job_status(request_id: str):
+    """Poll the status of a background knowledge ingestion job started by POST /knowledge/add.
+    Returns {status: 'processing'} while running, or {status: 'done', approved: bool, ...} when finished.
+    """
+    if not request_id:
+        raise HTTPException(status_code=400, detail="request_id is required")
+    job = _get_job_result(request_id)
+    if not job:
+        return {"status": "not_found", "request_id": request_id}
+    return {"request_id": request_id, **job}
 
 
 # ---------------------------------------------------------------------
@@ -4572,9 +5682,16 @@ def chat(req: ChatRequest):
         dq = deque(incoming_history[-MAX_CONVERSATION_MESSAGES:], maxlen=MAX_CONVERSATION_MESSAGES)
         conversation_store[conversation_key] = dq
     stored_history = list(conversation_store.get(conversation_key, deque()))
-    history_context = _format_history_for_prompt(stored_history, max_messages=8)
+    use_history_context = _should_use_history_for_question(
+        question,
+        stored_history,
+        explicit_is_followup=bool(req.is_followup),
+    )
+    history_context = _format_history_for_prompt(stored_history, max_messages=8) if use_history_context else ""
     if history_context:
         print(f"[API][CHAT] Using conversation history context key={conversation_key} messages={len(stored_history)}")
+    else:
+        print(f"[API][CHAT] Treating question as standalone key={conversation_key}")
 
     # Process uploaded files early to include their content in context
     file_context = ""
@@ -4815,6 +5932,8 @@ def chat(req: ChatRequest):
 
     docs, metas, distances, ids = rerank_results(question, docs, metas, distances=distances, ids=ids)
     question_is_procedural = _question_has_procedural_intent(question)
+    entity_fact_intent = _question_has_entity_fact_intent(question)
+    broad_coverage_intent = _question_requests_broad_coverage(question)
 
     # Confidence-based behavior: avoid hard refusals and answer in best-effort mode when confidence is low
     final_profile = _context_confidence_profile(question, docs, distances)
@@ -4837,7 +5956,7 @@ def chat(req: ChatRequest):
         metas,
         distances=distances,
         ids=ids,
-        max_sources=5,
+        max_sources=6 if broad_coverage_intent else 5,
     )
 
     # Source-level lexical rescue helps when the exact guide is present in the collection
@@ -4850,12 +5969,17 @@ def chat(req: ChatRequest):
     if should_run_lexical_rescue:
         lexical_candidates = _build_global_lexical_source_candidates(
             question,
-            max_sources=6 if question_is_procedural else 4,
+            max_sources=7 if broad_coverage_intent else (6 if question_is_procedural else 4),
         )
         source_candidates = _merge_source_candidate_lists(
             source_candidates,
             lexical_candidates,
-            max_sources=6 if question_is_procedural else 5,
+            max_sources=7 if broad_coverage_intent else (6 if question_is_procedural else 5),
+        )
+        source_candidates = _filter_low_context_source_candidates(
+            question,
+            source_candidates,
+            max_sources=7 if broad_coverage_intent else (6 if question_is_procedural else 5),
         )
 
     should_run_llm_rerank = (
@@ -4866,7 +5990,12 @@ def chat(req: ChatRequest):
         source_candidates = _llm_select_source_candidates(
             question,
             source_candidates,
-            max_sources=5,
+            max_sources=6 if broad_coverage_intent else 5,
+        )
+        source_candidates = _filter_low_context_source_candidates(
+            question,
+            source_candidates,
+            max_sources=6 if broad_coverage_intent else 5,
         )
 
     lock_primary_source = _should_lock_primary_source(question, source_candidates)
@@ -4879,11 +6008,11 @@ def chat(req: ChatRequest):
 
     # More context improves answer success rate, but for procedural questions fewer full-source documents
     # are better than many disconnected chunks.
-    MAX_CONTEXT_SOURCES = 4 if question_is_procedural else 5
+    MAX_CONTEXT_SOURCES = 6 if broad_coverage_intent else (4 if question_is_procedural else 5)
     print(f"[API][CHAT] Building context with MAX_CONTEXT_SOURCES={MAX_CONTEXT_SOURCES}")
 
     if source_candidates:
-        if question_is_procedural and len(source_candidates) > 1 and not lock_primary_source:
+        if question_is_procedural and len(source_candidates) > 1 and not lock_primary_source and not broad_coverage_intent:
             lead_score = source_candidates[0]["score"]
             second_score = source_candidates[1]["score"]
             if lead_score >= second_score + 2.0:
@@ -4899,7 +6028,7 @@ def chat(req: ChatRequest):
             source_strings.append(src)
             snippet = candidate["excerpt"][:200].replace("\n", " ")
             candidate_content = candidate["excerpt"]
-            if idx == 0 and question_is_procedural:
+            if idx == 0 and question_is_procedural and not broad_coverage_intent:
                 candidate_content = _merge_chunk_texts([str(candidate.get("full_content") or "")], max_chars=6000)
             print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
             context_blocks.append(
@@ -5005,6 +6134,21 @@ def chat(req: ChatRequest):
             "Use supplemental matches only to fill missing details, and do not replace a specific procedure with more generic guidance unless the primary source is incomplete.\n"
         )
 
+    if source_candidates and broad_coverage_intent:
+        context_sections.append(
+            "=== BREADTH COVERAGE PRIORITY ===\n"
+            "The user is asking for alternatives, additional options, different methods, or broader coverage. "
+            "Synthesize distinct valid approaches from all relevant matches. Do not say there is only one way unless the retrieved context clearly supports that conclusion after considering the supplemental matches too.\n"
+        )
+
+    if source_candidates and entity_fact_intent:
+        context_sections.append(
+            "=== ENTITY FACT PRIORITY ===\n"
+            "When the question asks about company names, product names, aliases, naming rules, or how many products are listed, "
+            "prefer the documents that explicitly define or enumerate those facts. "
+            "If the context lists the relevant items, answer directly from that list and state the count.\n"
+        )
+
     if file_context and should_include_rag_context:
         context_sections.append(
             "=== ANSWERING STRATEGY ===\n"
@@ -5026,6 +6170,11 @@ def chat(req: ChatRequest):
             "Use this to resolve references like 'that', 'those', or follow-up clarifications.\n"
             f"{history_context}\n"
         )
+    else:
+        context_sections.append(
+            "=== QUESTION ISOLATION RULE ===\n"
+            "Treat the current user question as standalone. Do not use previous conversation topics to infer missing nouns, products, areas, or procedures unless the current question explicitly refers back to them.\n"
+        )
     
     combined_context = "\n\n".join(context_sections)
 
@@ -5040,6 +6189,7 @@ def chat(req: ChatRequest):
         draft_answer = call_llm(prompt, temperature=0.2)
         answer = _ground_answer_against_context(question, combined_context, draft_answer)
         answer = _enforce_specific_grounded_answer(question, combined_context, answer)
+        answer = _normalize_noncode_fenced_blocks(answer)
     except Exception as exc:
         print(f"[API][CHAT][ERROR] LLM call failed: {exc}")
         traceback.print_exc()

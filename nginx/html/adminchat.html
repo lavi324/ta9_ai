@@ -938,23 +938,41 @@
 
     .knowledge-toast {
       position: fixed;
-      top: 24px;
-      right: 24px;
-      background: #0c3d6b;
+      top: 94px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(12, 61, 107, 0.96);
       color: #ffffff;
-      padding: 12px 16px;
-      border-radius: 12px;
-      box-shadow: 0 12px 30px rgba(12, 29, 55, 0.3);
+      padding: 12px 18px;
+      border-radius: 999px;
+      box-shadow: 0 16px 36px rgba(12, 29, 55, 0.22);
       z-index: 3000;
       font-size: 13px;
       display: flex;
       align-items: center;
       gap: 10px;
-      max-width: 320px;
+      justify-content: center;
+      width: max-content;
+      max-width: min(520px, calc(100vw - 32px));
+      text-align: center;
+      pointer-events: none;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      animation: knowledge-toast-in 0.18s ease-out;
     }
 
     .knowledge-toast.error {
       background: #b42318;
+    }
+
+    @keyframes knowledge-toast-in {
+      from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(-8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
     }
 
     .knowledge-loading {
@@ -1859,6 +1877,17 @@
       max-width: 100%;
     }
 
+    .ui-note-block {
+      background: #f8fbff;
+      border: 1px solid #d6e6f8;
+      border-radius: 12px;
+      padding: 14px 16px;
+      color: #1f2d3d;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      font-family: 'Segoe UI', Arial, sans-serif;
+    }
+
     .question-bubble {
       background: #0b8ef3;
       color: #fff;
@@ -2698,10 +2727,31 @@
       line-height: 1.8;
       color: #1f2d3d;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      white-space: pre-wrap;
+      white-space: normal;
       overflow-wrap: anywhere;
       word-break: break-word;
       overflow: auto;
+      position: relative;
+    }
+
+    .vector-virtual-spacer {
+      width: 100%;
+      flex: 0 0 auto;
+    }
+
+    .vector-virtual-content {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      min-width: 100%;
+    }
+
+    .vector-search-mark {
+      background: #d9efff;
+      color: inherit;
+      border-radius: 4px;
+      box-shadow: 0 0 0 1px rgba(84, 160, 255, 0.16);
+      padding: 0 1px;
     }
 
     .vector-document-editor.editing {
@@ -2709,6 +2759,33 @@
       border-color: #0c3d6b;
       box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.08);
     }
+
+    .vector-doc-status {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 14px;
+      background: #f0f6ff;
+      border: 1px solid #d0e2f8;
+      border-radius: 10px;
+      font-size: 12px;
+      color: #445566;
+      flex-shrink: 0;
+    }
+    .vector-doc-status-text { flex: 1; }
+    .vector-doc-status-btn {
+      border: 1px solid #0c3d6b;
+      border-radius: 7px;
+      background: #0c3d6b;
+      color: #fff;
+      padding: 4px 12px;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .vector-doc-status-btn:hover { background: #0a3060; }
 
     .vector-section-head,
     .vector-section-actions {
@@ -2942,6 +3019,13 @@
     .hidden { display: none; }
 
     @media (max-width: 1000px) {
+      .knowledge-toast {
+        top: 82px;
+        max-width: calc(100vw - 24px);
+        padding: 11px 14px;
+        border-radius: 16px;
+      }
+
       .ticket-section,
       .main-card {
         width: auto;
@@ -3210,15 +3294,15 @@
 
   <div id="knowledge-loading" class="knowledge-loading hidden" aria-hidden="true">
     <div class="knowledge-loading-card" role="status" aria-live="polite">
-      <div id="knowledge-loading-title" class="knowledge-loading-title">Checking TA9 context</div>
+      <div id="knowledge-loading-title" class="knowledge-loading-title">Preparing knowledge upload</div>
       <div id="knowledge-loading-text" class="knowledge-loading-text">
-        Waiting for AI approval before adding knowledge.
+        Preparing file content for upload and embedding.
       </div>
       <div id="knowledge-loading-progress" class="knowledge-loading-progress hidden">
         <div class="knowledge-loading-step">
           <span id="knowledge-step-check-icon" class="knowledge-step-icon" aria-hidden="true">○</span>
           <div class="knowledge-step-body">
-            <div class="knowledge-step-label">Checking TA9 knowledge</div>
+            <div class="knowledge-step-label">Preparing file content</div>
             <div id="knowledge-step-check-status" class="knowledge-step-status">Pending</div>
           </div>
         </div>
@@ -3370,6 +3454,7 @@
     const knowledgeLoadingActions = document.getElementById('knowledge-loading-actions');
     const knowledgeLoadingCancel = document.getElementById('knowledge-loading-cancel');
     const knowledgeDecisionBackdrop = document.getElementById('knowledge-decision-backdrop');
+    const knowledgeDecisionTitle = document.getElementById('knowledge-decision-title');
     const knowledgeDecisionMessage = document.getElementById('knowledge-decision-message');
     const knowledgeDecisionClose = document.getElementById('knowledge-decision-close');
     const knowledgeGuideBackdrop = document.getElementById('knowledge-guide-backdrop');
@@ -3408,6 +3493,7 @@
     let attachedFiles = []; // Store file data
     let currentFontSize = 'medium';
     let activeKnowledgeRequestController = null;
+    let activeKnowledgeRequestId = null;
     let knowledgePreparedForAdd = false;
     let knowledgeEditorLockedForPrepare = false;
     let englishOnlyToastTimer = null;
@@ -3421,6 +3507,7 @@
     let ticketItems = [];
     let isTicketDropdownOpen = false;
     const KNOWLEDGE_DRAFT_KEY = 'ta9_knowledge_draft_html_v1';
+    const CHAT_CONVERSATION_KEY = 'ta9_chat_conversation_id_v1';
     const vectorState = {
       collections: [],
       selectedCollection: null,
@@ -3438,6 +3525,23 @@
       isEditing: false,
       isSaving: false
     };
+    const vectorDocumentCache = new Map();
+    const VECTOR_VIEWER_OVERSCAN_ROWS = 120;
+    const VECTOR_CACHE_MAX_ENTRIES = 24;
+
+    function getChatConversationId() {
+      try {
+        const existing = window.sessionStorage.getItem(CHAT_CONVERSATION_KEY);
+        if (existing) {
+          return existing;
+        }
+        const generated = `chat-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        window.sessionStorage.setItem(CHAT_CONVERSATION_KEY, generated);
+        return generated;
+      } catch (err) {
+        return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      }
+    }
 
     if (logoImg) {
       logoImg.addEventListener('click', () => {
@@ -3628,6 +3732,207 @@
 
     const VECTOR_SELECT_DOCUMENT_TEXT = 'Select a document to inspect its content and metadata.';
 
+    function vectorCacheKey(collectionName, source) {
+      return String(collectionName || '') + '::' + String(source || '');
+    }
+
+    function cacheVectorDetail(detail) {
+      if (!detail) return;
+      const key = vectorCacheKey(detail.collection_name, detail.source);
+      const previous = vectorDocumentCache.get(key) || {};
+      vectorDocumentCache.delete(key);
+      vectorDocumentCache.set(key, {
+        ...previous,
+        ...detail,
+        cached_at: Date.now(),
+      });
+      while (vectorDocumentCache.size > VECTOR_CACHE_MAX_ENTRIES) {
+        const oldestKey = vectorDocumentCache.keys().next().value;
+        vectorDocumentCache.delete(oldestKey);
+      }
+    }
+
+    function getCachedVectorDetail(collectionName, source) {
+      return vectorDocumentCache.get(vectorCacheKey(collectionName, source)) || null;
+    }
+
+    function buildVectorViewerModel(text) {
+      const rawText = String(text || '');
+      const lineStarts = [0];
+      for (let idx = 0; idx < rawText.length; idx += 1) {
+        if (rawText.charCodeAt(idx) === 10) {
+          lineStarts.push(idx + 1);
+        }
+      }
+      return {
+        text: rawText,
+        lineStarts,
+        wrapKey: '',
+        cumulativeRows: null,
+        totalRows: 0,
+      };
+    }
+
+    function getVectorViewerCacheEntry(detail) {
+      if (!detail) return null;
+      return getCachedVectorDetail(detail.collection_name, detail.source);
+    }
+
+    function getVectorLineEnd(model, lineIndex) {
+      return lineIndex + 1 < model.lineStarts.length
+        ? model.lineStarts[lineIndex + 1] - 1
+        : model.text.length;
+    }
+
+    function getVectorCharWidth(viewport) {
+      if (viewport._vectorCharWidth) {
+        return viewport._vectorCharWidth;
+      }
+      const probe = document.createElement('span');
+      probe.textContent = 'MMMMMMMMMM';
+      probe.style.position = 'absolute';
+      probe.style.visibility = 'hidden';
+      probe.style.whiteSpace = 'pre';
+      const style = getComputedStyle(viewport);
+      probe.style.font = style.font;
+      document.body.appendChild(probe);
+      const width = probe.getBoundingClientRect().width / 10;
+      probe.remove();
+      viewport._vectorCharWidth = width || 8;
+      return viewport._vectorCharWidth;
+    }
+
+    function ensureVectorViewerMetrics(model, viewport) {
+      const style = getComputedStyle(viewport);
+      const lineHeight = parseFloat(style.lineHeight) || 27;
+      const paddingLeft = parseFloat(style.paddingLeft) || 0;
+      const paddingRight = parseFloat(style.paddingRight) || 0;
+      const usableWidth = Math.max(160, viewport.clientWidth - paddingLeft - paddingRight);
+      const charWidth = getVectorCharWidth(viewport);
+      const charsPerRow = Math.max(12, Math.floor(usableWidth / charWidth));
+      const wrapKey = charsPerRow + ':' + model.lineStarts.length;
+      if (model.wrapKey === wrapKey && Array.isArray(model.cumulativeRows)) {
+        return { lineHeight };
+      }
+
+      const cumulativeRows = new Array(model.lineStarts.length + 1);
+      cumulativeRows[0] = 0;
+      for (let lineIndex = 0; lineIndex < model.lineStarts.length; lineIndex += 1) {
+        const start = model.lineStarts[lineIndex];
+        const end = getVectorLineEnd(model, lineIndex);
+        const lineLength = Math.max(0, end - start);
+        const visualRows = Math.max(1, Math.ceil(Math.max(1, lineLength) / charsPerRow));
+        cumulativeRows[lineIndex + 1] = cumulativeRows[lineIndex] + visualRows;
+      }
+
+      model.wrapKey = wrapKey;
+      model.cumulativeRows = cumulativeRows;
+      model.totalRows = cumulativeRows[cumulativeRows.length - 1] || 0;
+      return { lineHeight };
+    }
+
+    function findVectorLineIndexForRow(cumulativeRows, rowIndex) {
+      let low = 0;
+      let high = cumulativeRows.length - 1;
+      while (low < high) {
+        const mid = Math.floor((low + high + 1) / 2);
+        if (cumulativeRows[mid] <= rowIndex) {
+          low = mid;
+        } else {
+          high = mid - 1;
+        }
+      }
+      return Math.max(0, Math.min(cumulativeRows.length - 2, low));
+    }
+
+    function renderVirtualizedVectorDocument(viewport, detail) {
+      const cacheEntry = getVectorViewerCacheEntry(detail);
+      const fullText = stripVectorFilePrefix(detail.full_content || '', detail.input_type);
+      if (!cacheEntry.viewerModel || cacheEntry.viewerModel.text !== fullText) {
+        cacheEntry.viewerModel = buildVectorViewerModel(fullText);
+      }
+
+      if (viewport._vectorScrollHandler) {
+        viewport.removeEventListener('scroll', viewport._vectorScrollHandler);
+      }
+      if (viewport._vectorResizeObserver) {
+        viewport._vectorResizeObserver.disconnect();
+      }
+
+      viewport.innerHTML = '<div class="vector-virtual-spacer" data-role="top"></div><div class="vector-virtual-content" data-role="content"></div><div class="vector-virtual-spacer" data-role="bottom"></div>';
+      const topSpacer = viewport.querySelector('[data-role="top"]');
+      const contentEl = viewport.querySelector('[data-role="content"]');
+      const bottomSpacer = viewport.querySelector('[data-role="bottom"]');
+      const model = cacheEntry.viewerModel;
+      const activeSearchText = String(vectorState.search || '').trim();
+      let rafId = 0;
+
+      function draw() {
+        rafId = 0;
+        const metrics = ensureVectorViewerMetrics(model, viewport);
+        const lineHeight = metrics.lineHeight;
+        const cumulativeRows = model.cumulativeRows || [0, 1];
+        ensureVectorViewerSearchState(model, activeSearchText);
+
+        const searchScrollKey = `${detail.source}::${model.searchKey}`;
+        if (model.searchKey && model.firstMatchLineIndex >= 0 && viewport._vectorScrollAppliedKey !== searchScrollKey) {
+          const targetRow = cumulativeRows[model.firstMatchLineIndex] || 0;
+          viewport.scrollTop = Math.max(0, (targetRow * lineHeight) - (lineHeight * 2));
+          viewport._vectorScrollAppliedKey = searchScrollKey;
+        } else if (!model.searchKey) {
+          viewport._vectorScrollAppliedKey = '';
+        }
+
+        const viewportStartRow = Math.max(0, Math.floor(viewport.scrollTop / lineHeight) - VECTOR_VIEWER_OVERSCAN_ROWS);
+        const viewportEndRow = Math.min(
+          model.totalRows,
+          Math.ceil((viewport.scrollTop + viewport.clientHeight) / lineHeight) + VECTOR_VIEWER_OVERSCAN_ROWS
+        );
+        const startLine = findVectorLineIndexForRow(cumulativeRows, viewportStartRow);
+        const endLine = findVectorLineIndexForRow(cumulativeRows, Math.max(viewportStartRow, viewportEndRow));
+        const safeEndLine = Math.min(model.lineStarts.length - 1, endLine + 1);
+
+        const lines = [];
+        for (let lineIndex = startLine; lineIndex <= safeEndLine; lineIndex += 1) {
+          const start = model.lineStarts[lineIndex];
+          const end = getVectorLineEnd(model, lineIndex);
+          lines.push(model.text.slice(start, end));
+        }
+
+        topSpacer.style.height = (cumulativeRows[startLine] * lineHeight) + 'px';
+        bottomSpacer.style.height = (Math.max(0, model.totalRows - cumulativeRows[safeEndLine + 1]) * lineHeight) + 'px';
+        contentEl.innerHTML = renderVectorSearchHighlightedHtml(lines.join('\n'), activeSearchText);
+      }
+
+      function requestDraw() {
+        if (rafId) return;
+        rafId = requestAnimationFrame(draw);
+      }
+
+      viewport._vectorScrollHandler = requestDraw;
+      viewport.addEventListener('scroll', viewport._vectorScrollHandler, { passive: true });
+      if (typeof ResizeObserver !== 'undefined') {
+        const resizeObserver = new ResizeObserver(requestDraw);
+        resizeObserver.observe(viewport);
+        viewport._vectorResizeObserver = resizeObserver;
+      }
+      draw();
+    }
+
+    async function ensureVectorFullContentLoaded(source) {
+      if (!vectorState.detail || vectorState.detail.source !== source) {
+        return false;
+      }
+      if (vectorState.detail.full_content) {
+        return true;
+      }
+      await loadVectorDocumentDetail(source, true, {
+        includeFullContent: true,
+        forceRefresh: true,
+      });
+      return !!(vectorState.detail && vectorState.detail.source === source && vectorState.detail.full_content);
+    }
+
     function renderVectorEmptyState(title, text) {
       if (!vectorDetail) return;
       vectorDetail.innerHTML = `
@@ -3756,7 +4061,7 @@
         return '';
       }
       if (item.name === 'Intsight') {
-        return 'Wiki + User Guide + Old Tickets Summeries';
+        return 'Wiki + User Guide';
       }
       if (item.name === 'New_Knowledge') {
         return 'User Knowledge Hub';
@@ -3805,6 +4110,110 @@
         return normalizedText;
       }
       return `${normalizedText.slice(0, 280).trimEnd()}...`;
+    }
+
+    function escapeRegex(value) {
+      return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function getVectorSearchTerms(searchText) {
+      const rawSearch = String(searchText != null ? searchText : vectorState.search || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!rawSearch) {
+        return [];
+      }
+
+      const phrase = rawSearch.replace(/^['"]+|['"]+$/g, '').trim();
+      return phrase.length ? [phrase] : [];
+    }
+
+    function buildVectorSearchRegex(searchText) {
+      const terms = getVectorSearchTerms(searchText);
+      if (!terms.length) {
+        return null;
+      }
+
+      const pattern = terms.map((term) => {
+        if (/\s/.test(term)) {
+          return term
+            .trim()
+            .split(/\s+/)
+            .map((part) => escapeRegex(part))
+            .join('\\s+');
+        }
+        return escapeRegex(term);
+      }).join('|');
+
+      return pattern ? new RegExp(`(${pattern})`, 'gi') : null;
+    }
+
+    function renderVectorSearchHighlightedHtml(text, searchText) {
+      const rawText = String(text || '');
+      const highlightRegex = buildVectorSearchRegex(searchText);
+      if (!highlightRegex) {
+        return escapeHtml(rawText);
+      }
+
+      let result = '';
+      let lastIndex = 0;
+      let match = highlightRegex.exec(rawText);
+      while (match) {
+        const matchText = match[0] || '';
+        const matchIndex = match.index;
+        if (!matchText) {
+          break;
+        }
+
+        result += escapeHtml(rawText.slice(lastIndex, matchIndex));
+        result += `<mark class="vector-search-mark">${escapeHtml(matchText)}</mark>`;
+        lastIndex = matchIndex + matchText.length;
+        match = highlightRegex.exec(rawText);
+      }
+
+      result += escapeHtml(rawText.slice(lastIndex));
+      return result;
+    }
+
+    function findVectorLineIndexForChar(lineStarts, charIndex) {
+      let low = 0;
+      let high = lineStarts.length - 1;
+      while (low < high) {
+        const mid = Math.floor((low + high + 1) / 2);
+        if (lineStarts[mid] <= charIndex) {
+          low = mid;
+        } else {
+          high = mid - 1;
+        }
+      }
+      return Math.max(0, Math.min(lineStarts.length - 1, low));
+    }
+
+    function ensureVectorViewerSearchState(model, searchText) {
+      const searchKey = String(searchText || '').trim().toLowerCase();
+      if (model.searchKey === searchKey) {
+        return;
+      }
+
+      model.searchKey = searchKey;
+      model.firstMatchIndex = -1;
+      model.firstMatchLineIndex = -1;
+      if (!searchKey) {
+        return;
+      }
+
+      const highlightRegex = buildVectorSearchRegex(searchText);
+      if (!highlightRegex) {
+        return;
+      }
+
+      const match = highlightRegex.exec(model.text);
+      if (!match || typeof match.index !== 'number') {
+        return;
+      }
+
+      model.firstMatchIndex = match.index;
+      model.firstMatchLineIndex = findVectorLineIndexForChar(model.lineStarts, match.index);
     }
 
     function sortVectorDocumentsInPlace() {
@@ -3925,10 +4334,11 @@
       vectorDocumentList.innerHTML = vectorState.documents.map((item) => {
         const activeClass = item.source === vectorState.selectedSource ? ' active' : '';
         const previewText = stripVectorFilePrefix(item.preview || '', item.input_type).trim() || 'No preview available for this document.';
+        const previewHtml = renderVectorSearchHighlightedHtml(previewText, vectorState.search);
         const tokenCount = Number(item.token_count || 0).toLocaleString();
         return `
           <button type="button" class="vector-document-item${activeClass}" data-source="${escapeHtml(item.source)}">
-            <div class="vector-document-preview">${escapeHtml(previewText)}</div>
+            <div class="vector-document-preview">${previewHtml}</div>
             <div class="vector-document-foot">
               <span class="vector-pill token-pill">${tokenCount} tokens</span>
             </div>
@@ -3941,7 +4351,7 @@
           const source = element.getAttribute('data-source');
           if (!source) return;
           loadVectorDocumentDetail(source, false, {
-            includeFullContent: true
+            includeFullContent: true,
           });
         });
       });
@@ -4073,7 +4483,7 @@
       const editor = document.getElementById('vector-document-editor');
       const documentView = document.getElementById('vector-document-view');
       if (documentView) {
-        documentView.textContent = contentValue;
+        renderVirtualizedVectorDocument(documentView, detail);
       }
       if (editor) {
         editor.value = contentValue;
@@ -4084,9 +4494,14 @@
 
       const editBtn = document.getElementById('vector-edit-document-btn');
       if (editBtn) {
-        editBtn.addEventListener('click', () => {
+        editBtn.addEventListener('click', async () => {
+          const loaded = await ensureVectorFullContentLoaded(detail.source);
+          if (!loaded) {
+            showKnowledgeToast('Failed to load full document for editing.', true);
+            return;
+          }
           vectorState.isEditing = true;
-          vectorState.draftContent = stripVectorFilePrefix(detail.full_content || '', detail.input_type);
+          vectorState.draftContent = stripVectorFilePrefix(vectorState.detail.full_content || '', vectorState.detail.input_type);
           renderVectorDetail();
         });
       }
@@ -4109,7 +4524,8 @@
       const refreshBtn = document.getElementById('vector-refresh-detail-btn');
       if (refreshBtn) {
         refreshBtn.addEventListener('click', () => loadVectorDocumentDetail(detail.source, true, {
-          includeFullContent: true
+          includeFullContent: true,
+          forceRefresh: true,
         }));
       }
 
@@ -4123,9 +4539,25 @@
     async function loadVectorDocumentDetail(source, silent, options = {}) {
       if (!vectorState.selectedCollection || !source) return;
       const sameSource = !!(vectorState.detail && vectorState.detail.source === source);
+      const forceRefresh = !!options.forceRefresh;
       const includeFullContent = options.includeFullContent !== undefined
         ? !!options.includeFullContent
-        : (!sameSource || !vectorState.detail || !vectorState.detail.full_content);
+        : true;
+
+      const cachedDetail = !forceRefresh
+        ? getCachedVectorDetail(vectorState.selectedCollection, source)
+        : null;
+      if (cachedDetail && cachedDetail.full_content) {
+        vectorState.selectedSource = source;
+        vectorState.detail = { ...cachedDetail };
+        if (!vectorState.isEditing || !sameSource) {
+          vectorState.draftContent = stripVectorFilePrefix(vectorState.detail.full_content || '', vectorState.detail.input_type);
+          vectorState.isEditing = false;
+        }
+        renderVectorDocumentList();
+        renderVectorDetail();
+        return;
+      }
 
       vectorState.selectedSource = source;
       renderVectorDocumentList();
@@ -4168,6 +4600,7 @@
             ? data.full_content
             : (previousDetail && previousDetail.full_content ? previousDetail.full_content : '')
         };
+        cacheVectorDetail(vectorState.detail);
 
         if (!vectorState.isEditing || !sameSource) {
           vectorState.draftContent = stripVectorFilePrefix(vectorState.detail.full_content || '', vectorState.detail.input_type);
@@ -4207,6 +4640,7 @@
         }
         vectorState.detail = data.detail || vectorState.detail;
         vectorState.draftContent = stripVectorFilePrefix(vectorState.detail.full_content || nextContent, vectorState.detail.input_type);
+        cacheVectorDetail(vectorState.detail);
         vectorState.isEditing = false;
         syncVectorSummaryFromDetail(vectorState.detail);
         renderVectorDocumentList();
@@ -4248,6 +4682,7 @@
           throw new Error((data && (data.detail || data.message)) || 'Failed to delete document.');
         }
         const deletedSource = vectorState.detail.source;
+        vectorDocumentCache.delete(vectorCacheKey(vectorState.selectedCollection, deletedSource));
         showKnowledgeToast(data.message || 'Document deleted successfully.', false);
         removeVectorSummary(deletedSource);
         vectorState.detail = null;
@@ -4376,7 +4811,77 @@
       return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    function showKnowledgeDecisionMessage(message) {
+    function generateKnowledgeRequestId() {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+      }
+      return `knowledge-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    async function requestKnowledgeCancel(reasonText) {
+      if (!activeKnowledgeRequestId) return;
+      const requestId = activeKnowledgeRequestId;
+      activeKnowledgeRequestId = null;
+      try {
+        await fetch('/adminchat/api/knowledge/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ request_id: requestId }),
+          keepalive: true
+        });
+      } catch (err) {
+        console.warn('Knowledge cancel request failed:', err);
+      }
+      if (reasonText) {
+        showKnowledgeDecisionMessage(reasonText, { title: 'Upload stopped' });
+      }
+    }
+
+    // Poll GET /knowledge/status/{requestId} until processing finishes.
+    // Resolves with the final result dict ({approved, message, ...}).
+    // Uses a separate cancelledRef flag so cancel detection works even when
+    // activeKnowledgeRequestId has already been cleared.
+    function pollKnowledgeStatus(requestId, intervalMs) {
+      intervalMs = intervalMs || 3000;
+      // Snapshot whether this specific jobId is still the active one at call time.
+      const expectedJobId = requestId;
+      return new Promise(function (resolve) {
+        function poll() {
+          // The user cancelled if activeKnowledgeRequestId was nulled by requestKnowledgeCancel
+          // OR was replaced by a new upload (different id).
+          if (activeKnowledgeRequestId !== expectedJobId && activeKnowledgeRequestId !== null) {
+            // A new upload started — treat the old one as cancelled.
+            resolve({ approved: false, canceled: true, message: 'Upload stopped by user.' });
+            return;
+          }
+          // activeKnowledgeRequestId === null means cancel was explicitly pressed.
+          if (activeKnowledgeRequestId === null) {
+            resolve({ approved: false, canceled: true, message: 'Upload stopped by user.' });
+            return;
+          }
+          fetch('/adminchat/api/knowledge/status/' + encodeURIComponent(requestId))
+            .then(function (resp) { return resp.json(); })
+            .then(function (data) {
+              if (data.status === 'processing') {
+                setTimeout(poll, intervalMs);
+              } else {
+                resolve(data);
+              }
+            })
+            .catch(function (err) {
+              // On transient network error, keep polling.
+              console.warn('Knowledge status poll error (will retry):', err);
+              setTimeout(poll, intervalMs * 2);
+            });
+        }
+        setTimeout(poll, intervalMs);
+      });
+    }
+
+    function showKnowledgeDecisionMessage(message, options = {}) {
+      if (knowledgeDecisionTitle) {
+        knowledgeDecisionTitle.textContent = options.title || 'Content was not approved';
+      }
       if (knowledgeDecisionMessage) {
         knowledgeDecisionMessage.textContent = message || 'Content rejected.';
       }
@@ -4994,12 +5499,14 @@
 
         try {
           showKnowledgeLoading(
-            'Step 1 of 2: preparing file content for RAG.',
-            false,
+            'Step 1 of 2: uploading file and extracting content.',
+            true,
             { title: 'Adding knowledge file', showProgress: true, showSpinner: false }
           );
-          setKnowledgeStepState('check', 'running', 'Preparing content...');
-          setKnowledgeStepState('upload', 'pending', 'Waiting for validation and upload.');
+          activeKnowledgeRequestController = new AbortController();
+          activeKnowledgeRequestId = generateKnowledgeRequestId();
+          setKnowledgeStepState('check', 'running', 'Uploading file and extracting content...');
+          setKnowledgeStepState('upload', 'pending', 'Waiting for embedding...');
 
           const payloadFiles = [];
           for (const file of files) {
@@ -5012,62 +5519,65 @@
             });
           }
 
-          const prepareResp = await fetch('/adminchat/api/knowledge/prepare', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode: 'content', text: '', files: payloadFiles })
-          });
-          const prepareData = await prepareResp.json();
-          if (!prepareResp.ok) {
-            setKnowledgeStepState('check', 'error', 'Failed.');
-            setKnowledgeStepState('upload', 'pending', 'Not started.');
-            showKnowledgeDecisionMessage((prepareData && (prepareData.message || prepareData.detail)) || 'Knowledge preparation failed');
-            return;
-          }
-
-          if (!prepareData.approved) {
-            setKnowledgeStepState('check', 'error', 'Not approved.');
-            setKnowledgeStepState('upload', 'pending', 'Not started.');
-            showKnowledgeDecisionMessage(prepareData.message || prepareData.detail || 'Content rejected.');
-            return;
-          }
-
           setKnowledgeStepState('check', 'done', 'Completed.');
-          setKnowledgeStepState('upload', 'running', 'Validating, uploading, and embedding...');
+          setKnowledgeStepState('upload', 'running', 'Embedding knowledge...');
           if (knowledgeLoadingText) {
-            knowledgeLoadingText.textContent = 'Step 2 of 2: validating, uploading, and embedding file.';
+            knowledgeLoadingText.textContent = 'Step 2 of 2: embedding extracted knowledge.';
           }
 
           const addResp = await fetch('/adminchat/api/knowledge/add', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode: 'content', text: '', files: payloadFiles })
+            body: JSON.stringify({ mode: 'content', text: '', files: payloadFiles, request_id: activeKnowledgeRequestId }),
+            signal: activeKnowledgeRequestController.signal
           });
           const addData = await addResp.json();
           if (!addResp.ok) {
             setKnowledgeStepState('upload', 'error', 'Failed.');
-            showKnowledgeDecisionMessage((addData && (addData.message || addData.detail)) || 'Upload failed');
+            showKnowledgeDecisionMessage((addData && (addData.message || addData.detail)) || 'Upload failed', { title: 'Upload failed' });
             return;
           }
 
-          if (addData.approved) {
+          // Save the canonical request_id from the server response (may differ if client didn't send one).
+          // Keep a local copy so polling still works even after activeKnowledgeRequestId is cleared by cancel.
+          const jobRequestId = addData.request_id || activeKnowledgeRequestId;
+
+          // The backend processes in a background thread and returns immediately.
+          // Poll GET /knowledge/status/:id every 3 s — no HTTP timeout no matter how long processing takes.
+          const pollResult = await pollKnowledgeStatus(jobRequestId);
+          if (pollResult.approved) {
             setKnowledgeStepState('upload', 'done', 'Completed.');
             if (knowledgeLoadingText) {
               knowledgeLoadingText.textContent = 'All steps completed. Closing...';
             }
             await sleep(900);
             hideKnowledgeLoading();
-            showKnowledgeToast(addData.message || 'Knowledge added.', false);
+            showKnowledgeDecisionMessage(pollResult.message || 'Knowledge added and embedded successfully.', { title: 'Upload completed' });
+            // Refresh the Vector DB panel so the new document appears without a page reload.
+            loadVectorCollections();
+            if (vectorState && vectorState.selectedCollection) {
+              loadVectorDocuments();
+            }
           } else {
             setKnowledgeStepState('upload', 'error', 'Not approved.');
-            showKnowledgeDecisionMessage(addData.message || addData.detail || 'Content rejected.');
+            if (pollResult.canceled) {
+              showKnowledgeDecisionMessage(pollResult.message || 'Embedding stopped by user.', { title: 'Upload stopped' });
+            } else {
+              showKnowledgeDecisionMessage(pollResult.message || pollResult.detail || 'Content rejected.', { title: 'Content was not approved' });
+            }
           }
         } catch (err) {
+          if (err && err.name === 'AbortError') {
+            await requestKnowledgeCancel('Upload and embedding were stopped by user.');
+            return;
+          }
           console.error('Knowledge file upload error:', err);
           setKnowledgeStepState('check', 'error', 'Failed.');
           setKnowledgeStepState('upload', 'error', 'Failed.');
           showKnowledgeToast('Failed to add knowledge.', true);
         } finally {
+          activeKnowledgeRequestController = null;
+          activeKnowledgeRequestId = null;
           if (!knowledgeLoading.classList.contains('hidden')) {
             hideKnowledgeLoading();
           }
@@ -5212,10 +5722,11 @@
     });
 
     if (knowledgeLoadingCancel) {
-      knowledgeLoadingCancel.addEventListener('click', () => {
+      knowledgeLoadingCancel.addEventListener('click', async () => {
         if (activeKnowledgeRequestController) {
           activeKnowledgeRequestController.abort();
         }
+        await requestKnowledgeCancel('Upload has been stopped.');
       });
     }
 
@@ -5273,19 +5784,20 @@
       const isPrepareRequest = !!replaceEditor;
       const loadingMessage = isPrepareRequest
         ? 'Preparing content for RAG. Please wait...'
-        : 'Validating TA9 or IntSight context and adding knowledge. Please wait...';
+        : 'Checking content relevance and adding knowledge. Please wait...';
       const loadingOptions = isPrepareRequest
         ? { title: 'Preparing for RAG' }
         : { title: 'Adding knowledge' };
-      showKnowledgeLoading(loadingMessage, isPrepareRequest, loadingOptions);
+      showKnowledgeLoading(loadingMessage, !isPrepareRequest, loadingOptions);
 
       activeKnowledgeRequestController = new AbortController();
+      activeKnowledgeRequestId = generateKnowledgeRequestId();
 
       try {
         const resp = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mode: 'content', text }),
+          body: JSON.stringify({ mode: 'content', text, request_id: activeKnowledgeRequestId }),
           signal: activeKnowledgeRequestController.signal
         });
         let data = null;
@@ -5303,7 +5815,33 @@
         }
 
         const responseData = data || {};
-        if (responseData.approved) {
+        if (!isPrepareRequest && responseData.status === 'processing') {
+          const jobRequestId = responseData.request_id || activeKnowledgeRequestId;
+          const pollResult = await pollKnowledgeStatus(jobRequestId);
+          if (pollResult.approved) {
+            showKnowledgeToast(pollResult.message || successFallback, false);
+            knowledgePreparedForAdd = false;
+            setKnowledgeEditorLocked(false);
+            clearKnowledgeDraft();
+            knowledgeContentEditor.innerHTML = '';
+            if (knowledgePageNav) {
+              knowledgePageNav.classList.remove('active');
+              knowledgePageNav.innerHTML = '';
+            }
+            closeKnowledgeContentModal();
+            loadVectorCollections();
+            if (vectorState && vectorState.selectedCollection) {
+              loadVectorDocuments();
+            }
+          } else {
+            setKnowledgeEditorLocked(false);
+            if (pollResult.canceled) {
+              showKnowledgeDecisionMessage(pollResult.message || 'Upload stopped by user.', { title: 'Upload stopped' });
+            } else {
+              showKnowledgeDecisionMessage(pollResult.message || pollResult.detail || 'Content rejected.');
+            }
+          }
+        } else if (responseData.approved) {
           if (replaceEditor && responseData.prepared_text) {
             replaceEditorContent(responseData.prepared_text);
             knowledgePreparedForAdd = true;
@@ -5328,6 +5866,7 @@
       } catch (err) {
         if (err && err.name === 'AbortError') {
           setKnowledgeEditorLocked(false);
+          await requestKnowledgeCancel(isPrepareRequest ? 'Preparation was stopped by user.' : 'Request was stopped by user.');
           showKnowledgeToast(isPrepareRequest ? 'Preparation canceled.' : 'Request canceled.', true);
           return;
         }
@@ -5336,6 +5875,7 @@
         showKnowledgeToast((err && err.message) ? err.message : 'Failed to add knowledge.', true);
       } finally {
         activeKnowledgeRequestController = null;
+        activeKnowledgeRequestId = null;
         hideKnowledgeLoading();
         buttons.forEach(btn => btn.disabled = false);
       }
@@ -5527,6 +6067,31 @@
     }
 
     function enhanceCodeBlocks(container) {
+      function looksLikeActualCode(language, text) {
+        const lang = String(language || '').trim().toLowerCase();
+        if (['bash', 'sh', 'shell', 'zsh', 'powershell', 'ps1', 'python', 'py', 'sql', 'json', 'yaml', 'yml', 'xml', 'javascript', 'js', 'typescript', 'ts', 'html', 'css', 'ini', 'toml', 'diff', 'dockerfile'].includes(lang)) {
+          return true;
+        }
+
+        const lines = String(text || '').split('\n').map((line) => line.trim()).filter(Boolean);
+        if (!lines.length) return false;
+
+        let codeLikeCount = 0;
+        let uiLikeCount = 0;
+        let keyValueCount = 0;
+        for (const line of lines) {
+          if (/^(sudo |docker |kubectl |python |pip |npm |yarn |git |curl |wget )/i.test(line)) codeLikeCount += 1;
+          if (/[`{}();=<>]/.test(line)) codeLikeCount += 1;
+          if (/^(--|#|\/\*|\*)/.test(line)) codeLikeCount += 1;
+          if (/^[A-Za-z0-9_.-]+\s*=\s*.+$/.test(line)) codeLikeCount += 1;
+          if (/\b(click|select|open|navigate|button|tab|screen|ui|portainer|admin studio|field|dropdown|checkbox|page|section)\b/i.test(line)) uiLikeCount += 1;
+          if (/^[A-Za-z][A-Za-z0-9_ /()-]{1,40}:\s+.+$/.test(line)) keyValueCount += 1;
+        }
+
+        if (codeLikeCount === 0 && (uiLikeCount > 0 || keyValueCount > 0)) return false;
+        return codeLikeCount > Math.max(0, Math.floor(lines.length / 4));
+      }
+
       const codeBlocks = container.querySelectorAll('pre code');
       codeBlocks.forEach((codeBlock) => {
         const pre = codeBlock.parentElement;
@@ -5549,6 +6114,15 @@
             language = cls.replace('language-', '') || 'code';
             break;
           }
+        }
+
+        const rawCodeText = codeBlock.textContent || '';
+        if (!looksLikeActualCode(language, rawCodeText)) {
+          const note = document.createElement('div');
+          note.className = 'ui-note-block';
+          note.textContent = rawCodeText;
+          pre.replaceWith(note);
+          return;
         }
 
         const header = document.createElement('div');
@@ -6108,6 +6682,7 @@
         const requestBody = {
           question: question,
           top_k: 5,
+          conversation_id: getChatConversationId(),
           ticket_url: ticketSelect.value || null,
           is_followup: !!(ticketSelect.value && ticketFirstQuestionAsked[ticketSelect.value])
         };
