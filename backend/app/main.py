@@ -1191,7 +1191,18 @@ def _looks_like_command_or_code_line(line: str) -> bool:
 
     if re.search(r'[`{}();=<>"]', candidate):
         return True
-    if re.match(r"^\s*(--|#|/\*|\*)", candidate):
+    # Lines starting with # that contain UI/navigation language are NOT code
+    if re.match(r"^\s*#", candidate):
+        _comment_body = re.sub(r"^\s*#\s*", "", candidate)
+        if re.search(
+            r"\b(click|select|open|navigate|button|tab|screen|ui|portainer|admin studio|"
+            r"field|dropdown|checkbox|page|section|restart|restarting|service|clearing|"
+            r"browser|cache|setting|menu|dialog|typically|usually|involves|done through|via)"
+            r"\b", _comment_body, re.IGNORECASE
+        ):
+            return False
+        return True
+    if re.match(r"^\s*(--|/\*|\*)", candidate):
         return True
     if re.match(r"^[A-Za-z0-9_.-]+\s*=\s*.+$", candidate):
         return True
@@ -4664,10 +4675,39 @@ def _llm_verify_answer_relevance(question: str, context_text: str, answer: str) 
 
 def _looks_like_noncode_fenced_block(language: str, content: str) -> bool:
     lang = str(language or "").strip().lower()
-    if lang in {"bash", "sh", "shell", "zsh", "powershell", "ps1", "python", "py", "sql", "json", "yaml", "yml", "xml", "javascript", "js", "typescript", "ts", "html", "css", "ini", "toml", "diff", "dockerfile"}:
-        return False
 
     lines = [line.rstrip() for line in str(content or "").strip().splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    # Even for "code" languages like bash/shell, detect blocks that are purely
+    # UI/navigation instructions disguised as code comments (no real commands).
+    if lang in {"bash", "sh", "shell", "zsh", "powershell", "ps1"}:
+        _real_cmd_count = 0
+        _ui_comment_count = 0
+        for _ln in lines:
+            _stripped = _ln.strip()
+            # Lines that are actual commands (not comments)
+            if _stripped and not re.match(r"^\s*#", _stripped):
+                _real_cmd_count += 1
+            elif re.match(r"^\s*#", _stripped):
+                _body = re.sub(r"^\s*#\s*", "", _stripped)
+                if re.search(
+                    r"\b(click|select|open|navigate|button|tab|screen|ui|portainer|"
+                    r"admin studio|field|dropdown|checkbox|page|section|restart|restarting|"
+                    r"service|clearing|browser|cache|setting|menu|dialog|typically|usually|"
+                    r"involves|done through|via the|this can|you can|access)\b",
+                    _body, re.IGNORECASE,
+                ):
+                    _ui_comment_count += 1
+        # If there are NO real commands and at least some UI comments, it's not code
+        if _real_cmd_count == 0 and _ui_comment_count > 0:
+            return True
+        # If it has real commands, keep it as code
+        return False
+
+    if lang in {"python", "py", "sql", "json", "yaml", "yml", "xml", "javascript", "js", "typescript", "ts", "html", "css", "ini", "toml", "diff", "dockerfile"}:
+        return False
     if not lines:
         return False
 
@@ -4701,9 +4741,14 @@ def _normalize_noncode_fenced_blocks(answer: str) -> str:
         lines = [line.strip() for line in content.splitlines() if line.strip()]
         if not lines:
             return ""
-        if all(re.match(r"^[A-Za-z][A-Za-z0-9_ /()-]{1,40}:\s+.+$", line) for line in lines):
-            return "\n".join(f"- {line}" for line in lines)
-        return "  \n".join(lines)
+        # Strip leading # from comment-only lines (UI instructions that were in bash blocks)
+        cleaned = []
+        for line in lines:
+            stripped = re.sub(r"^\s*#\s*", "", line).strip()
+            cleaned.append(stripped if stripped else line)
+        if all(re.match(r"^[A-Za-z][A-Za-z0-9_ /()-]{1,40}:\s+.+$", cl) for cl in cleaned):
+            return "\n".join(f"- {cl}" for cl in cleaned)
+        return "  \n".join(cleaned)
 
     return pattern.sub(_replace, answer)
 
@@ -7467,11 +7512,13 @@ def chat(req: ChatRequest):
             f"prompt_chars={len(prompt)} prompt_tokens={_estimate_text_tokens(prompt)}",
         )
         draft_answer = call_llm(prompt, temperature=0.2)
-        answer = _ground_answer_against_context(question, combined_context, draft_answer)
-        answer = _enforce_specific_grounded_answer(question, combined_context, answer)
-        answer = _llm_ensure_answer_completeness(question, combined_context, answer)
-        answer = _llm_verify_answer_relevance(question, combined_context, answer)
-        answer = _normalize_noncode_fenced_blocks(answer)
+        # NOTE: Removed 4 post-processing LLM calls that were degrading answers:
+        # _ground_answer_against_context — was stripping valid content and saying "not found"
+        # _enforce_specific_grounded_answer — redundant with system prompt rules
+        # _llm_ensure_answer_completeness — redundant with system prompt rules
+        # _llm_verify_answer_relevance — was nuking entire answers with "does not contain a direct answer"
+        # The system prompt already handles grounding, specificity, and completeness.
+        answer = _normalize_noncode_fenced_blocks(draft_answer)
     except Exception as exc:
         print(f"[API][CHAT][ERROR] LLM call failed: {exc}")
         traceback.print_exc()
