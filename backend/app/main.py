@@ -4,7 +4,7 @@ import pathlib
 import time
 import traceback
 from typing import List, Optional, Tuple, Dict, Any, Deque
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -25,7 +25,7 @@ import shutil
 import json
 import mimetypes
 from io import BytesIO
-from urllib.parse import unquote
+from urllib.parse import unquote, quote, urlsplit, urlunsplit, parse_qsl, urlencode
 import threading
 
 # Try to import optional dependencies
@@ -114,10 +114,11 @@ VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "2500"))
 VISION_TIMEOUT_SECONDS = int(os.getenv("VISION_TIMEOUT_SECONDS", "120"))
 VISION_RETRY_COUNT = int(os.getenv("VISION_RETRY_COUNT", "2"))
 
-# Large file processing support (10M+ tokens for 55MB+ PDFs)
-MAX_FILE_SIZE_TOKENS = int(os.getenv("MAX_FILE_SIZE_TOKENS", "10000000"))
+# Large file processing support (up to 2M tokens per uploaded or fetched file)
+MAX_FILE_SIZE_TOKENS = int(os.getenv("MAX_FILE_SIZE_TOKENS", "2000000"))
 BLOCK_PROCESSING_ENABLED = os.getenv("BLOCK_PROCESSING_ENABLED", "true").lower() in ("1", "true", "yes")
 DETAILED_INGEST_LOGS = os.getenv("DETAILED_INGEST_LOGS", "true").lower() in ("1", "true", "yes")
+LLM_MAX_INPUT_TOKENS = 120000
 
 TABLE_ROW_START_TAG = "[TABLE_ROW]"
 TABLE_ROW_END_TAG = "[/TABLE_ROW]"
@@ -157,6 +158,7 @@ MAX_CONVERSATION_MESSAGES = 12
 conversation_store: Dict[str, Deque[Dict[str, str]]] = defaultdict(
     lambda: deque(maxlen=MAX_CONVERSATION_MESSAGES)
 )
+conversation_state_store: Dict[str, Dict[str, Any]] = {}
 
 # In-memory cancellation flags for long-running knowledge ingestion requests.
 knowledge_cancel_lock = threading.Lock()
@@ -179,6 +181,14 @@ def _request_log_prefix(request_id: Optional[str]) -> str:
 def _ingest_log(message: str, request_id: Optional[str] = None, force: bool = False) -> None:
     if DETAILED_INGEST_LOGS or force:
         print(f"[INGEST]{_request_log_prefix(request_id)} {message}")
+
+
+def _rag_log_step(step_number: int, total_steps: int, title: str, detail: Optional[str] = None) -> None:
+    prefix = f"[RAG][Step {step_number}/{total_steps}] {title}"
+    if detail:
+        print(f"{prefix}: {detail}")
+    else:
+        print(prefix)
 
 
 def _mark_knowledge_request_started(request_id: Optional[str]) -> None:
@@ -514,6 +524,14 @@ ADO_ORG = os.getenv("ADO_ORG")
 ADO_PROJECT = os.getenv("ADO_PROJECT")
 ADO_PROJECT_TICKET_SUMMARY = os.getenv("ADO_PROJECT_TICKET_SUMMARY", "").strip('"')
 ADO_PAT = os.getenv("ADO_PAT")
+ADO_SUPPORT_TICKET_QUERY_TARGETS = os.getenv(
+    "ADO_SUPPORT_TICKET_QUERY_TARGETS",
+    "TA9 Support::My Queries/external tickets|STE Support Board::My Queries/external tickets",
+)
+ADO_SUPPORT_TICKET_ASSIGNED_TO = os.getenv(
+    "ADO_SUPPORT_TICKET_ASSIGNED_TO",
+    "Support <support@ta-9.com>",
+)
 
 LEARN_QUERY_NAME = os.getenv("ADO_LEARN_QUERY_NAME", "ai_learn_tickets_query")
 
@@ -528,7 +546,110 @@ def _ado_headers() -> dict:
     }
 
 def _ado_base() -> str:
-    return f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}"
+    if ADO_PROJECT:
+        return f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}"
+    return f"https://dev.azure.com/{ADO_ORG}"
+
+
+def _ado_project_base(project: Optional[str] = None) -> str:
+    project_name = (project or ADO_PROJECT or "").strip()
+    if project_name:
+        return f"https://dev.azure.com/{ADO_ORG}/{project_name}"
+    return f"https://dev.azure.com/{ADO_ORG}"
+
+
+def _ado_query_api_path(query_path: str) -> str:
+    parts = [quote(part.strip(), safe="") for part in str(query_path or "").split("/") if part.strip()]
+    if not parts:
+        raise RuntimeError("Azure DevOps query path is empty.")
+    return "/".join(parts)
+
+
+def _ado_support_ticket_query_definitions() -> List[Tuple[str, str]]:
+    targets: List[Tuple[str, str]] = []
+    for raw_target in str(ADO_SUPPORT_TICKET_QUERY_TARGETS or "").split("|"):
+        target = raw_target.strip()
+        if not target:
+            continue
+        if "::" not in target:
+            print(f"[ADO][TICKETS][WARN] Ignoring malformed query target '{target}'. Expected Project::Query Path.")
+            continue
+        project, query_path = target.split("::", 1)
+        project = project.strip()
+        query_path = query_path.strip()
+        if project and query_path:
+            targets.append((project, query_path))
+    if not targets:
+        default_project = (ADO_PROJECT_TICKET_SUMMARY or ADO_PROJECT or "").strip()
+        if default_project:
+            targets.append((default_project, "My Queries/external tickets"))
+    return targets
+
+
+def _ado_support_ticket_fallback_wiql(project: str) -> str:
+    project_name = str(project or "").replace("'", "''")
+    assigned_to = str(ADO_SUPPORT_TICKET_ASSIGNED_TO or "").replace("'", "''")
+    query = (
+        "SELECT [System.Id] FROM WorkItems "
+        f"WHERE [System.TeamProject] = '{project_name}' "
+        "AND [System.State] <> 'Closed' "
+    )
+    if assigned_to:
+        query += f"AND [System.AssignedTo] = '{assigned_to}' "
+    query += "ORDER BY [System.ChangedDate] DESC"
+    return query
+
+
+def _ado_fetch_saved_query_wiql(project: str, query_path: str) -> str:
+    url = (
+        f"{_ado_project_base(project)}/_apis/wit/queries/{_ado_query_api_path(query_path)}"
+        "?$expand=wiql&api-version=7.1"
+    )
+    resp = requests.get(url, headers=_ado_headers(), timeout=60)
+    if resp.status_code != 200:
+        raise RuntimeError(f"saved query fetch failed: {resp.status_code} {resp.text[:300]}")
+    payload = resp.json()
+    wiql = str(payload.get("wiql") or "").strip()
+    if not wiql:
+        raise RuntimeError(f"saved query '{query_path}' in project '{project}' did not return WIQL text")
+    return wiql
+
+
+def _ado_execute_wiql(project: str, wiql: str, label: str) -> List[int]:
+    url = f"{_ado_project_base(project)}/_apis/wit/wiql?api-version=7.1-preview.2"
+    try:
+        resp = requests.post(url, json={"query": wiql}, headers=_ado_headers(), timeout=60)
+    except Exception as e:
+        print(f"[ADO][TICKETS][ERROR] Query '{label}' failed during execution: {e}")
+        traceback.print_exc()
+        raise RuntimeError(f"ADO WIQL failed: {e}")
+    if resp.status_code != 200:
+        print(f"[ADO][TICKETS][ERROR] Query '{label}' returned {resp.status_code}: {resp.text[:300]}")
+        raise RuntimeError(f"ADO WIQL error: {resp.text}")
+    items = resp.json().get("workItems", [])
+    ids = [int(it.get("id")) for it in items if it.get("id")]
+    print(f"[ADO][TICKETS] Query '{label}' returned {len(ids)} work items")
+    return ids
+
+
+def _ado_fetch_work_items_by_ids(ids: List[int]) -> List[dict]:
+    if not ids:
+        return []
+
+    results: List[dict] = []
+    org_base = _ado_project_base(None)
+    for start in range(0, len(ids), 200):
+        batch_ids = ids[start:start + 200]
+        det_url = (
+            f"{org_base}/_apis/wit/workitems?ids={','.join(str(item_id) for item_id in batch_ids)}"
+            "&$expand=all&api-version=7.1"
+        )
+        det = requests.get(det_url, headers=_ado_headers(), timeout=60)
+        if det.status_code != 200:
+            print(f"[ADO][TICKETS][ERROR] Work item detail fetch returned {det.status_code}: {det.text[:300]}")
+            raise RuntimeError(f"ADO workitems details error: {det.text}")
+        results.extend(det.json().get("value", []))
+    return results
 
 
 def _ado_wiql_learning_query(project: Optional[str] = None) -> str:
@@ -589,6 +710,227 @@ def _extract_images_from_html(html: str) -> List[str]:
         return [m for m in matches if m.strip()]
     except Exception:
         return []
+
+
+def _normalize_ado_resource_url(resource_url: str, project: Optional[str] = None) -> str:
+    raw_url = str(resource_url or "").strip()
+    if not raw_url:
+        return ""
+    if raw_url.startswith("data:"):
+        return raw_url
+    if raw_url.startswith("//"):
+        return "https:" + raw_url
+    if raw_url.startswith("http://") or raw_url.startswith("https://"):
+        return raw_url
+    if raw_url.startswith("/_apis/") or raw_url.startswith("/_attachments/"):
+        return f"{_ado_project_base(project)}{raw_url}"
+    if raw_url.startswith("_apis/") or raw_url.startswith("_attachments/"):
+        return f"{_ado_project_base(project)}/{raw_url}"
+    if raw_url.startswith("/"):
+        return f"{_ado_project_base(project)}{raw_url}"
+    return raw_url
+
+
+def _ado_guess_filename(resource_url: str, fallback_name: str = "attachment") -> str:
+    try:
+        parsed = urlsplit(resource_url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        for key in ("fileName", "filename", "name"):
+            value = (query.get(key) or "").strip()
+            if value:
+                return unquote(value)
+        tail = pathlib.Path(unquote(parsed.path)).name
+        if tail:
+            return tail
+    except Exception:
+        pass
+    return fallback_name
+
+
+def _ado_with_download_flag(resource_url: str) -> str:
+    parsed = urlsplit(resource_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    if "download" not in query:
+        query["download"] = "true"
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
+
+
+def _download_ado_binary_resource(
+    resource_url: str,
+    project: Optional[str] = None,
+    file_name: Optional[str] = None,
+) -> Optional[dict]:
+    normalized_url = _normalize_ado_resource_url(resource_url, project=project)
+    if not normalized_url:
+        return None
+
+    if normalized_url.startswith("data:"):
+        normalized_b64, payload_mime = _normalize_image_base64_payload(normalized_url)
+        if not normalized_b64:
+            return None
+        try:
+            decoded_bytes = base64.b64decode(normalized_b64)
+        except Exception:
+            return None
+        resolved_name = file_name or "embedded-image"
+        return {
+            "file_name": resolved_name,
+            "content_type": payload_mime or mimetypes.guess_type(resolved_name)[0] or "application/octet-stream",
+            "data": decoded_bytes,
+            "url": normalized_url,
+        }
+
+    urls_to_try = [normalized_url]
+    download_url = _ado_with_download_flag(normalized_url)
+    if download_url != normalized_url:
+        urls_to_try.append(download_url)
+
+    last_error: Optional[str] = None
+    while urls_to_try:
+        candidate_url = urls_to_try.pop(0)
+        try:
+            response = requests.get(candidate_url, headers=_ado_headers(), timeout=120, allow_redirects=True)
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+
+        if response.status_code != 200:
+            last_error = f"{response.status_code} {response.text[:200]}"
+            continue
+
+        content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type == "application/json":
+            try:
+                payload = response.json()
+            except Exception:
+                payload = {}
+            follow_url = str(payload.get("downloadUrl") or payload.get("url") or "").strip()
+            if follow_url and follow_url not in urls_to_try:
+                urls_to_try.append(follow_url)
+                continue
+
+        resolved_name = file_name or _ado_guess_filename(response.url or candidate_url)
+        return {
+            "file_name": resolved_name,
+            "content_type": content_type or mimetypes.guess_type(resolved_name)[0] or "application/octet-stream",
+            "data": response.content,
+            "url": response.url or candidate_url,
+        }
+
+    print(f"[ADO][TICKET][WARN] Failed to download Azure DevOps resource '{normalized_url}': {last_error}")
+    return None
+
+
+def _describe_ticket_image_reference(image_ref: str, source_label: str, project: Optional[str] = None) -> str:
+    normalized_ref = _normalize_ado_resource_url(image_ref, project=project)
+    if not normalized_ref:
+        return f"[Image Content from {source_label}]\n[Image source was empty]"
+
+    downloaded = _download_ado_binary_resource(normalized_ref, project=project, file_name=source_label)
+    if downloaded:
+        resolved_name = downloaded.get("file_name") or source_label
+        content_type = str(downloaded.get("content_type") or "")
+        if content_type.startswith("image/") or resolved_name.split(".")[-1].lower() in POPULAR_IMAGE_EXTS:
+            file_b64 = base64.b64encode(downloaded["data"]).decode("utf-8")
+            return _process_image_file(
+                resolved_name,
+                file_b64,
+                content_type,
+                describe_func=_describe_image_via_vision,
+            )
+
+    try:
+        description = _describe_image_via_vision(normalized_ref)
+    except Exception as exc:
+        description = f"[Image analysis failed: {exc}]"
+    return f"[Image Content from {source_label}]\n{description}"
+
+
+def _render_ado_html_with_inline_images(html: str, section_label: str, project: Optional[str] = None) -> str:
+    raw_html = str(html or "")
+    if not raw_html.strip():
+        return ""
+
+    parts: List[str] = []
+    cursor = 0
+    image_index = 0
+    for match in re.finditer(r'<img[^>]+src=["\']?([^"\'>\s]+)["\']?[^>]*>', raw_html, flags=re.IGNORECASE):
+        text_segment = _strip_html(raw_html[cursor:match.start()]).strip()
+        if text_segment:
+            parts.append(text_segment)
+
+        image_index += 1
+        parts.append(
+            _describe_ticket_image_reference(
+                match.group(1),
+                source_label=f"{section_label} image {image_index}",
+                project=project,
+            )
+        )
+        cursor = match.end()
+
+    tail_text = _strip_html(raw_html[cursor:]).strip()
+    if tail_text:
+        parts.append(tail_text)
+
+    if not parts:
+        return _strip_html(raw_html).strip()
+    return "\n\n".join(part for part in parts if part)
+
+
+def _build_ticket_attachment_context(
+    work_item_id: int,
+    attachments: List[dict],
+    project: Optional[str] = None,
+) -> str:
+    if not attachments:
+        return ""
+
+    ordered_attachments = sorted(
+        attachments,
+        key=lambda item: (item.get("createdDate") or "", item.get("name") or ""),
+    )
+    blocks: List[str] = []
+    total = len(ordered_attachments)
+
+    for index, attachment in enumerate(ordered_attachments, start=1):
+        attachment_name = str(attachment.get("name") or f"attachment-{index}")
+        print(f"[ADO][TICKET] Downloading attachment {index}/{total} for work item {work_item_id}: {attachment_name}")
+        downloaded = _download_ado_binary_resource(
+            str(attachment.get("url") or ""),
+            project=project,
+            file_name=attachment_name,
+        )
+
+        header_lines = [f"Attachment {index}: {attachment_name}"]
+        created_date = str(attachment.get("createdDate") or "").strip()
+        comment = str(attachment.get("comment") or "").strip()
+        if created_date:
+            header_lines.append(f"Added: {created_date}")
+        if comment:
+            header_lines.append(f"Note: {comment}")
+
+        if not downloaded:
+            header_lines.append("[Unable to download attachment content from Azure DevOps]")
+            blocks.append("\n".join(header_lines))
+            continue
+
+        upload_payload = {
+            "name": str(downloaded.get("file_name") or attachment_name),
+            "type": str(downloaded.get("content_type") or "application/octet-stream"),
+            "data": base64.b64encode(downloaded["data"]).decode("utf-8"),
+        }
+        extracted_text = process_uploaded_file(
+            upload_payload,
+            describe_image_func=_describe_image_via_vision,
+        ).strip()
+        if extracted_text:
+            header_lines.append(extracted_text)
+        else:
+            header_lines.append("[Attachment was downloaded but produced no extractable content]")
+        blocks.append("\n".join(header_lines))
+
+    return "\n\n---\n\n".join(blocks)
 
 
 def _describe_image_via_vision(image_url: str) -> str:
@@ -1585,7 +1927,7 @@ def _first_field(fields: dict, keys: List[str]) -> str:
 
 def ado_fetch_ticket_full(work_item_id: int) -> dict:
     """Fetch main fields + comments for a work item."""
-    base = _ado_base()
+    base = _ado_project_base(None)
     hdrs = _ado_headers()
     main = requests.get(
         f"{base}/_apis/wit/workitems/{work_item_id}?$expand=all&api-version=7.1",
@@ -1596,19 +1938,23 @@ def ado_fetch_ticket_full(work_item_id: int) -> dict:
         raise RuntimeError(f"ADO workitem fetch error: {main.text}")
     data = main.json()
     fields = data.get("fields", {})
+    relations = data.get("relations", [])
+    project_name = fields.get("System.TeamProject") or ADO_PROJECT
 
     comments: List[dict] = []
     try:
         c = requests.get(
-            f"{base}/_apis/wit/workItems/{work_item_id}/comments?api-version=7.1-preview.3",
+            f"{_ado_project_base(project_name)}/_apis/wit/workItems/{work_item_id}/comments?api-version=7.1-preview.3",
             headers=hdrs,
             timeout=60,
         )
         if c.status_code == 200:
             for it in c.json().get("comments", []):
+                raw_html = it.get("text", "") or ""
                 comments.append(
                     {
-                        "text": _strip_html(it.get("text", "")),
+                        "text": _strip_html(raw_html),
+                        "raw_html": raw_html,
                         "createdBy": (it.get("createdBy") or {}).get("displayName")
                         or (it.get("createdBy") or {}).get("uniqueName")
                         or "",
@@ -1618,7 +1964,29 @@ def ado_fetch_ticket_full(work_item_id: int) -> dict:
     except Exception as e:
         print(f"[ADO][WARN] comments fetch failed: {e}")
 
-    return {"id": work_item_id, "fields": fields, "comments": comments}
+    attachments: List[dict] = []
+    for relation in relations or []:
+        if str(relation.get("rel") or "") != "AttachedFile":
+            continue
+        attributes = relation.get("attributes") or {}
+        relation_url = relation.get("url") or ""
+        attachment_name = attributes.get("name") or _ado_guess_filename(relation_url)
+        attachments.append(
+            {
+                "name": attachment_name,
+                "url": relation_url,
+                "comment": attributes.get("comment") or "",
+                "createdDate": attributes.get("resourceCreatedDate") or attributes.get("authorizedDate") or "",
+            }
+        )
+
+    return {
+        "id": work_item_id,
+        "project": project_name,
+        "fields": fields,
+        "comments": comments,
+        "attachments": attachments,
+    }
 
 
 def build_conversation_block(comments: List[dict]) -> str:
@@ -1716,47 +2084,58 @@ def generate_professional_ticket_report(ticket: dict) -> str:
     return full_report
 
 def ado_list_tickets(tag_contains: str = "CC") -> List[dict]:
-    """Run WIQL and return a list of work items with details (id,title,state,tags,url)."""
-    url = f"{_ado_base()}/_apis/wit/wiql?api-version=7.1-preview.2"
-    # WIQL aligned with the Azure DevOps query:
-    # State <> Closed, Tags contains tag_contains, Work Item Type <> Bug.
-    wiql = (
-        "SELECT [System.Id] FROM WorkItems "
-        "WHERE [System.TeamProject] = @project "
-        "AND [System.State] <> 'Closed' "
-        f"AND [System.Tags] CONTAINS '{tag_contains}' "
-        "AND [System.WorkItemType] <> 'Bug' "
-        "ORDER BY [System.ChangedDate] DESC"
-    )
-    try:
-        resp = requests.post(url, json={"query": wiql}, headers=_ado_headers(), timeout=60)
-    except Exception as e:
-        print(f"[ADO][ERROR] WIQL call failed: {e}")
-        traceback.print_exc()
-        raise RuntimeError(f"ADO WIQL failed: {e}")
-    if resp.status_code != 200:
-        print(f"[ADO][ERROR] WIQL non-200: {resp.status_code} {resp.text[:300]}")
-        raise RuntimeError(f"ADO WIQL error: {resp.text}")
-    items = resp.json().get("workItems", [])
-    ids = [str(it.get("id")) for it in items if it.get("id")]
-    if not ids:
+    """Load open support tickets from the configured Azure DevOps saved queries."""
+    del tag_contains
+
+    query_targets = _ado_support_ticket_query_definitions()
+    if not query_targets:
         return []
 
-    # Fetch work item details
-    det_url = f"{_ado_base()}/_apis/wit/workitems?ids={','.join(ids)}&$expand=all&api-version=7.1"
-    det = requests.get(det_url, headers=_ado_headers(), timeout=60)
-    if det.status_code != 200:
-        print(f"[ADO][ERROR] workitems details non-200: {det.status_code} {det.text[:300]}")
-        raise RuntimeError(f"ADO workitems details error: {det.text}")
+    merged_ids: List[int] = []
+    seen_ids = set()
+    for project, query_path in query_targets:
+        label = f"{project}::{query_path}"
+        try:
+            wiql = _ado_fetch_saved_query_wiql(project, query_path)
+            ids = _ado_execute_wiql(project, wiql, label)
+        except Exception as exc:
+            print(
+                f"[ADO][TICKETS][WARN] Saved query '{label}' could not be used ({exc}). "
+                "Falling back to the same filter shown in the screenshot."
+            )
+            ids = _ado_execute_wiql(project, _ado_support_ticket_fallback_wiql(project), f"{label} [fallback]")
+        for item_id in ids:
+            if item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+            merged_ids.append(item_id)
+
+    if not merged_ids:
+        return []
+
     results = []
-    for wi in det.json().get("value", []):
+    for wi in _ado_fetch_work_items_by_ids(merged_ids):
         fid = wi.get("id")
         flds = wi.get("fields", {})
         title = flds.get("System.Title", "")
         state = flds.get("System.State", "")
         tags = flds.get("System.Tags", "")
-        web_url = f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}/_workitems/edit/{fid}"
-        results.append({"id": fid, "title": title, "state": state, "tags": tags, "url": web_url})
+        project_name = flds.get("System.TeamProject", "")
+        changed_date = flds.get("System.ChangedDate", "")
+        web_url = f"https://dev.azure.com/{ADO_ORG}/{project_name}/_workitems/edit/{fid}"
+        results.append(
+            {
+                "id": fid,
+                "title": title,
+                "state": state,
+                "tags": tags,
+                "project": project_name,
+                "changedDate": changed_date,
+                "url": web_url,
+            }
+        )
+
+    results.sort(key=lambda item: (item.get("changedDate") or "", item.get("id") or 0), reverse=True)
     return results
 
 def ado_parse_id_from_url(url: str) -> Optional[int]:
@@ -1771,56 +2150,71 @@ def ado_parse_id_from_url(url: str) -> Optional[int]:
         return None
 
 def ado_fetch_ticket_text(work_item_id: int) -> str:
-    """Fetch main fields and comments to a single plain-text blob."""
-    base = _ado_base()
-    hdrs = _ado_headers()
-    main = requests.get(f"{base}/_apis/wit/workitems/{work_item_id}?$expand=all&api-version=7.1", headers=hdrs, timeout=60)
-    if main.status_code != 200:
-        raise RuntimeError(f"ADO workitem fetch error: {main.text}")
-    data = main.json()
-    f = data.get("fields", {})
-    title = f.get("System.Title", "")
-    state = f.get("System.State", "")
-    tags = f.get("System.Tags", "")
-    raw_desc = f.get("System.Description", "") or f.get("Microsoft.VSTS.TCM.ReproSteps", "") or ""
+    """Fetch full ticket context as chronological plain text, including attachments."""
+    ticket = ado_fetch_ticket_full(work_item_id)
+    fields = ticket.get("fields", {})
+    comments = sorted(ticket.get("comments", []), key=lambda item: item.get("createdDate") or "")
+    attachments = ticket.get("attachments", [])
+    project_name = ticket.get("project") or fields.get("System.TeamProject") or ADO_PROJECT
 
-    # Extract and describe images
-    image_descriptions = ""
-    if raw_desc:
-        images = _extract_images_from_html(raw_desc)
-        if images:
-            print(f"[ADO_FETCH] Found {len(images)} images in ticket {work_item_id}, describing via vision...")
-            image_texts = []
-            for img_url in images[:3]:  # Limit to first 3 images
-                desc = _describe_image_via_vision(img_url)
-                image_texts.append(desc)
-            if image_texts:
-                image_descriptions = "\n\nImages in description:\n" + "\n".join(image_texts)
+    title = fields.get("System.Title", "")
+    state = fields.get("System.State", "")
+    tags = fields.get("System.Tags", "")
+    work_item_type = fields.get("System.WorkItemType", "")
+    assigned_to = _first_field(fields, ["System.AssignedTo"])
+    raw_desc = fields.get("System.Description", "") or fields.get("Microsoft.VSTS.TCM.ReproSteps", "") or ""
+    description_text = _render_ado_html_with_inline_images(
+        raw_desc,
+        section_label=f"ticket {work_item_id} description",
+        project=project_name,
+    ).strip() or "Not provided."
 
-    desc = _strip_html(raw_desc) + image_descriptions
+    discussion_blocks: List[str] = []
+    total_comments = len(comments)
+    for index, comment in enumerate(comments, start=1):
+        author = comment.get("createdBy") or "Unknown"
+        created_date = comment.get("createdDate") or ""
+        body = _render_ado_html_with_inline_images(
+            comment.get("raw_html") or comment.get("text") or "",
+            section_label=f"ticket {work_item_id} discussion comment {index}",
+            project=project_name,
+        ).strip() or "[Empty discussion entry]"
+        header = f"[{created_date}] {author}"
+        discussion_blocks.append(f"{header}\n{body}")
+        print(f"[ADO][TICKET] Processed discussion entry {index}/{total_comments} for work item {work_item_id}")
 
-    comments_text = []
-    try:
-        c = requests.get(f"{base}/_apis/wit/workItems/{work_item_id}/comments?api-version=7.1-preview.3", headers=hdrs, timeout=60)
-        if c.status_code == 200:
-            for it in c.json().get("comments", []):
-                txt = it.get("text", "")
-                if txt:
-                    # Also check for images in comments
-                    comment_images = _extract_images_from_html(txt)
-                    comment_text = _strip_html(txt)
-                    if comment_images:
-                        for img_url in comment_images[:2]:
-                            img_desc = _describe_image_via_vision(img_url)
-                            comment_text += f"\n[Image: {img_desc}]"
-                    comments_text.append(comment_text)
-    except Exception as e:
-        print(f"[ADO][WARN] comments fetch failed: {e}")
-
-    blob = (
-        f"Title: {title}\nState: {state}\nTags: {tags}\n\nDescription:\n{desc}\n\n"
-        + ("Comments:\n" + "\n---\n".join(comments_text) if comments_text else "")
+    attachment_text = _build_ticket_attachment_context(
+        work_item_id,
+        attachments,
+        project=project_name,
     ).strip()
+
+    sections = [
+        f"Ticket ID: {work_item_id}",
+        f"Project: {project_name}",
+        f"Type: {work_item_type}",
+        f"Title: {title}",
+        f"State: {state}",
+        f"Assigned To: {assigned_to}",
+        f"Tags: {tags}",
+        "",
+        "Description (full, chronological):",
+        description_text,
+        "",
+        "Discussion (full, chronological):",
+        "\n\n---\n\n".join(discussion_blocks) if discussion_blocks else "Not provided.",
+    ]
+
+    if attachment_text:
+        sections.extend(
+            [
+                "",
+                "Attachments (full content, chronological when Azure DevOps provides dates):",
+                attachment_text,
+            ]
+        )
+
+    blob = "\n".join(section for section in sections if section is not None).strip()
     if not blob:
         blob = f"(Empty work item {work_item_id})"
     return blob
@@ -2620,6 +3014,12 @@ def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
         procedural_boost = "step by step instructions procedure configure setup admin tools system configuration"
         variants.append(f"{base}\n\n{procedural_boost}" if base else procedural_boost)
 
+        procedural_subtasks = _extract_procedural_subtasks(question, max_subtasks=3)
+        for action, object_phrase in procedural_subtasks[:2]:
+            subtask_variant = f"how to {action} {object_phrase} step by step"
+            if subtask_variant not in variants:
+                variants.append(subtask_variant)
+
     if entity_fact_intent:
         entity_boost = (
             "company name product names naming policy naming convention "
@@ -2641,7 +3041,15 @@ def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
             "system overview, dashboards, admin studio, data model"
         )
         variants.append(f"{base}\n\n{ta9_boost}" if base else ta9_boost)
-    return variants[:4]
+    deduped_variants: List[str] = []
+    seen = set()
+    for variant in variants:
+        key = re.sub(r"\s+", " ", str(variant or "").strip().lower())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped_variants.append(variant)
+    return deduped_variants[:5]
 
 def augment_question(question: str) -> str:
     """
@@ -2743,6 +3151,237 @@ def _question_has_entity_fact_intent(question: str) -> bool:
     ]
     term_hits = sum(1 for term in fact_terms if term in q)
     return term_hits >= 2
+
+
+def _question_explicitly_requests_database_solution(question: str) -> bool:
+    q = (question or "").lower().strip()
+    if not q:
+        return False
+
+    explicit_patterns = [
+        r"\b(database|db)\b",
+        r"\b(sql|sql server|mssql|mysql|mariadb|postgres(?:ql)?|sqlite)\b",
+        r"\bbackend table(?:-level)?\b",
+        r"\btable[- ]level\b",
+        r"\bdirect(?:ly)? in (?:the )?database\b",
+        r"\bthrough (?:the )?database\b",
+        r"\bvia sql\b",
+        r"\bdataschema1\b",
+        r"\bdataschemafields1\b",
+        r"\bdataconnectionsmanager\b",
+        r"\bindexing_audit\b",
+    ]
+    if any(re.search(pattern, q) for pattern in explicit_patterns):
+        return True
+
+    table_terms = bool(re.search(r"\b(table|tables|column|columns|schema)\b", q))
+    db_terms = bool(re.search(r"\b(database|db|sql|backend)\b", q))
+    return table_terms and db_terms
+
+
+def _question_explicitly_requests_admin_studio_solution(question: str) -> bool:
+    q = (question or "").lower().strip()
+    if not q:
+        return False
+
+    explicit_patterns = [
+        r"\badmin studio\b",
+        r"\bui\b",
+        r"\buser interface\b",
+        r"\bthrough (?:the )?ui\b",
+        r"\bfrom (?:the )?ui\b",
+        r"\bthrough admin studio\b",
+        r"\bfrom admin studio\b",
+        r"\busing admin studio\b",
+    ]
+    return any(re.search(pattern, q) for pattern in explicit_patterns)
+
+
+def _preferred_solution_channel(question: str) -> Optional[str]:
+    if _question_explicitly_requests_database_solution(question):
+        return "database"
+    if _question_explicitly_requests_admin_studio_solution(question):
+        return "admin_studio"
+    if _question_has_procedural_intent(question) and (_is_ta9_question(question) or _has_ta9_context(question)):
+        return "admin_studio"
+    return None
+
+
+def _source_solution_channel_scores(title: str = "", source: str = "", text: str = "") -> Tuple[float, float]:
+    combined = "\n".join(part for part in [title, source, text] if part).lower()
+    if not combined.strip():
+        return 0.0, 0.0
+
+    admin_score = 0.0
+    database_score = 0.0
+
+    admin_markers = [
+        ("admin studio", 4.0),
+        ("ui-based", 2.8),
+        ("user interface", 2.5),
+        ("navigate", 1.1),
+        ("click", 1.1),
+        ("open", 0.6),
+        ("select", 0.6),
+        ("button", 1.0),
+        ("tab", 0.9),
+        ("page", 0.8),
+        ("screen", 0.9),
+        ("dropdown", 1.0),
+        ("checkbox", 1.0),
+        ("save", 0.4),
+    ]
+    database_markers = [
+        ("dataschema1", 4.0),
+        ("dataschemafields1", 4.0),
+        ("dataconnectionsmanager", 3.5),
+        ("indexing_audit", 3.5),
+        ("database", 3.0),
+        (" sql ", 2.2),
+        ("sql server", 3.0),
+        ("mssql", 3.0),
+        ("mysql", 3.0),
+        ("mariadb", 3.0),
+        ("postgres", 3.0),
+        ("sqlite", 3.0),
+        ("dbtablename", 1.8),
+        ("connectionid", 1.8),
+        ("isindextofederatedsearch", 1.9),
+        ("fieldrole", 1.4),
+        ("isid", 1.2),
+        ("isqueryable", 1.2),
+        ("isvalid", 1.2),
+        ("backend table", 2.2),
+    ]
+
+    for marker, weight in admin_markers:
+        if marker in combined:
+            admin_score += weight
+    for marker, weight in database_markers:
+        if marker in combined:
+            database_score += weight
+
+    ui_like_hits = len(re.findall(r"\b(click|select|open|navigate|button|tab|screen|ui|admin studio|dropdown|checkbox|page|section)\b", combined))
+    if ui_like_hits >= 2:
+        admin_score += min(3.0, ui_like_hits * 0.45)
+
+    if re.search(r"(?mi)^\s*(select|update|insert\s+into|delete\s+from)\b", combined):
+        database_score += 3.0
+    if re.search(r"\bfrom\s+[a-z0-9_.]+\b", combined):
+        database_score += 1.2
+
+    return admin_score, database_score
+
+
+def _classify_source_solution_channel(title: str = "", source: str = "", text: str = "") -> str:
+    admin_score, database_score = _source_solution_channel_scores(title=title, source=source, text=text)
+    if admin_score >= 3.0 and admin_score >= database_score + 1.0:
+        return "admin_studio"
+    if database_score >= 3.0 and database_score >= admin_score + 1.0:
+        return "database"
+    if admin_score >= 3.0 and database_score >= 3.0:
+        return "mixed"
+    return "unknown"
+
+
+def _source_solution_preference_adjustment(question: str, title: str = "", source: str = "", text: str = "") -> float:
+    preferred_channel = _preferred_solution_channel(question)
+    if not preferred_channel:
+        return 0.0
+
+    admin_score, database_score = _source_solution_channel_scores(title=title, source=source, text=text)
+    channel = _classify_source_solution_channel(title=title, source=source, text=text)
+    if preferred_channel == "admin_studio":
+        if channel == "admin_studio":
+            return 5.5
+        if channel == "database":
+            return -6.5
+        if admin_score > database_score and admin_score >= 2.0:
+            return 2.0
+        if database_score > admin_score and database_score >= 2.0:
+            return -2.5
+        return 0.0
+
+    if channel == "database":
+        return 5.5
+    if channel == "admin_studio":
+        return -6.5
+    if database_score > admin_score and database_score >= 2.0:
+        return 2.0
+    if admin_score > database_score and admin_score >= 2.0:
+        return -2.5
+    return 0.0
+
+
+def _apply_solution_channel_preference(question: str, candidates: List[dict], max_sources: int) -> List[dict]:
+    if not candidates:
+        return []
+
+    preferred_channel = _preferred_solution_channel(question)
+    if not preferred_channel:
+        return candidates[:max_sources]
+
+    ranked: List[dict] = []
+    top_score = max(float(candidate.get("score") or 0.0) for candidate in candidates)
+
+    for candidate in candidates:
+        title = str(candidate.get("title") or "")
+        source = str(candidate.get("source") or "")
+        text = str(candidate.get("full_content") or candidate.get("excerpt") or "")
+        channel = str(candidate.get("solution_channel") or _classify_source_solution_channel(title=title, source=source, text=text))
+        candidate["solution_channel"] = channel
+
+        task_specificity = float(candidate.get("task_specificity") or 0.0)
+        phrase_hits = int(candidate.get("phrase_hits") or 0)
+        title_overlap = float(candidate.get("title_overlap") or 0.0)
+        local_overlap = float(candidate.get("local_overlap_ratio") or 0.0)
+        procedural_alignment = float(candidate.get("procedural_alignment") or 0.0)
+
+        exact_task_match = (
+            task_specificity >= 2.5
+            or phrase_hits >= 2
+            or title_overlap >= 0.38
+            or (local_overlap >= 0.42 and procedural_alignment >= 0.5)
+            or procedural_alignment >= 2.2
+        )
+
+        channel_bonus = 0.0
+        if channel == preferred_channel:
+            channel_bonus = 1.6
+        elif channel in {"mixed", "unknown"}:
+            channel_bonus = 0.45
+        else:
+            channel_bonus = -2.4
+
+        if exact_task_match and channel != preferred_channel:
+            channel_bonus = max(channel_bonus, 0.9)
+
+        adjusted_score = float(candidate.get("score") or 0.0) + channel_bonus
+        candidate["channel_preference_bonus"] = round(channel_bonus, 4)
+        candidate["channel_adjusted_score"] = round(adjusted_score, 4)
+        candidate["exact_task_match"] = exact_task_match
+        ranked.append(candidate)
+
+    ranked.sort(
+        key=lambda item: (
+            -int(bool(item.get("exact_task_match"))),
+            -float(item.get("channel_adjusted_score") or item.get("score") or 0.0),
+            -float(item.get("task_specificity") or 0.0),
+            (item.get("best_distance") if item.get("best_distance") is not None else 999.0),
+        )
+    )
+
+    retained = [
+        candidate
+        for candidate in ranked
+        if float(candidate.get("channel_adjusted_score") or 0.0) >= (top_score - 8.0)
+        or bool(candidate.get("exact_task_match"))
+    ]
+    print(
+        f"[SOURCE_PREF] preferred_channel={preferred_channel} "
+        f"ranked={len(ranked)} retained={len(retained[:max_sources])}"
+    )
+    return retained[:max_sources] if retained else ranked[:max_sources]
 
 
 def _broad_coverage_signal_score(question: str, text: str) -> float:
@@ -2943,9 +3582,13 @@ def _extract_action_object_targets(question: str, max_targets: int = 3) -> List[
         "a", "an", "the", "new", "another", "other", "more", "additional", "existing",
         "selected", "target", "current", "available", "supported", "different",
     }
-    boundary_pattern = re.compile(
-        r"\b(?:from|using|with|by|via|through|into|in|on|for|to|when|if|after|before|because|and|or|but)\b"
+    clause_boundary_pattern = re.compile(
+        r"\b(?:when|if|after|before|because|while|unless|except|where|which|that)\b"
     )
+    trailing_procedural_noise_pattern = re.compile(
+        r"\b(?:step(?:\s+by\s+step)?|step-by-step|instructions?|procedure|procedures|guide|guidance)\b.*$"
+    )
+    preserved_joiners = {"and", "or", "from", "using", "with", "by", "via", "through", "into", "in", "on", "for", "to"}
 
     targets: List[Tuple[str, str]] = []
     seen = set()
@@ -2954,20 +3597,30 @@ def _extract_action_object_targets(question: str, max_targets: int = 3) -> List[
             tail = normalized_question[match.end():].strip()
             if not tail:
                 continue
-            tail = boundary_pattern.split(tail, maxsplit=1)[0].strip()
+            tail = clause_boundary_pattern.split(tail, maxsplit=1)[0].strip()
+            tail = trailing_procedural_noise_pattern.sub("", tail).strip(" ,-_")
             raw_tokens = re.findall(r"[a-z0-9_\-]+", tail)
             object_tokens: List[str] = []
             for raw_token in raw_tokens:
                 if raw_token in filler_terms:
                     continue
+                if raw_token in preserved_joiners:
+                    if object_tokens and object_tokens[-1] not in preserved_joiners:
+                        object_tokens.append(raw_token)
+                    continue
+
                 token = _normalize_term(raw_token)
                 if len(token) <= 2 or token in _LEXICAL_STOPWORDS:
                     continue
                 object_tokens.append(token)
-                if len(object_tokens) >= 4:
+                if len([item for item in object_tokens if item not in preserved_joiners]) >= 10:
                     break
             if not object_tokens:
                 continue
+            while object_tokens and object_tokens[-1] in preserved_joiners:
+                object_tokens.pop()
+            while object_tokens and object_tokens[0] in preserved_joiners:
+                object_tokens.pop(0)
             object_phrase = " ".join(object_tokens)
             key = (canonical_action, object_phrase)
             if key in seen:
@@ -2977,6 +3630,361 @@ def _extract_action_object_targets(question: str, max_targets: int = 3) -> List[
             if len(targets) >= max_targets:
                 return targets
     return targets
+
+
+def _split_coordinated_object_phrase(object_phrase: str) -> List[str]:
+    candidate = re.sub(r"\s+", " ", str(object_phrase or "").strip().lower())
+    if not candidate:
+        return []
+
+    qualifier_match = re.search(r"\b(from|using|with|via|through|in|on|for|into)\b.+$", candidate)
+    qualifier = ""
+    base_phrase = candidate
+    if qualifier_match:
+        qualifier = qualifier_match.group(0).strip()
+        base_phrase = candidate[:qualifier_match.start()].strip()
+
+    if not re.search(r"\b(and|or)\b", base_phrase):
+        return [candidate]
+
+    parts = [part.strip(" ,-_") for part in re.split(r"\b(?:and|or)\b", base_phrase) if part.strip(" ,-_")]
+    expanded: List[str] = []
+    seen = set()
+    for part in parts:
+        normalized_part = re.sub(r"\s+", " ", part).strip()
+        if not normalized_part:
+            continue
+        combined = f"{normalized_part} {qualifier}".strip() if qualifier else normalized_part
+        combined = re.sub(r"\s+", " ", combined).strip()
+        if combined and combined not in seen:
+            seen.add(combined)
+            expanded.append(combined)
+
+    return expanded or [candidate]
+
+
+def _extract_procedural_subtasks(question: str, max_subtasks: int = 6) -> List[Tuple[str, str]]:
+    subtasks: List[Tuple[str, str]] = []
+    seen = set()
+    for action, object_phrase in _extract_action_object_targets(question, max_targets=max_subtasks):
+        split_objects = _split_coordinated_object_phrase(object_phrase)
+        for object_part in split_objects:
+            key = (action, object_part)
+            if key in seen:
+                continue
+            seen.add(key)
+            subtasks.append(key)
+            if len(subtasks) >= max_subtasks:
+                return subtasks
+    return subtasks
+
+
+def _split_text_into_relevance_segments(text: str, max_segments: int = 120) -> List[str]:
+    if not text:
+        return []
+    segments = [
+        segment.strip()
+        for segment in re.split(r"[\n\r]+|(?<=[\.;:!?])\s+", str(text or ""))
+        if segment and segment.strip()
+    ]
+    return segments[:max_segments]
+
+
+def _is_generic_procedural_scaffolding_segment(segment: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(segment or "").strip().lower())
+    if not normalized:
+        return False
+
+    generic_patterns = [
+        r"\bfollow these step by step instructions\b",
+        r"\bby following these steps\b",
+        r"\byou can successfully\b",
+        r"\bthe following steps\b",
+        r"\bhere are the steps\b",
+        r"\bthese steps\b",
+    ]
+    return any(re.search(pattern, normalized) for pattern in generic_patterns)
+
+
+def _subtask_distinguishing_terms(subtasks: List[Tuple[str, str]]) -> Dict[Tuple[str, str], set]:
+    generic_tokens = {
+        "data",
+        "model",
+        "models",
+        "source",
+        "sources",
+        "table",
+        "tables",
+        "field",
+        "fields",
+        "step",
+        "steps",
+    }
+    token_counts: Counter = Counter()
+    token_sets: Dict[Tuple[str, str], set] = {}
+
+    for subtask in subtasks:
+        _, object_phrase = subtask
+        tokens = {token for token in _tokenize_normalized(object_phrase) if token not in generic_tokens}
+        token_sets[subtask] = tokens
+        token_counts.update(tokens)
+
+    distinguishing: Dict[Tuple[str, str], set] = {}
+    for subtask, tokens in token_sets.items():
+        unique_tokens = {token for token in tokens if token_counts[token] == 1}
+        distinguishing[subtask] = unique_tokens or tokens
+
+    return distinguishing
+
+
+def _segment_mentions_multiple_procedural_subtasks(
+    segment: str,
+    distinguishing_terms: Dict[Tuple[str, str], set],
+) -> bool:
+    normalized_tokens = set(_tokenize_normalized(segment))
+    if not normalized_tokens:
+        return False
+
+    matched_subtasks = 0
+    for terms in distinguishing_terms.values():
+        if terms and (terms & normalized_tokens):
+            matched_subtasks += 1
+            if matched_subtasks >= 2:
+                return True
+    return False
+
+
+def _segment_supports_subtask(
+    action: str,
+    object_phrase: str,
+    segment: str,
+    strict: bool = False,
+    distinguishing_terms: Optional[Dict[Tuple[str, str], set]] = None,
+) -> bool:
+    normalized_segment = re.sub(r"\s+", " ", str(segment or "").strip())
+    if not normalized_segment:
+        return False
+
+    subtask_text = f"{action} {object_phrase}".strip()
+    specificity = _procedural_task_specificity_score(subtask_text, normalized_segment)
+    alignment = _procedural_alignment_score(subtask_text, normalized_segment)
+    overlap = _lexical_overlap_ratio(object_phrase, normalized_segment)
+    local_overlap = _best_local_overlap_ratio(object_phrase, normalized_segment)
+    exact_object = re.search(
+        r"\b" + r"\s+".join(re.escape(part) for part in object_phrase.split()) + r"\b",
+        normalized_segment.lower(),
+    ) is not None
+
+    strong_signal = (
+        specificity >= 3.2
+        or (alignment >= 2.2 and max(overlap, local_overlap) >= 0.48)
+        or (exact_object and specificity >= 1.8)
+    )
+    if not strict:
+        return strong_signal or local_overlap >= 0.62
+
+    if _is_generic_procedural_scaffolding_segment(normalized_segment):
+        return False
+    if distinguishing_terms and _segment_mentions_multiple_procedural_subtasks(normalized_segment, distinguishing_terms):
+        return specificity >= 4.2 or (alignment >= 3.0 and exact_object)
+    return strong_signal
+
+
+def _subtask_coverage_details(question: str, text: str, strict: bool = False) -> Dict[str, Any]:
+    subtasks = _extract_procedural_subtasks(question, max_subtasks=6)
+    if not subtasks or not text:
+        return {
+            "subtask_total": len(subtasks),
+            "covered_subtasks": [],
+            "coverage_count": 0,
+            "coverage_ratio": 0.0,
+        }
+
+    combined_text = str(text or "")
+    segments = _split_text_into_relevance_segments(combined_text)
+    distinguishing_terms = _subtask_distinguishing_terms(subtasks) if strict else None
+    covered: List[Tuple[str, str]] = []
+    for action, object_phrase in subtasks:
+        if any(
+            _segment_supports_subtask(
+                action,
+                object_phrase,
+                segment,
+                strict=strict,
+                distinguishing_terms=distinguishing_terms,
+            )
+            for segment in segments
+        ):
+            covered.append((action, object_phrase))
+            continue
+
+        if strict:
+            continue
+
+        score = _procedural_task_specificity_score(f"{action} {object_phrase}", combined_text)
+        overlap = _lexical_overlap_ratio(object_phrase, combined_text)
+        local_overlap = _best_local_overlap_ratio(object_phrase, combined_text)
+        exact_object = re.search(
+            r"\b" + r"\s+".join(re.escape(part) for part in object_phrase.split()) + r"\b",
+            combined_text.lower(),
+        ) is not None
+        if score >= 2.0 or (exact_object and max(overlap, local_overlap) >= 0.28) or local_overlap >= 0.46:
+            covered.append((action, object_phrase))
+
+    coverage_ratio = (len(covered) / max(1, len(subtasks))) if subtasks else 0.0
+    return {
+        "subtask_total": len(subtasks),
+        "covered_subtasks": covered,
+        "coverage_count": len(covered),
+        "coverage_ratio": round(coverage_ratio, 4),
+    }
+
+
+def _subtask_coverage_score(question: str, text: str) -> float:
+    details = _subtask_coverage_details(question, text)
+    subtask_total = int(details.get("subtask_total") or 0)
+    coverage_count = int(details.get("coverage_count") or 0)
+    coverage_ratio = float(details.get("coverage_ratio") or 0.0)
+    if subtask_total <= 1:
+        return 0.0
+    return min(6.0, (coverage_count * 1.8) + (coverage_ratio * 2.6))
+
+
+def _candidate_subtask_match_strength(candidate: dict, subtask: Tuple[str, str]) -> float:
+    action, object_phrase = subtask
+    candidate_text = f"{candidate.get('title') or ''}\n{candidate.get('full_content') or candidate.get('excerpt') or ''}"
+    task_text = f"{action} {object_phrase}".strip()
+    specificity = _procedural_task_specificity_score(task_text, candidate_text)
+    alignment = _procedural_alignment_score(task_text, candidate_text)
+    local_overlap = _best_local_overlap_ratio(object_phrase, candidate_text)
+    overlap = _lexical_overlap_ratio(object_phrase, candidate_text)
+    phrase_hits = _count_exact_phrase_hits(task_text, candidate_text)
+    return round(
+        specificity
+        + alignment
+        + (local_overlap * 4.0)
+        + (overlap * 2.5)
+        + (phrase_hits * 0.7),
+        4,
+    )
+
+
+def _ensure_subtask_source_coverage(
+    question: str,
+    selected_candidates: List[dict],
+    candidate_pool: List[dict],
+    max_sources: int = 6,
+) -> List[dict]:
+    if not selected_candidates:
+        return []
+
+    subtasks = _extract_procedural_subtasks(question, max_subtasks=6)
+    if len(subtasks) <= 1:
+        return selected_candidates[:max_sources]
+
+    selected = list(selected_candidates[:max_sources])
+    covered = set()
+    for candidate in selected:
+        covered.update(candidate.get("covered_subtasks") or [])
+
+    additions = 0
+    for subtask in subtasks:
+        if subtask in covered:
+            continue
+
+        best_candidate = None
+        best_signature = None
+        for candidate in candidate_pool:
+            if candidate in selected:
+                continue
+            match_strength = _candidate_subtask_match_strength(candidate, subtask)
+            signature = (
+                match_strength,
+                float(candidate.get("task_specificity") or 0.0),
+                float(candidate.get("subtask_coverage_ratio") or 0.0),
+                float(candidate.get("score") or 0.0),
+            )
+            if best_signature is None or signature > best_signature:
+                best_signature = signature
+                best_candidate = candidate
+
+        if best_candidate is None:
+            continue
+        if float(best_signature[0]) < 3.2:
+            continue
+
+        selected.append(best_candidate)
+        covered.update(best_candidate.get("covered_subtasks") or [])
+        additions += 1
+        if len(selected) >= max_sources:
+            break
+
+    if additions > 0:
+        print(
+            f"[SOURCE_COVERAGE] supplemented compound procedural question with {additions} additional source(s); covered={len(covered)}/{len(subtasks)}"
+        )
+
+    return selected[:max_sources]
+
+
+def _select_sources_for_subtask_coverage(question: str, candidates: List[dict], max_sources: int = 6) -> List[dict]:
+    if not candidates:
+        return []
+
+    subtasks = _extract_procedural_subtasks(question, max_subtasks=6)
+    if len(subtasks) <= 1:
+        return candidates[:max_sources]
+
+    selected: List[dict] = []
+    covered = set()
+    pool = list(candidates)
+
+    while pool and len(selected) < max_sources:
+        best_candidate = None
+        best_signature = None
+        for candidate in pool:
+            candidate_covered = set(candidate.get("covered_subtasks") or [])
+            new_coverage = len(candidate_covered - covered)
+            signature = (
+                new_coverage,
+                float(candidate.get("subtask_coverage_ratio") or 0.0),
+                float(candidate.get("score") or 0.0),
+                float(candidate.get("task_specificity") or 0.0),
+            )
+            if best_signature is None or signature > best_signature:
+                best_signature = signature
+                best_candidate = candidate
+
+        if best_candidate is None:
+            break
+
+        selected.append(best_candidate)
+        covered.update(best_candidate.get("covered_subtasks") or [])
+        pool = [candidate for candidate in pool if candidate is not best_candidate]
+
+        if len(covered) >= len(subtasks):
+            break
+
+    for candidate in candidates:
+        if len(selected) >= max_sources:
+            break
+        if candidate in selected:
+            continue
+        selected.append(candidate)
+
+    if subtasks:
+        print(
+            f"[SOURCE_COVERAGE] subtasks={len(subtasks)} covered={len(covered)} selected={len(selected[:max_sources])}"
+        )
+    return selected[:max_sources]
+
+
+def _object_phrase_overlap_ratio(left: str, right: str) -> float:
+    left_tokens = set(_tokenize_normalized(left))
+    right_tokens = set(_tokenize_normalized(right))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(1, len(left_tokens))
 
 
 def _best_local_overlap_ratio(question: str, text: str, max_segments: int = 80) -> float:
@@ -3058,6 +4066,60 @@ def _procedural_alignment_score(question: str, text: str) -> float:
     return max(-4.0, min(score, 6.0))
 
 
+def _procedural_task_specificity_score(question: str, text: str) -> float:
+    if not _question_has_procedural_intent(question) or not text:
+        return 0.0
+
+    question_targets = _extract_action_object_targets(question, max_targets=5)
+    if not question_targets:
+        return 0.0
+
+    candidate_text = str(text or "")
+    compact_text = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9_\-\s]", " ", candidate_text.lower())).strip()
+    if not compact_text:
+        return 0.0
+
+    candidate_targets = _extract_action_object_targets(candidate_text, max_targets=8)
+    text_tokens = set(_tokenize_normalized(compact_text))
+    score = 0.0
+
+    for action, object_phrase in question_targets:
+        object_tokens = set(_tokenize_normalized(object_phrase))
+        if not object_tokens:
+            continue
+
+        same_action_targets = [candidate_object for candidate_action, candidate_object in candidate_targets if candidate_action == action]
+        best_overlap = 0.0
+        for candidate_object in same_action_targets:
+            best_overlap = max(best_overlap, _object_phrase_overlap_ratio(object_phrase, candidate_object))
+
+        object_coverage = len(object_tokens & text_tokens) / max(1, len(object_tokens))
+        exact_object_pattern = r"\b" + r"\s+".join(re.escape(part) for part in object_phrase.split()) + r"\b"
+        exact_object_match = re.search(exact_object_pattern, compact_text) is not None
+
+        if exact_object_match and best_overlap >= 0.6:
+            score += 4.5
+            continue
+        if best_overlap >= 0.8:
+            score += 3.8
+            continue
+        if best_overlap >= 0.5:
+            score += 1.8
+            continue
+        if object_coverage >= 0.8:
+            score += 1.2
+            continue
+
+        if same_action_targets:
+            score -= 4.2
+            continue
+
+        if len(object_tokens) >= 2 and object_coverage < 0.4:
+            score -= 1.8
+
+    return max(-8.0, min(score, 8.0))
+
+
 def _filter_low_context_source_candidates(question: str, candidates: List[dict], max_sources: int = 6) -> List[dict]:
     if not candidates:
         return []
@@ -3065,6 +4127,7 @@ def _filter_low_context_source_candidates(question: str, candidates: List[dict],
     question_is_procedural = _question_has_procedural_intent(question)
     has_action_targets = bool(_extract_action_object_targets(question))
     top_score = max(0.01, float(candidates[0].get("score") or 0.01))
+    top_task_specificity = max(float(candidate.get("task_specificity") or 0.0) for candidate in candidates)
     filtered: List[dict] = []
 
     for idx, candidate in enumerate(candidates):
@@ -3078,11 +4141,18 @@ def _filter_low_context_source_candidates(question: str, candidates: List[dict],
         local_overlap_ratio = float(candidate.get("local_overlap_ratio") or 0.0)
         phrase_hits = int(candidate.get("phrase_hits") or 0)
         procedural_alignment = float(candidate.get("procedural_alignment") or 0.0)
+        task_specificity = float(candidate.get("task_specificity") or 0.0)
 
         should_keep = True
         if question_is_procedural and has_action_targets:
-            if procedural_alignment <= -0.5 and phrase_hits == 0 and local_overlap_ratio < 0.34:
+            if procedural_alignment <= -0.5 and phrase_hits == 0 and local_overlap_ratio < 0.34 and task_specificity < 0.6:
                 should_keep = False
+            if should_keep and top_task_specificity >= 2.5:
+                if task_specificity < 0.6 and phrase_hits == 0 and title_overlap < 0.18 and local_overlap_ratio < 0.3:
+                    should_keep = False
+            if should_keep:
+                if phrase_hits == 0 and task_specificity < 0.2 and title_overlap < 0.08 and overlap_ratio < 0.12 and local_overlap_ratio < 0.18:
+                    should_keep = False
         if should_keep and question_is_procedural:
             if score < (top_score * 0.45) and max(overlap_ratio, title_overlap, local_overlap_ratio) < 0.26 and phrase_hits == 0:
                 should_keep = False
@@ -3096,6 +4166,87 @@ def _filter_low_context_source_candidates(question: str, candidates: List[dict],
             break
 
     return filtered[:max_sources]
+
+
+def _direct_task_match_strength(question: str, candidate: dict) -> float:
+    if not _question_has_procedural_intent(question) or not _extract_action_object_targets(question):
+        return 0.0
+
+    phrase_hits = int(candidate.get("phrase_hits") or 0)
+    task_specificity = float(candidate.get("task_specificity") or 0.0)
+    title_overlap = float(candidate.get("title_overlap") or 0.0)
+    overlap_ratio = float(candidate.get("overlap_ratio") or 0.0)
+    local_overlap = float(candidate.get("local_overlap_ratio") or 0.0)
+    procedural_alignment = float(candidate.get("procedural_alignment") or 0.0)
+    generic_penalty = float(candidate.get("generic_penalty") or 0.0)
+
+    strength = 0.0
+    if task_specificity >= 4.0:
+        strength += 4.0
+    elif task_specificity >= 2.5:
+        strength += 2.8
+    elif task_specificity >= 1.0:
+        strength += 1.2
+
+    if phrase_hits >= 2:
+        strength += 2.8
+    elif phrase_hits == 1:
+        strength += 1.2
+
+    if title_overlap >= 0.42:
+        strength += 2.4
+    elif title_overlap >= 0.25:
+        strength += 1.0
+
+    if local_overlap >= 0.45:
+        strength += 1.8
+    elif local_overlap >= 0.32:
+        strength += 0.8
+
+    if overlap_ratio >= 0.24:
+        strength += 1.0
+    if procedural_alignment >= 2.0:
+        strength += 1.8
+    elif procedural_alignment >= 0.8:
+        strength += 0.7
+
+    if generic_penalty > 0 and phrase_hits == 0 and title_overlap < 0.2:
+        strength -= 1.8
+
+    return round(strength, 4)
+
+
+def _retain_direct_task_match_sources(question: str, candidates: List[dict], max_sources: int = 6) -> List[dict]:
+    if not candidates:
+        return []
+    if not _question_has_procedural_intent(question) or not _extract_action_object_targets(question):
+        return candidates[:max_sources]
+
+    strong: List[dict] = []
+    usable: List[dict] = []
+    best_strength = 0.0
+
+    for candidate in candidates:
+        strength = _direct_task_match_strength(question, candidate)
+        candidate["direct_task_match_strength"] = strength
+        best_strength = max(best_strength, strength)
+        if strength >= 3.5:
+            strong.append(candidate)
+        if strength >= 2.2:
+            usable.append(candidate)
+
+    if strong:
+        kept = [candidate for candidate in candidates if candidate in usable or candidate in strong]
+        print(
+            f"[SOURCE_MATCH] direct procedural matches strong={len(strong)} usable={len(kept[:max_sources])}"
+        )
+        return kept[:max_sources]
+
+    if best_strength < 2.0:
+        print("[SOURCE_MATCH] No direct procedural source match was strong enough; returning no sources")
+        return []
+
+    return candidates[:max_sources]
 
 
 def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
@@ -3152,6 +4303,8 @@ def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
         score += min(2.0, heading_hits * 0.8)
 
     score += _entity_fact_signal_score(question, f"{source}\n{d}")
+    score += _procedural_task_specificity_score(question, f"{source}\n{d}") * 0.45
+    score += _source_solution_preference_adjustment(question, source=source, text=d) * 0.4
     
     # Source name match
     for tok in q_tokens:
@@ -3480,6 +4633,8 @@ def _ground_answer_against_context(question: str, context_text: str, draft_answe
         "Rewrite the draft answer so EVERY factual claim is directly supported by the provided context.\n"
         "If a claim is not supported, remove it.\n"
         "If critical details are missing, explicitly say they are not present in the available knowledge context.\n"
+        "If the available context is about adjacent or different topics, do not summarize those topics as if they answer the question.\n"
+        "When no directly relevant procedure or detail is present, say that no directly relevant document was found in the current knowledge context.\n"
         "Do not invent commands, paths, settings, UI labels, API names, or product behavior.\n"
         "Do not use outside knowledge.\n"
         "Keep the response helpful and concise.\n"
@@ -3584,6 +4739,200 @@ def _should_use_history_for_question(
     return len(explicit_topic_tokens) < 3
 
 
+_GENERIC_ANCHOR_TERMS = {
+    "ticket", "issue", "problem", "error", "bug", "case", "item", "thing", "things", "one", "ones",
+    "service", "system", "module", "component", "file", "document", "doc", "guide", "article",
+    "log", "attachment", "image", "screenshot", "request", "record", "row", "column", "field",
+    "setting", "settings", "configuration", "config", "workflow", "task", "job", "result", "answer",
+}
+
+_REFERENTIAL_ANCHOR_PATTERNS = [
+    r"\bthis\b",
+    r"\bthat\b",
+    r"\bthese\b",
+    r"\bthose\b",
+    r"\bit\b",
+    r"\bthey\b",
+    r"\bthem\b",
+    r"\bcurrent\b",
+    r"\bselected\b",
+    r"\bprevious\b",
+    r"\blast\b",
+    r"\bearlier\b",
+    r"\bsame\b",
+    r"\babove\b",
+    r"\bbefore\b",
+    r"\bwhich one\b",
+    r"\bwhat about\b",
+    r"\bhow about\b",
+]
+
+
+def _topic_bearing_tokens(question: str) -> List[str]:
+    generic_fillers = _GENERIC_ANCHOR_TERMS | {
+        "how", "what", "why", "which", "where", "when", "who", "tell", "show", "explain", "help",
+        "solve", "fix", "use", "used", "using", "refer", "refers", "referred", "talk", "talking",
+        "mean", "means", "meant", "about", "last", "previous", "current", "selected", "exact",
+    }
+    tokens: List[str] = []
+    for token in _tokenize_normalized(question):
+        if not token or token in _LEXICAL_STOPWORDS or token in generic_fillers or token.isdigit():
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def _question_needs_anchor(question: str) -> bool:
+    candidate = str(question or "").strip().lower()
+    if not candidate:
+        return False
+
+    has_referential_language = any(re.search(pattern, candidate) for pattern in _REFERENTIAL_ANCHOR_PATTERNS)
+    if not has_referential_language:
+        return False
+
+    topic_tokens = _topic_bearing_tokens(candidate)
+    return len(topic_tokens) < 2
+
+
+def _question_requests_previous_answer_source(question: str) -> bool:
+    candidate = str(question or "").strip().lower()
+    if not candidate:
+        return False
+
+    patterns = [
+        r"\bwhich\s+(ticket|source|document|doc|guide|file|case|issue|item)\b.*\b(referring to|refer to|talking about|used|meant)",
+        r"\bwhat\s+(ticket|source|document|doc|guide|file|case|issue|item)\b.*\b(referring to|refer to|talking about|used|meant)",
+        r"\bwhat are you referring to\b",
+        r"\bwhat do you mean\b",
+        r"\bwhich one are you talking about\b",
+        r"\bwhat was your source\b",
+        r"\bwhich source did you use\b",
+        r"\bwhere did that come from\b",
+    ]
+    return any(re.search(pattern, candidate) for pattern in patterns)
+
+
+def _generate_llm_meta_response(question: str, scenario: str, facts: List[str]) -> str:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured; cannot generate chat response.")
+
+    fact_block = "\n".join(f"- {fact}" for fact in facts if str(fact or "").strip()) or "- No additional facts provided."
+    prompt = (
+        "You are a grounded support assistant replying directly to the user.\n"
+        "Generate the user-facing answer using ONLY the facts below.\n"
+        "Do not invent details, hidden reasoning, sources, or context.\n"
+        "Do not mention prompts, policies, internal state, retrieval, or chain-of-thought.\n"
+        "Keep the answer concise, natural, and actionable.\n"
+        "If the facts indicate missing context, clearly say what is missing and ask for the exact item needed.\n"
+        "If the facts identify prior grounding sources, explain them plainly and specifically.\n\n"
+        f"Scenario: {scenario}\n"
+        f"User question: {question}\n\n"
+        f"Facts:\n{fact_block}\n\n"
+        "Return only the final answer to the user."
+    )
+    return (call_llm(prompt, temperature=0.1) or "").strip()
+
+
+def _build_anchor_clarification_answer(question: str) -> str:
+    candidate = str(question or "").lower()
+    target_label = "subject"
+    for token in (
+        "ticket", "issue", "problem", "service", "file", "document", "guide", "log", "attachment",
+        "image", "screenshot", "request", "record", "row", "column", "field", "configuration",
+    ):
+        if re.search(rf"\b{re.escape(token)}s?\b", candidate):
+            target_label = token
+            break
+
+    facts = [
+        "The current user question is referential or ambiguous.",
+        "There is no active grounding anchor from a selected ticket, uploaded file, or grounded prior answer.",
+    ]
+    if target_label == "subject":
+        facts.append("The missing anchor is a specific subject, item, document, component, or context.")
+    else:
+        facts.append(f"The missing anchor is the exact {target_label} the user means.")
+        facts.append(f"The user can clarify by naming the exact {target_label}, selecting it in the UI, or restating the question with that subject.")
+    return _generate_llm_meta_response(question, "missing-anchor", facts)
+
+
+def _humanize_conversation_source(source: str) -> str:
+    raw_source = str(source or "").strip()
+    if not raw_source:
+        return ""
+
+    if raw_source.startswith("azure-devops:"):
+        match = re.search(r"azure-devops:(\d+)", raw_source)
+        if match:
+            return f"selected Azure DevOps ticket {match.group(1)}"
+        return "selected Azure DevOps ticket"
+
+    learn_match = re.search(r"(?:^|::)ado:learn:(\d+)", raw_source)
+    if learn_match:
+        return f"knowledge-base ticket {learn_match.group(1)}"
+
+    compact = raw_source.split(" (", 1)[0]
+    if "::" in compact:
+        compact = compact.split("::", 1)[1]
+    return _display_source_name(compact)
+
+
+def _build_previous_answer_source_answer(question: str, conversation_state: Optional[dict]) -> str:
+    state = dict(conversation_state or {})
+    sources = [str(item).strip() for item in list(state.get("sources") or []) if str(item).strip()]
+    selected_ticket_id = state.get("selected_ticket_id")
+    used_selected_ticket = bool(state.get("used_selected_ticket"))
+    facts: List[str] = ["The user is asking what grounded my previous answer."]
+
+    if used_selected_ticket and selected_ticket_id:
+        facts.append(f"The selected Azure DevOps ticket {selected_ticket_id} was used as grounding context.")
+        supplemental = [source for source in sources if not str(source).startswith("azure-devops:")]
+        if supplemental:
+            formatted = [_humanize_conversation_source(source) for source in supplemental[:3]]
+            facts.append("Supplemental grounding sources were: " + ", ".join(formatted) + ".")
+        return _generate_llm_meta_response(question, "previous-answer-source", facts)
+
+    if sources:
+        formatted_sources = [_humanize_conversation_source(source) for source in sources[:4]]
+        if len(formatted_sources) == 1:
+            facts.append(f"There was one recorded grounding source: {formatted_sources[0]}.")
+        else:
+            facts.append("Recorded grounding sources were: " + ", ".join(formatted_sources) + ".")
+        return _generate_llm_meta_response(question, "previous-answer-source", facts)
+
+    facts.append("There is no specific grounded source recorded for the previous answer.")
+    facts.append("Ask the user to provide the exact subject, select the relevant item, or restate the question with explicit context.")
+    return _generate_llm_meta_response(question, "previous-answer-source", facts)
+
+
+def _store_conversation_turn(
+    conversation_key: str,
+    question: str,
+    answer: str,
+    *,
+    sources: Optional[List[str]] = None,
+    selected_ticket_id: Optional[int] = None,
+    selected_ticket_url: Optional[str] = None,
+    used_selected_ticket: bool = False,
+    used_file_context: bool = False,
+) -> None:
+    try:
+        conversation_store[conversation_key].append({"role": "user", "content": question})
+        conversation_store[conversation_key].append({"role": "assistant", "content": answer})
+        conversation_state_store[conversation_key] = {
+            "sources": list(sources or []),
+            "selected_ticket_id": selected_ticket_id,
+            "selected_ticket_url": selected_ticket_url,
+            "used_selected_ticket": bool(used_selected_ticket),
+            "used_file_context": bool(used_file_context),
+            "has_grounded_sources": bool(sources),
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }
+    except Exception as exc:
+        print(f"[API][CHAT][WARN] Failed to persist conversation context/state: {exc}")
+
+
 def _question_requires_specifics(question: str) -> bool:
     """Detect questions that require explicit, concrete details instead of generic guidance."""
     if not question:
@@ -3626,6 +4975,8 @@ def _enforce_specific_grounded_answer(question: str, context_text: str, answer: 
         "1) Keep only details supported by CONTEXT.\n"
         "2) If user asks for explicit lists (columns/fields/steps/commands/etc), provide explicit bullet list.\n"
         "2.1) If the context explicitly lists items and the user asks how many, count only those explicit items and state the count plus the item names.\n"
+        "2.2) If the question asks for multiple requested actions, objects, or subtasks, address every requested part that is supported by CONTEXT.\n"
+        "2.3) Never answer only one requested part while ignoring the others. If CONTEXT covers only some parts, explicitly state which parts are covered and which are missing.\n"
         "3) If exact details are missing in CONTEXT, explicitly say which exact details are missing.\n"
         "4) Do not output vague placeholders like 'necessary columns' when specifics are available.\n"
         "5) Never invent values, names, paths, or commands.\n\n"
@@ -3640,6 +4991,104 @@ def _enforce_specific_grounded_answer(question: str, context_text: str, answer: 
         return improved if improved else answer
     except Exception as e:
         print(f"[API][CHAT][WARN] Specificity enforcement failed: {e}")
+        return answer
+
+
+def _format_subtask_label(action: str, object_phrase: str) -> str:
+    return re.sub(r"\s+", " ", f"{action} {object_phrase}").strip()
+
+
+def _llm_ensure_answer_completeness(question: str, context_text: str, answer: str) -> str:
+    """
+    Single LLM pass that checks whether the answer covers ALL parts of the question
+    that are supported by the retrieved context. If not, it rewrites the answer to
+    include the missing parts. This replaces complex heuristic subtask parsing with
+    natural language understanding.
+    """
+    if not answer or not OPENAI_API_KEY or not context_text:
+        return answer
+
+    prompt = (
+        "You are a completeness checker for a grounded RAG assistant.\n\n"
+        "TASK: Check whether the CURRENT ANSWER fully covers every part of the QUESTION "
+        "that is supported by the CONTEXT. If it does, return the answer unchanged. "
+        "If any part of the question is answered by the CONTEXT but missing from the CURRENT ANSWER, "
+        "rewrite the answer to include ALL covered parts with their full details.\n\n"
+        "RULES:\n"
+        "1) If the question asks about multiple actions or objects (e.g., 'create entities AND relations'), "
+        "each one must have its own dedicated section with full step-by-step details from CONTEXT.\n"
+        "2) A passing mention or a single sentence about a topic does NOT count as coverage. "
+        "If CONTEXT has a full procedure section (with steps, fields, SQL, config), include it fully.\n"
+        "3) Keep ONLY details supported by CONTEXT. Do not invent.\n"
+        "4) If CONTEXT does not support some requested part, explicitly say that part is missing.\n"
+        "5) Preserve all correct details already in the CURRENT ANSWER.\n"
+        "6) Return ONLY the final complete answer.\n\n"
+        f"QUESTION:\n{question}\n\n"
+        f"CONTEXT:\n{context_text}\n\n"
+        f"CURRENT ANSWER:\n{answer}\n"
+    )
+    try:
+        improved = call_llm(prompt, temperature=0.0)
+        improved = (improved or "").strip()
+        if improved and len(improved) >= len(answer) * 0.5:
+            return improved
+        return answer
+    except Exception as e:
+        print(f"[API][CHAT][WARN] Completeness check failed: {e}")
+        return answer
+
+
+def _enforce_complete_procedural_answer(question: str, context_text: str, answer: str) -> str:
+    if not answer or not OPENAI_API_KEY:
+        return answer
+
+    subtasks = _extract_procedural_subtasks(question, max_subtasks=6)
+    if len(subtasks) <= 1:
+        return answer
+
+    context_details = _subtask_coverage_details(question, context_text)
+    context_covered = list(context_details.get("covered_subtasks") or [])
+    if not context_covered:
+        return answer
+
+    answer_details = _subtask_coverage_details(question, answer, strict=True)
+    answer_covered = set(answer_details.get("covered_subtasks") or [])
+    context_covered_set = set(context_covered)
+    if context_covered_set.issubset(answer_covered):
+        return answer
+
+    requested_labels = [_format_subtask_label(action, object_phrase) for action, object_phrase in subtasks]
+    covered_labels = [_format_subtask_label(action, object_phrase) for action, object_phrase in context_covered]
+    missing_labels = [
+        _format_subtask_label(action, object_phrase)
+        for action, object_phrase in context_covered
+        if (action, object_phrase) not in answer_covered
+    ]
+
+    prompt = (
+        "You are a strict completeness checker for a grounded RAG assistant.\n\n"
+        "Goal: ensure the final answer covers every requested subtask that is actually supported by CONTEXT.\n"
+        "Rules:\n"
+        "1) Keep only claims supported by CONTEXT.\n"
+        "2) If CONTEXT supports multiple requested subtasks, the answer must cover all of them.\n"
+        "3) Never stop after the first covered subtask if other covered subtasks also appear in CONTEXT.\n"
+        "4) If some requested subtasks are not supported by CONTEXT, explicitly say which requested parts are still missing from the available knowledge context.\n"
+        "5) Do not invent details for missing subtasks.\n"
+        "6) Return only the improved final answer.\n\n"
+        f"QUESTION:\n{question}\n\n"
+        f"REQUESTED SUBTASKS:\n- " + "\n- ".join(requested_labels) + "\n\n"
+        f"SUBTASKS SUPPORTED BY CONTEXT:\n- " + "\n- ".join(covered_labels) + "\n\n"
+        f"SUPPORTED SUBTASKS MISSING FROM CURRENT ANSWER:\n- " + "\n- ".join(missing_labels) + "\n\n"
+        f"CONTEXT:\n{context_text}\n\n"
+        f"CURRENT ANSWER:\n{answer}\n"
+    )
+
+    try:
+        improved = call_llm(prompt, temperature=0.0)
+        improved = (improved or "").strip()
+        return improved if improved else answer
+    except Exception as e:
+        print(f"[API][CHAT][WARN] Completeness enforcement failed: {e}")
         return answer
 
 
@@ -3979,6 +5428,113 @@ def _count_text_tokens(text: str) -> int:
         raise RuntimeError("tiktoken is required for exact token counting")
 
     return len(encoding.encode(raw_text, disallowed_special=()))
+
+
+def _estimate_text_tokens(text: str) -> int:
+    raw_text = str(text or "")
+    if not raw_text:
+        return 0
+    try:
+        return _count_text_tokens(raw_text)
+    except Exception:
+        return max(1, len(raw_text) // 4)
+
+
+def _truncate_text_to_token_budget(text: str, max_tokens: int, label: str) -> str:
+    raw_text = str(text or "")
+    if not raw_text or max_tokens <= 0:
+        return ""
+
+    current_tokens = _estimate_text_tokens(raw_text)
+    if current_tokens <= max_tokens:
+        return raw_text
+
+    notice = (
+        f"\n\n[TRUNCATED {label}: original_tokens={current_tokens}, kept_tokens={max_tokens}]\n\n"
+    )
+    encoding = _get_tokenizer_encoding()
+    if encoding is not None:
+        encoded = encoding.encode(raw_text, disallowed_special=())
+        head_count = max_tokens // 2
+        tail_count = max_tokens - head_count
+        if len(encoded) <= max_tokens:
+            return raw_text
+        head_text = encoding.decode(encoded[:head_count]).strip()
+        tail_text = encoding.decode(encoded[-tail_count:]).strip() if tail_count > 0 else ""
+        merged = head_text
+        if tail_text:
+            merged = f"{head_text}{notice}{tail_text}"
+        return merged.strip()
+
+    approx_chars = max_tokens * 4
+    head_chars = approx_chars // 2
+    tail_chars = approx_chars - head_chars
+    head_text = raw_text[:head_chars].strip()
+    tail_text = raw_text[-tail_chars:].strip() if tail_chars > 0 else ""
+    merged = head_text
+    if tail_text:
+        merged = f"{head_text}{notice}{tail_text}"
+    return merged.strip()
+
+
+def _fit_prompt_to_model_budget(
+    question: str,
+    combined_context: str,
+    foundational_instruction: str = "",
+    ta9_instruction: str = "",
+) -> Tuple[str, str]:
+    prompt = _build_system_prompt(
+        question=question,
+        combined_context=combined_context,
+        foundational_instruction=foundational_instruction,
+        ta9_instruction=ta9_instruction,
+    )
+    prompt_tokens = _estimate_text_tokens(prompt)
+    if prompt_tokens <= LLM_MAX_INPUT_TOKENS:
+        return prompt, combined_context
+
+    context_tokens = _estimate_text_tokens(combined_context)
+    overflow_tokens = prompt_tokens - LLM_MAX_INPUT_TOKENS
+    target_context_tokens = max(4000, context_tokens - overflow_tokens - 1024)
+    trimmed_context = _truncate_text_to_token_budget(
+        combined_context,
+        target_context_tokens,
+        "combined context for final LLM input",
+    )
+    prompt = _build_system_prompt(
+        question=question,
+        combined_context=trimmed_context,
+        foundational_instruction=foundational_instruction,
+        ta9_instruction=ta9_instruction,
+    )
+
+    second_pass_tokens = _estimate_text_tokens(prompt)
+    if second_pass_tokens > LLM_MAX_INPUT_TOKENS:
+        second_overflow = second_pass_tokens - LLM_MAX_INPUT_TOKENS
+        second_budget = max(2000, target_context_tokens - second_overflow - 1024)
+        trimmed_context = _truncate_text_to_token_budget(
+            trimmed_context,
+            second_budget,
+            "combined context for final LLM input",
+        )
+        prompt = _build_system_prompt(
+            question=question,
+            combined_context=trimmed_context,
+            foundational_instruction=foundational_instruction,
+            ta9_instruction=ta9_instruction,
+        )
+
+    final_prompt_tokens = _estimate_text_tokens(prompt)
+    if final_prompt_tokens > LLM_MAX_INPUT_TOKENS:
+        print(
+            f"[API][CHAT][WARN] Prompt is still larger than the model budget after trimming: "
+            f"tokens={final_prompt_tokens} budget={LLM_MAX_INPUT_TOKENS}"
+        )
+    else:
+        print(
+            f"[API][CHAT] Prompt fitted to model budget: tokens={final_prompt_tokens} budget={LLM_MAX_INPUT_TOKENS}"
+        )
+    return prompt, trimmed_context
 
 
 def _estimate_rows_token_count(rows: List[dict]) -> int:
@@ -4341,7 +5897,9 @@ def _should_lock_primary_source(question: str, candidates: List[dict]) -> bool:
     primary_title_overlap = float(primary.get("title_overlap") or 0.0)
     primary_phrase_hits = int(primary.get("phrase_hits") or 0)
     primary_procedural = int(primary.get("procedural_markers") or 0)
+    primary_task_specificity = float(primary.get("task_specificity") or 0.0)
     primary_score = float(primary.get("score") or 0.0)
+    secondary_task_specificity = float((secondary or {}).get("task_specificity") or 0.0)
     secondary_score = float((secondary or {}).get("score") or 0.0)
     is_generic_primary = _is_generic_source_title(
         str(primary.get("title") or ""),
@@ -4353,9 +5911,16 @@ def _should_lock_primary_source(question: str, candidates: List[dict]) -> bool:
         or primary_overlap >= 0.38
         or primary_title_overlap >= 0.5
         or (primary_procedural >= 2 and primary_overlap >= 0.24)
+        or primary_task_specificity >= 2.5
     )
     clear_margin = primary_score >= secondary_score + 2.5
-    return strong_primary and not is_generic_primary and (secondary is None or clear_margin)
+    specificity_margin = primary_task_specificity >= secondary_task_specificity + 1.0
+    return (
+        strong_primary
+        and primary_task_specificity > -0.5
+        and not is_generic_primary
+        and (secondary is None or (clear_margin and specificity_margin))
+    )
 
 
 def _build_source_context_candidates(
@@ -4449,11 +6014,21 @@ def _build_source_context_candidates(
         title_overlap = _lexical_overlap_ratio(question, title)
         source_overlap = _lexical_overlap_ratio(question, entry["source"])
         phrase_hits = _count_exact_phrase_hits(question, f"{title}\n{full_content}")
+        coverage_details = _subtask_coverage_details(question, f"{title}\n{full_content}")
+        subtask_coverage_bonus = _subtask_coverage_score(question, f"{title}\n{full_content}")
         chunk_count_penalty = min(6.0, math.log(max(1, len(rows)), 2) * 0.9) if len(rows) > 8 else 0.0
         if entity_fact_intent and len(rows) > 4:
             chunk_count_penalty += min(3.5, math.log(max(1, len(rows)), 2) * 0.9)
         generic_penalty = 4.5 if question_is_procedural and _is_generic_source_title(title, entry["source"]) else 0.0
         compact_fact_bonus = 1.5 if entity_fact_intent and len(rows) <= 3 and entity_fact_bonus > 0 else 0.0
+        task_specificity = _procedural_task_specificity_score(question, f"{title}\n{full_content}")
+        solution_channel = _classify_source_solution_channel(title=title, source=entry["source"], text=full_content)
+        solution_channel_bias = _source_solution_preference_adjustment(
+            question,
+            title=title,
+            source=entry["source"],
+            text=full_content,
+        )
         source_score = (
             chunk_signal_strength
             + lexical_score
@@ -4466,7 +6041,10 @@ def _build_source_context_candidates(
             + (source_overlap * 4.0)
             + procedural_bonus
             + procedural_alignment
+            + task_specificity
             + (phrase_hits * 1.5)
+            + subtask_coverage_bonus
+            + solution_channel_bias
             - chunk_count_penalty
             - generic_penalty
         )
@@ -4486,14 +6064,22 @@ def _build_source_context_candidates(
                 "local_overlap_ratio": round(local_overlap_ratio, 4),
                 "title_overlap": round(title_overlap, 4),
                 "phrase_hits": phrase_hits,
+                "covered_subtasks": list(coverage_details.get("covered_subtasks") or []),
+                "subtask_total": int(coverage_details.get("subtask_total") or 0),
+                "subtask_coverage_count": int(coverage_details.get("coverage_count") or 0),
+                "subtask_coverage_ratio": float(coverage_details.get("coverage_ratio") or 0.0),
+                "subtask_coverage_bonus": round(subtask_coverage_bonus, 4),
                 "procedural_markers": procedural_markers,
                 "procedural_alignment": round(procedural_alignment, 4),
+                "task_specificity": round(task_specificity, 4),
                 "lexical_score": round(lexical_score, 4),
                 "entity_fact_bonus": round(entity_fact_bonus, 4),
                 "broad_coverage_bonus": round(broad_coverage_bonus, 4),
                 "chunk_signal_strength": round(chunk_signal_strength, 4),
                 "chunk_count_penalty": round(chunk_count_penalty, 4),
                 "generic_penalty": generic_penalty,
+                "solution_channel": solution_channel,
+                "solution_channel_bias": round(solution_channel_bias, 4),
                 "matched_chunk_ids": entry["matched_chunk_ids"],
             }
         )
@@ -4565,11 +6151,21 @@ def _build_global_lexical_source_candidates(question: str, max_sources: int = 6)
             phrase_hits = _count_exact_phrase_hits(question, f"{title}\n{excerpt}")
             procedural_markers = _count_procedural_markers(excerpt)
             procedural_bonus = min(4.0, procedural_markers * 0.8) if question_is_procedural else 0.0
+            coverage_details = _subtask_coverage_details(question, f"{title}\n{excerpt}")
+            subtask_coverage_bonus = _subtask_coverage_score(question, f"{title}\n{excerpt}")
             chunk_count_penalty = min(6.0, math.log(max(1, len(sorted_rows)), 2) * 0.9) if len(sorted_rows) > 8 else 0.0
             if entity_fact_intent and len(sorted_rows) > 4:
                 chunk_count_penalty += min(3.5, math.log(max(1, len(sorted_rows)), 2) * 0.9)
             generic_penalty = 4.5 if question_is_procedural and _is_generic_source_title(title, source) else 0.0
             compact_fact_bonus = 1.5 if entity_fact_intent and len(sorted_rows) <= 3 and entity_fact_bonus > 0 else 0.0
+            task_specificity = _procedural_task_specificity_score(question, f"{title}\n{excerpt}")
+            solution_channel = _classify_source_solution_channel(title=title, source=source, text=excerpt)
+            solution_channel_bias = _source_solution_preference_adjustment(
+                question,
+                title=title,
+                source=source,
+                text=excerpt,
+            )
             score = (
                 lexical_score
                 + entity_fact_bonus
@@ -4582,6 +6178,9 @@ def _build_global_lexical_source_candidates(question: str, max_sources: int = 6)
                 + (phrase_hits * 1.3)
                 + procedural_bonus
                 + procedural_alignment
+                + task_specificity
+                + subtask_coverage_bonus
+                + solution_channel_bias
                 - chunk_count_penalty
                 - generic_penalty
             )
@@ -4603,13 +6202,21 @@ def _build_global_lexical_source_candidates(question: str, max_sources: int = 6)
                     "local_overlap_ratio": round(local_overlap_ratio, 4),
                     "title_overlap": round(title_overlap, 4),
                     "phrase_hits": phrase_hits,
+                    "covered_subtasks": list(coverage_details.get("covered_subtasks") or []),
+                    "subtask_total": int(coverage_details.get("subtask_total") or 0),
+                    "subtask_coverage_count": int(coverage_details.get("coverage_count") or 0),
+                    "subtask_coverage_ratio": float(coverage_details.get("coverage_ratio") or 0.0),
+                    "subtask_coverage_bonus": round(subtask_coverage_bonus, 4),
                     "procedural_markers": procedural_markers,
                     "procedural_alignment": round(procedural_alignment, 4),
+                    "task_specificity": round(task_specificity, 4),
                     "lexical_score": round(lexical_score, 4),
                     "entity_fact_bonus": round(entity_fact_bonus, 4),
                     "broad_coverage_bonus": round(broad_coverage_bonus, 4),
                     "chunk_count_penalty": round(chunk_count_penalty, 4),
                     "generic_penalty": generic_penalty,
+                    "solution_channel": solution_channel,
+                    "solution_channel_bias": round(solution_channel_bias, 4),
                     "matched_chunk_ids": [],
                     "origin": "lexical_rescue",
                 }
@@ -4652,6 +6259,25 @@ def _merge_source_candidate_lists(*candidate_lists: List[dict], max_sources: int
                 existing[field_name] = max(float(existing.get(field_name) or 0.0), float(candidate.get(field_name) or 0.0))
             existing["phrase_hits"] = max(int(existing.get("phrase_hits") or 0), int(candidate.get("phrase_hits") or 0))
             existing["procedural_markers"] = max(int(existing.get("procedural_markers") or 0), int(candidate.get("procedural_markers") or 0))
+            existing["task_specificity"] = max(float(existing.get("task_specificity") or 0.0), float(candidate.get("task_specificity") or 0.0))
+            existing["subtask_total"] = max(int(existing.get("subtask_total") or 0), int(candidate.get("subtask_total") or 0))
+            existing["subtask_coverage_count"] = max(
+                int(existing.get("subtask_coverage_count") or 0),
+                int(candidate.get("subtask_coverage_count") or 0),
+            )
+            existing["subtask_coverage_ratio"] = max(
+                float(existing.get("subtask_coverage_ratio") or 0.0),
+                float(candidate.get("subtask_coverage_ratio") or 0.0),
+            )
+            existing["subtask_coverage_bonus"] = max(
+                float(existing.get("subtask_coverage_bonus") or 0.0),
+                float(candidate.get("subtask_coverage_bonus") or 0.0),
+            )
+            merged_subtasks = list(existing.get("covered_subtasks") or [])
+            for subtask in list(candidate.get("covered_subtasks") or []):
+                if subtask not in merged_subtasks:
+                    merged_subtasks.append(subtask)
+            existing["covered_subtasks"] = merged_subtasks
 
             existing_ids = list(existing.get("matched_chunk_ids") or [])
             for chunk_id in list(candidate.get("matched_chunk_ids") or []):
@@ -4679,13 +6305,22 @@ def _llm_select_source_candidates(question: str, candidates: List[dict], max_sou
 
     shortlist = candidates[: min(6, len(candidates))]
     broad_coverage_intent = _question_requests_broad_coverage(question)
+    preferred_channel = _preferred_solution_channel(question)
+    requested_subtasks = _extract_procedural_subtasks(question, max_subtasks=6)
     candidate_lines: List[str] = []
     for idx, candidate in enumerate(shortlist, start=1):
+        covered_subtask_labels = [
+            _format_subtask_label(action, object_phrase)
+            for action, object_phrase in list(candidate.get("covered_subtasks") or [])
+        ]
         candidate_lines.append(
             f"Candidate {idx}:\n"
             f"Collection: {candidate.get('collection_name')}\n"
             f"Title: {candidate.get('title')}\n"
             f"Source: {candidate.get('source')}\n"
+            f"Inferred channel: {candidate.get('solution_channel') or _classify_source_solution_channel(title=str(candidate.get('title') or ''), source=str(candidate.get('source') or ''), text=str(candidate.get('excerpt') or ''))}\n"
+            f"Task specificity: {candidate.get('task_specificity')}\n"
+            f"Covered subtasks: {', '.join(covered_subtask_labels) if covered_subtask_labels else 'none detected'}\n"
             f"Chunks: {candidate.get('chunk_count')}\n"
             f"Heuristic score: {candidate.get('score')}\n"
             f"Excerpt:\n{str(candidate.get('excerpt') or '')[:2200]}"
@@ -4697,19 +6332,45 @@ def _llm_select_source_candidates(question: str, candidates: List[dict], max_sou
         "You are a retrieval ranking specialist for a RAG system.\n"
         "Pick the document candidates that best answer the user question.\n"
         "Prefer candidates that directly contain the exact procedure, exact configuration steps, exact field names, or exact command/config examples asked for.\n"
+        "Exact task match is more important than source style preference. Never replace the asked task with an adjacent task that shares some words.\n"
         "For naming, company/product identity, alias, or count/list questions, prefer candidates that explicitly define or enumerate those facts, even if they are shorter than broad manuals.\n"
-        "Reject adjacent-task candidates that share keywords but answer a different task. For example, if the question is how to create a data model, a document about creating entities from a data model is not a valid candidate.\n"
+        "Reject adjacent-task candidates that share vocabulary with the question but answer a different action, object, target, or scope.\n"
+        "If two candidates are about related topics, prefer the one whose concrete task intent most closely matches the user question.\n"
         "De-prioritize broad overview or generic admin guides when a narrower exact guide exists.\n"
     )
+    if preferred_channel == "admin_studio":
+        selector_prompt += (
+            "For TA9/IntSight procedural guidance, prefer Admin Studio or UI-based candidates by default. "
+            "Choose database/SQL/table-level candidates only if the user explicitly requested database guidance.\n"
+        )
+    elif preferred_channel == "database":
+        selector_prompt += (
+            "The user explicitly requested database or SQL guidance. Prefer database/table-level candidates over Admin Studio/UI candidates.\n"
+        )
     if broad_coverage_intent:
         selector_prompt += (
             "When the user asks for more ways, alternatives, other options, supported methods, or broader coverage, "
             "keep multiple distinct candidates that cover different valid approaches. Do not collapse to a single "
             "candidate unless the rest are duplicates.\n"
         )
+    if len(requested_subtasks) > 1:
+        selector_prompt += (
+            "This is a compound procedural question with multiple requested subtasks. "
+            "Keep the combination of candidates that jointly covers all requested subtasks whenever the candidates support them. "
+            "Do not prefer a single broad or aggregated document if it only clearly covers one subtask while another candidate covers a missing subtask directly.\n"
+            "De-prioritize huge aggregated user-knowledge dumps when narrower task-specific procedure documents exist.\n"
+        )
     selector_prompt += (
         "Return strict JSON with this shape only: {\"ordered_candidates\":[1,2],\"reason\":\"short reason\"}.\n\n"
         f"Question:\n{question}\n\n"
+        + (
+            "Requested subtasks:\n- "
+            + "\n- ".join(_format_subtask_label(action, object_phrase) for action, object_phrase in requested_subtasks)
+            + "\n\n"
+            if requested_subtasks
+            else ""
+        )
+        +
         f"Candidates:\n\n{candidates_block}\n"
     )
 
@@ -5047,7 +6708,7 @@ def health():
 
 @app.get("/azure/tickets")
 def azure_tickets(tag: str = "CC"):
-    print(f"[API][ADO] /azure/tickets tag={tag}")
+    print(f"[API][ADO] /azure/tickets loading merged support-query results tag_param_ignored={tag}")
     try:
         items = ado_list_tickets(tag_contains=tag)
         return {"items": items}
@@ -5675,6 +7336,8 @@ def ingest_learning_tickets(req: AdoLearnIngestRequest, background_tasks: Backgr
 def chat(req: ChatRequest):
     print(f"[API][CHAT] /chat called question='{req.question[:200]}' top_k={req.top_k} force_reingest={req.force_reingest} files={len(req.files) if req.files else 0}")
     question = (req.question or "").strip()
+    total_rag_steps = 8
+    _rag_log_step(1, total_rag_steps, "Request received", f"question_len={len(question)} files={len(req.files) if req.files else 0}")
 
     conversation_key = (req.conversation_id or req.ticket_url or "default").strip() or "default"
     incoming_history = _normalize_history_messages(req.history)
@@ -5682,6 +7345,7 @@ def chat(req: ChatRequest):
         dq = deque(incoming_history[-MAX_CONVERSATION_MESSAGES:], maxlen=MAX_CONVERSATION_MESSAGES)
         conversation_store[conversation_key] = dq
     stored_history = list(conversation_store.get(conversation_key, deque()))
+    conversation_state = dict(conversation_state_store.get(conversation_key) or {})
     use_history_context = _should_use_history_for_question(
         question,
         stored_history,
@@ -5696,6 +7360,7 @@ def chat(req: ChatRequest):
     # Process uploaded files early to include their content in context
     file_context = ""
     if req.files:
+        _rag_log_step(2, total_rag_steps, "Processing user-uploaded files", f"count={len(req.files)}")
         try:
             file_context = build_file_context(req.files, describe_image_func=_describe_image_via_vision)
             if file_context:
@@ -5703,12 +7368,15 @@ def chat(req: ChatRequest):
         except Exception as e:
             print(f"[API][CHAT][WARN] File processing failed: {e}")
             file_context = ""
+    else:
+        _rag_log_step(2, total_rag_steps, "Processing user-uploaded files", "no files were attached")
 
     # Parse ticket selection early so we can allow an empty initial message to trigger the first structured reply
     selected_ticket_id: Optional[int] = None
     selected_ticket_text: Optional[str] = None
     ticket_key: Optional[str] = None
     if req.ticket_url:
+        _rag_log_step(3, total_rag_steps, "Loading selected ticket context", req.ticket_url)
         ticket_key = (req.ticket_url or "").strip() or None
         selected_ticket_id = ado_parse_id_from_url(req.ticket_url)
         if selected_ticket_id is not None:
@@ -5719,6 +7387,8 @@ def chat(req: ChatRequest):
             except Exception as e:
                 print(f"[API][CHAT][WARN] failed to fetch ticket: {e}")
                 selected_ticket_text = None
+    else:
+        _rag_log_step(3, total_rag_steps, "Loading selected ticket context", "no ticket selected")
 
     has_ticket = bool(ticket_key)
 
@@ -5727,6 +7397,41 @@ def chat(req: ChatRequest):
         print("[API][CHAT][ERROR] Empty question")
         raise HTTPException(status_code=400, detail="question is empty")
 
+    if _question_requests_previous_answer_source(question):
+        answer = _build_previous_answer_source_answer(question, conversation_state)
+        _store_conversation_turn(
+            conversation_key,
+            question,
+            answer,
+            sources=list(conversation_state.get("sources") or []),
+            selected_ticket_id=conversation_state.get("selected_ticket_id"),
+            selected_ticket_url=conversation_state.get("selected_ticket_url"),
+            used_selected_ticket=bool(conversation_state.get("used_selected_ticket")),
+            used_file_context=bool(conversation_state.get("used_file_context")),
+        )
+        print("[API][CHAT] Answered previous-source clarification from conversation state")
+        return ChatResponse(answer=answer, sources=list(conversation_state.get("sources") or []))
+
+    has_active_anchor = bool(
+        selected_ticket_text
+        or file_context
+        or (use_history_context and bool(conversation_state.get("has_grounded_sources")))
+    )
+    if _question_needs_anchor(question) and not has_active_anchor:
+        answer = _build_anchor_clarification_answer(question)
+        _store_conversation_turn(
+            conversation_key,
+            question,
+            answer,
+            sources=[],
+            selected_ticket_id=selected_ticket_id,
+            selected_ticket_url=req.ticket_url,
+            used_selected_ticket=bool(selected_ticket_text),
+            used_file_context=bool(file_context),
+        )
+        print("[API][CHAT] Blocked ambiguous referential question without an anchor")
+        return ChatResponse(answer=answer, sources=[])
+
     if req.force_reingest:
         print("[API][CHAT] force_reingest=True → calling ingest_wiki_files(force=True)")
         ingest_wiki_files(force=True)
@@ -5734,6 +7439,7 @@ def chat(req: ChatRequest):
     ta9_mode = _is_ta9_question(question)
     is_foundational = _is_foundational_question(question)
     query_variants = _build_query_variants(question, ta9_mode)
+    _rag_log_step(4, total_rag_steps, "Preparing retrieval queries", f"variants={len(query_variants)} history_used={bool(history_context)}")
     if history_context:
         history_seed = f"Conversation context:\n{history_context}\n\nCurrent question:\n{question}"
         query_variants = [history_seed] + query_variants
@@ -5750,6 +7456,7 @@ def chat(req: ChatRequest):
     agg_metas: List[dict] = []
 
     try:
+        _rag_log_step(5, total_rag_steps, "Running vector retrieval", f"query_variants={len(query_variants)}")
         for idx, qv in enumerate(query_variants):
             augmented_qv = augment_question(qv)
             q_emb = embed_text(augmented_qv)
@@ -5923,14 +7630,20 @@ def chat(req: ChatRequest):
             f"Question: {question}\n\n"
             "Response:"
         )
-        try:
-            conversation_store[conversation_key].append({"role": "user", "content": question})
-            conversation_store[conversation_key].append({"role": "assistant", "content": answer})
-        except Exception as e:
-            print(f"[API][CHAT][WARN] Failed to persist conversation context: {e}")
+        _store_conversation_turn(
+            conversation_key,
+            question,
+            answer,
+            sources=[],
+            selected_ticket_id=selected_ticket_id,
+            selected_ticket_url=req.ticket_url,
+            used_selected_ticket=bool(selected_ticket_text),
+            used_file_context=bool(file_context),
+        )
         return ChatResponse(answer=answer, sources=[])
 
     docs, metas, distances, ids = rerank_results(question, docs, metas, distances=distances, ids=ids)
+    _rag_log_step(6, total_rag_steps, "Ranking and consolidating sources", f"candidate_docs={len(docs)}")
     question_is_procedural = _question_has_procedural_intent(question)
     entity_fact_intent = _question_has_entity_fact_intent(question)
     broad_coverage_intent = _question_requests_broad_coverage(question)
@@ -5998,26 +7711,11 @@ def chat(req: ChatRequest):
             max_sources=6 if broad_coverage_intent else 5,
         )
 
-    lock_primary_source = _should_lock_primary_source(question, source_candidates)
-    if lock_primary_source and source_candidates:
-        print(
-            f"[API][CHAT] Locking procedural answer to primary source "
-            f"collection={source_candidates[0].get('collection_name')} source={source_candidates[0].get('source')}"
-        )
-        source_candidates = source_candidates[:1]
-
-    # More context improves answer success rate, but for procedural questions fewer full-source documents
-    # are better than many disconnected chunks.
-    MAX_CONTEXT_SOURCES = 6 if broad_coverage_intent else (4 if question_is_procedural else 5)
+    # Let the LLM reranking decide source order; give every selected source full content
+    MAX_CONTEXT_SOURCES = 6 if broad_coverage_intent else 5
     print(f"[API][CHAT] Building context with MAX_CONTEXT_SOURCES={MAX_CONTEXT_SOURCES}")
 
     if source_candidates:
-        if question_is_procedural and len(source_candidates) > 1 and not lock_primary_source and not broad_coverage_intent:
-            lead_score = source_candidates[0]["score"]
-            second_score = source_candidates[1]["score"]
-            if lead_score >= second_score + 2.0:
-                source_candidates = source_candidates[: min(3, MAX_CONTEXT_SOURCES)]
-
         remaining_slots = MAX_CONTEXT_SOURCES - (1 if selected_ticket_text else 0)
         for idx, candidate in enumerate(source_candidates[:remaining_slots]):
             match_label = "PRIMARY MATCH" if idx == 0 else "SUPPLEMENTAL MATCH"
@@ -6027,9 +7725,11 @@ def chat(req: ChatRequest):
             )
             source_strings.append(src)
             snippet = candidate["excerpt"][:200].replace("\n", " ")
-            candidate_content = candidate["excerpt"]
-            if idx == 0 and question_is_procedural and not broad_coverage_intent:
-                candidate_content = _merge_chunk_texts([str(candidate.get("full_content") or "")], max_chars=6000)
+            # Give EVERY source its full content so the LLM can extract all relevant parts
+            candidate_content = _merge_chunk_texts(
+                [str(candidate.get("full_content") or candidate.get("excerpt") or "")],
+                max_chars=8000,
+            )
             print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
             context_blocks.append(
                 f"{match_label}: {src}\n"
@@ -6120,18 +7820,15 @@ def chat(req: ChatRequest):
             f"{context_text}\n"
         )
 
-    if lock_primary_source and source_candidates:
-        context_sections.append(
-            "=== STRICT SOURCE SELECTION ===\n"
-            "A single high-confidence procedure document was selected for this question. "
-            "Answer only from that PRIMARY MATCH document unless the user explicitly asks for alternatives or the selected document clearly lacks the requested detail.\n"
-        )
-
     if source_candidates and question_is_procedural:
         context_sections.append(
-            "=== RETRIEVAL PRIORITY ===\n"
-            "For exact how-to or configuration questions, follow the PRIMARY MATCH document first when it contains a concrete procedure. "
-            "Use supplemental matches only to fill missing details, and do not replace a specific procedure with more generic guidance unless the primary source is incomplete.\n"
+            "=== RETRIEVAL & COMPLETENESS PRIORITY ===\n"
+            "For how-to or configuration questions, use ALL relevant procedure sections from the retrieved documents.\n"
+            "If the user's question asks about MULTIPLE actions or objects (e.g. 'entities AND relations'), "
+            "you MUST provide the full step-by-step procedure for EACH requested part using the retrieved context.\n"
+            "Do NOT stop after covering only the first part. Do NOT treat a brief mention of a topic as sufficient "
+            "coverage — if the context contains a dedicated section with steps, fields, and configuration for that topic, use it fully.\n"
+            "When a single document contains procedures for multiple requested topics, extract and present ALL of them.\n"
         )
 
     if source_candidates and broad_coverage_intent:
@@ -6177,8 +7874,15 @@ def chat(req: ChatRequest):
         )
     
     combined_context = "\n\n".join(context_sections)
+    combined_context_tokens = _estimate_text_tokens(combined_context)
+    _rag_log_step(
+        7,
+        total_rag_steps,
+        "Building final prompt context",
+        f"context_chars={len(combined_context)} context_tokens={combined_context_tokens}",
+    )
 
-    prompt = _build_system_prompt(
+    prompt, combined_context = _fit_prompt_to_model_budget(
         question=question,
         combined_context=combined_context,
         foundational_instruction=foundational_instruction,
@@ -6186,20 +7890,32 @@ def chat(req: ChatRequest):
     )
 
     try:
+        _rag_log_step(
+            8,
+            total_rag_steps,
+            "Generating grounded answer",
+            f"prompt_chars={len(prompt)} prompt_tokens={_estimate_text_tokens(prompt)}",
+        )
         draft_answer = call_llm(prompt, temperature=0.2)
         answer = _ground_answer_against_context(question, combined_context, draft_answer)
         answer = _enforce_specific_grounded_answer(question, combined_context, answer)
+        answer = _llm_ensure_answer_completeness(question, combined_context, answer)
         answer = _normalize_noncode_fenced_blocks(answer)
     except Exception as exc:
         print(f"[API][CHAT][ERROR] LLM call failed: {exc}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"LLM call failed: {exc}")
 
-    try:
-        conversation_store[conversation_key].append({"role": "user", "content": question})
-        conversation_store[conversation_key].append({"role": "assistant", "content": answer})
-    except Exception as e:
-        print(f"[API][CHAT][WARN] Failed to persist conversation context: {e}")
+    _store_conversation_turn(
+        conversation_key,
+        question,
+        answer,
+        sources=source_strings,
+        selected_ticket_id=selected_ticket_id,
+        selected_ticket_url=req.ticket_url,
+        used_selected_ticket=bool(selected_ticket_text),
+        used_file_context=bool(file_context),
+    )
 
     # Optional teach: persist summarized lesson to memory collection
     if req.teach:
