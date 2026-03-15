@@ -533,8 +533,6 @@ ADO_SUPPORT_TICKET_ASSIGNED_TO = os.getenv(
     "Support <support@ta-9.com>",
 )
 
-LEARN_QUERY_NAME = os.getenv("ADO_LEARN_QUERY_NAME", "ai_learn_tickets_query")
-
 def _ado_headers() -> dict:
     if not (ADO_ORG and ADO_PROJECT and ADO_PAT):
         raise RuntimeError("Azure DevOps is not configured. Set ADO_ORG, ADO_PROJECT, ADO_PAT env vars.")
@@ -650,51 +648,6 @@ def _ado_fetch_work_items_by_ids(ids: List[int]) -> List[dict]:
             raise RuntimeError(f"ADO workitems details error: {det.text}")
         results.extend(det.json().get("value", []))
     return results
-
-
-def _ado_wiql_learning_query(project: Optional[str] = None) -> str:
-    """
-    WIQL based on the query shown in the screenshot:
-      - Changed Date > @Today - 720
-      - Work Item Type = [Any] (no filter)
-      - State In closed,completed,fixed,ready,resolved
-    """
-    if project:
-        return (
-            "SELECT [System.Id] FROM WorkItems "
-            f"WHERE [System.TeamProject] = '{project}' "
-            "AND [System.ChangedDate] > @Today - 720 "
-            "AND [System.State] IN ('Closed','Completed','Fixed','Ready','Resolved') "
-            "ORDER BY [System.ChangedDate] DESC"
-        )
-    return (
-        "SELECT [System.Id] FROM WorkItems "
-        "WHERE [System.TeamProject] = @project "
-        "AND [System.ChangedDate] > @Today - 720 "
-        "AND [System.State] IN ('Closed','Completed','Fixed','Ready','Resolved') "
-        "ORDER BY [System.ChangedDate] DESC"
-    )
-
-
-def ado_list_learning_tickets(limit: Optional[int] = None) -> List[int]:
-    """Run WIQL and return a list of work item IDs matching the learning query."""
-    project = ADO_PROJECT_TICKET_SUMMARY or ADO_PROJECT
-    url = f"https://dev.azure.com/{ADO_ORG}/{project}/_apis/wit/wiql?api-version=7.1-preview.2"
-    wiql = _ado_wiql_learning_query(project)
-    try:
-        resp = requests.post(url, json={"query": wiql}, headers=_ado_headers(), timeout=60)
-    except Exception as e:
-        print(f"[ADO][ERROR] WIQL call failed: {e}")
-        traceback.print_exc()
-        raise RuntimeError(f"ADO WIQL failed: {e}")
-    if resp.status_code != 200:
-        print(f"[ADO][ERROR] WIQL non-200: {resp.status_code} {resp.text[:300]}")
-        raise RuntimeError(f"ADO WIQL error: {resp.text}")
-    items = resp.json().get("workItems", [])
-    ids = [int(it.get("id")) for it in items if it.get("id")]
-    if limit is not None:
-        ids = ids[: max(0, int(limit))]
-    return ids
 
 
 def _extract_images_from_html(html: str) -> List[str]:
@@ -1989,100 +1942,6 @@ def ado_fetch_ticket_full(work_item_id: int) -> dict:
     }
 
 
-def build_conversation_block(comments: List[dict]) -> str:
-    if not comments:
-        return "Not provided."
-    lines: List[str] = []
-    for c in comments:
-        who = c.get("createdBy") or "Unknown"
-        when = c.get("createdDate") or ""
-        txt = c.get("text") or ""
-        lines.append(f"[{when}] {who}: {txt}")
-    return "\n".join(lines)
-
-
-def generate_professional_ticket_report(ticket: dict) -> str:
-    fields = ticket.get("fields", {})
-    comments = ticket.get("comments", [])
-
-    work_item_type = _first_field(fields, ["System.WorkItemType"]) or "Not provided"
-    title = _first_field(fields, ["System.Title"]) or "Not provided"
-    product = _first_field(
-        fields,
-        [
-            "Custom.Product",
-            "Microsoft.VSTS.Common.Product",
-            "Product",
-            "Custom.ProductName",
-        ],
-    ) or "Not provided"
-    service = _first_field(
-        fields,
-        [
-            "Custom.Service",
-            "Microsoft.VSTS.Common.Service",
-            "Service",
-            "Custom.ServiceName",
-        ],
-    ) or "Not provided"
-    
-    # Get raw HTML description to extract images
-    raw_description = _first_field(
-        fields,
-        ["System.Description", "Microsoft.VSTS.TCM.ReproSteps", "System.History"],
-    ) or ""
-    
-    # Extract and describe images
-    image_descriptions = ""
-    if raw_description:
-        images = _extract_images_from_html(raw_description)
-        if images:
-            print(f"[TICKET] Found {len(images)} images in description, describing via vision...")
-            image_texts = []
-            for img_url in images[:3]:  # Limit to first 3 images to avoid too many API calls
-                desc = _describe_image_via_vision(img_url)
-                image_texts.append(desc)
-            if image_texts:
-                image_descriptions = "\n\nImages in description:\n" + "\n".join(image_texts)
-    
-    description = _strip_html(raw_description) + image_descriptions
-
-    conversation = build_conversation_block(comments)
-
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not configured; cannot format ticket report.")
-
-    llm_prompt = (
-        "You are a technical support documentation assistant. "
-        "Using ONLY the provided ticket data, create a professional report with EXACT sections below. "
-        "If data is missing, write 'Not provided.' Do not invent facts. "
-        "Return plain text with these headings exactly and in this order:\n\n"
-        "Ticket type:\n"
-        "Title:\n"
-        "Product:\n"
-        "Service:\n\n"
-        "User description:\n\n"
-        "Observed error:\n\n"
-        "Expected behavior:\n\n"
-        "Resolution steps (step-by-step):\n\n"
-        "-----\n"
-        "Ticket data:\n"
-        f"Type: {work_item_type}\n"
-        f"Title: {title}\n"
-        f"Product: {product}\n"
-        f"Service: {service}\n\n"
-        f"Description: {description}\n\n"
-        f"Conversation: {conversation}\n"
-    )
-
-    report = call_llm(llm_prompt)
-    full_report = (
-        report.strip()
-        + "\n\nConversation with client (chronological):\n"
-        + conversation
-    )
-    return full_report
-
 def ado_list_tickets(tag_contains: str = "CC") -> List[dict]:
     """Load open support tickets from the configured Azure DevOps saved queries."""
     del tag_contains
@@ -3313,77 +3172,6 @@ def _source_solution_preference_adjustment(question: str, title: str = "", sourc
     return 0.0
 
 
-def _apply_solution_channel_preference(question: str, candidates: List[dict], max_sources: int) -> List[dict]:
-    if not candidates:
-        return []
-
-    preferred_channel = _preferred_solution_channel(question)
-    if not preferred_channel:
-        return candidates[:max_sources]
-
-    ranked: List[dict] = []
-    top_score = max(float(candidate.get("score") or 0.0) for candidate in candidates)
-
-    for candidate in candidates:
-        title = str(candidate.get("title") or "")
-        source = str(candidate.get("source") or "")
-        text = str(candidate.get("full_content") or candidate.get("excerpt") or "")
-        channel = str(candidate.get("solution_channel") or _classify_source_solution_channel(title=title, source=source, text=text))
-        candidate["solution_channel"] = channel
-
-        task_specificity = float(candidate.get("task_specificity") or 0.0)
-        phrase_hits = int(candidate.get("phrase_hits") or 0)
-        title_overlap = float(candidate.get("title_overlap") or 0.0)
-        local_overlap = float(candidate.get("local_overlap_ratio") or 0.0)
-        procedural_alignment = float(candidate.get("procedural_alignment") or 0.0)
-
-        exact_task_match = (
-            task_specificity >= 2.5
-            or phrase_hits >= 2
-            or title_overlap >= 0.38
-            or (local_overlap >= 0.42 and procedural_alignment >= 0.5)
-            or procedural_alignment >= 2.2
-        )
-
-        channel_bonus = 0.0
-        if channel == preferred_channel:
-            channel_bonus = 1.6
-        elif channel in {"mixed", "unknown"}:
-            channel_bonus = 0.45
-        else:
-            channel_bonus = -2.4
-
-        if exact_task_match and channel != preferred_channel:
-            channel_bonus = max(channel_bonus, 0.9)
-
-        adjusted_score = float(candidate.get("score") or 0.0) + channel_bonus
-        candidate["channel_preference_bonus"] = round(channel_bonus, 4)
-        candidate["channel_adjusted_score"] = round(adjusted_score, 4)
-        candidate["exact_task_match"] = exact_task_match
-        ranked.append(candidate)
-
-    ranked.sort(
-        key=lambda item: (
-            -int(bool(item.get("exact_task_match"))),
-            -float(item.get("channel_adjusted_score") or item.get("score") or 0.0),
-            -float(item.get("task_specificity") or 0.0),
-            (item.get("best_distance") if item.get("best_distance") is not None else 999.0),
-        )
-    )
-
-    retained = [
-        candidate
-        for candidate in ranked
-        if float(candidate.get("channel_adjusted_score") or 0.0) >= (top_score - 8.0)
-        or bool(candidate.get("exact_task_match"))
-    ]
-    print(
-        f"[SOURCE_PREF] preferred_channel={preferred_channel} "
-        f"ranked={len(ranked)} retained={len(retained[:max_sources])}"
-    )
-    return retained[:max_sources] if retained else ranked[:max_sources]
-
-
 def _broad_coverage_signal_score(question: str, text: str) -> float:
     if not _question_requests_broad_coverage(question) or not text:
         return 0.0
@@ -3850,135 +3638,6 @@ def _subtask_coverage_score(question: str, text: str) -> float:
     return min(6.0, (coverage_count * 1.8) + (coverage_ratio * 2.6))
 
 
-def _candidate_subtask_match_strength(candidate: dict, subtask: Tuple[str, str]) -> float:
-    action, object_phrase = subtask
-    candidate_text = f"{candidate.get('title') or ''}\n{candidate.get('full_content') or candidate.get('excerpt') or ''}"
-    task_text = f"{action} {object_phrase}".strip()
-    specificity = _procedural_task_specificity_score(task_text, candidate_text)
-    alignment = _procedural_alignment_score(task_text, candidate_text)
-    local_overlap = _best_local_overlap_ratio(object_phrase, candidate_text)
-    overlap = _lexical_overlap_ratio(object_phrase, candidate_text)
-    phrase_hits = _count_exact_phrase_hits(task_text, candidate_text)
-    return round(
-        specificity
-        + alignment
-        + (local_overlap * 4.0)
-        + (overlap * 2.5)
-        + (phrase_hits * 0.7),
-        4,
-    )
-
-
-def _ensure_subtask_source_coverage(
-    question: str,
-    selected_candidates: List[dict],
-    candidate_pool: List[dict],
-    max_sources: int = 6,
-) -> List[dict]:
-    if not selected_candidates:
-        return []
-
-    subtasks = _extract_procedural_subtasks(question, max_subtasks=6)
-    if len(subtasks) <= 1:
-        return selected_candidates[:max_sources]
-
-    selected = list(selected_candidates[:max_sources])
-    covered = set()
-    for candidate in selected:
-        covered.update(candidate.get("covered_subtasks") or [])
-
-    additions = 0
-    for subtask in subtasks:
-        if subtask in covered:
-            continue
-
-        best_candidate = None
-        best_signature = None
-        for candidate in candidate_pool:
-            if candidate in selected:
-                continue
-            match_strength = _candidate_subtask_match_strength(candidate, subtask)
-            signature = (
-                match_strength,
-                float(candidate.get("task_specificity") or 0.0),
-                float(candidate.get("subtask_coverage_ratio") or 0.0),
-                float(candidate.get("score") or 0.0),
-            )
-            if best_signature is None or signature > best_signature:
-                best_signature = signature
-                best_candidate = candidate
-
-        if best_candidate is None:
-            continue
-        if float(best_signature[0]) < 3.2:
-            continue
-
-        selected.append(best_candidate)
-        covered.update(best_candidate.get("covered_subtasks") or [])
-        additions += 1
-        if len(selected) >= max_sources:
-            break
-
-    if additions > 0:
-        print(
-            f"[SOURCE_COVERAGE] supplemented compound procedural question with {additions} additional source(s); covered={len(covered)}/{len(subtasks)}"
-        )
-
-    return selected[:max_sources]
-
-
-def _select_sources_for_subtask_coverage(question: str, candidates: List[dict], max_sources: int = 6) -> List[dict]:
-    if not candidates:
-        return []
-
-    subtasks = _extract_procedural_subtasks(question, max_subtasks=6)
-    if len(subtasks) <= 1:
-        return candidates[:max_sources]
-
-    selected: List[dict] = []
-    covered = set()
-    pool = list(candidates)
-
-    while pool and len(selected) < max_sources:
-        best_candidate = None
-        best_signature = None
-        for candidate in pool:
-            candidate_covered = set(candidate.get("covered_subtasks") or [])
-            new_coverage = len(candidate_covered - covered)
-            signature = (
-                new_coverage,
-                float(candidate.get("subtask_coverage_ratio") or 0.0),
-                float(candidate.get("score") or 0.0),
-                float(candidate.get("task_specificity") or 0.0),
-            )
-            if best_signature is None or signature > best_signature:
-                best_signature = signature
-                best_candidate = candidate
-
-        if best_candidate is None:
-            break
-
-        selected.append(best_candidate)
-        covered.update(best_candidate.get("covered_subtasks") or [])
-        pool = [candidate for candidate in pool if candidate is not best_candidate]
-
-        if len(covered) >= len(subtasks):
-            break
-
-    for candidate in candidates:
-        if len(selected) >= max_sources:
-            break
-        if candidate in selected:
-            continue
-        selected.append(candidate)
-
-    if subtasks:
-        print(
-            f"[SOURCE_COVERAGE] subtasks={len(subtasks)} covered={len(covered)} selected={len(selected[:max_sources])}"
-        )
-    return selected[:max_sources]
-
-
 def _object_phrase_overlap_ratio(left: str, right: str) -> float:
     left_tokens = set(_tokenize_normalized(left))
     right_tokens = set(_tokenize_normalized(right))
@@ -4168,87 +3827,6 @@ def _filter_low_context_source_candidates(question: str, candidates: List[dict],
     return filtered[:max_sources]
 
 
-def _direct_task_match_strength(question: str, candidate: dict) -> float:
-    if not _question_has_procedural_intent(question) or not _extract_action_object_targets(question):
-        return 0.0
-
-    phrase_hits = int(candidate.get("phrase_hits") or 0)
-    task_specificity = float(candidate.get("task_specificity") or 0.0)
-    title_overlap = float(candidate.get("title_overlap") or 0.0)
-    overlap_ratio = float(candidate.get("overlap_ratio") or 0.0)
-    local_overlap = float(candidate.get("local_overlap_ratio") or 0.0)
-    procedural_alignment = float(candidate.get("procedural_alignment") or 0.0)
-    generic_penalty = float(candidate.get("generic_penalty") or 0.0)
-
-    strength = 0.0
-    if task_specificity >= 4.0:
-        strength += 4.0
-    elif task_specificity >= 2.5:
-        strength += 2.8
-    elif task_specificity >= 1.0:
-        strength += 1.2
-
-    if phrase_hits >= 2:
-        strength += 2.8
-    elif phrase_hits == 1:
-        strength += 1.2
-
-    if title_overlap >= 0.42:
-        strength += 2.4
-    elif title_overlap >= 0.25:
-        strength += 1.0
-
-    if local_overlap >= 0.45:
-        strength += 1.8
-    elif local_overlap >= 0.32:
-        strength += 0.8
-
-    if overlap_ratio >= 0.24:
-        strength += 1.0
-    if procedural_alignment >= 2.0:
-        strength += 1.8
-    elif procedural_alignment >= 0.8:
-        strength += 0.7
-
-    if generic_penalty > 0 and phrase_hits == 0 and title_overlap < 0.2:
-        strength -= 1.8
-
-    return round(strength, 4)
-
-
-def _retain_direct_task_match_sources(question: str, candidates: List[dict], max_sources: int = 6) -> List[dict]:
-    if not candidates:
-        return []
-    if not _question_has_procedural_intent(question) or not _extract_action_object_targets(question):
-        return candidates[:max_sources]
-
-    strong: List[dict] = []
-    usable: List[dict] = []
-    best_strength = 0.0
-
-    for candidate in candidates:
-        strength = _direct_task_match_strength(question, candidate)
-        candidate["direct_task_match_strength"] = strength
-        best_strength = max(best_strength, strength)
-        if strength >= 3.5:
-            strong.append(candidate)
-        if strength >= 2.2:
-            usable.append(candidate)
-
-    if strong:
-        kept = [candidate for candidate in candidates if candidate in usable or candidate in strong]
-        print(
-            f"[SOURCE_MATCH] direct procedural matches strong={len(strong)} usable={len(kept[:max_sources])}"
-        )
-        return kept[:max_sources]
-
-    if best_strength < 2.0:
-        print("[SOURCE_MATCH] No direct procedural source match was strong enough; returning no sources")
-        return []
-
-    return candidates[:max_sources]
-
-
 def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
     """
     Simple, general-purpose lexical score.
@@ -4369,6 +3947,8 @@ def _smart_deduplicate_and_diversify(
         source = meta.get("source", "unknown") if meta else "unknown"
         source_key = source  # Use full source as key
         max_allowed = max_chunks_per_source
+        if _is_priority_document(source, meta):
+            max_allowed = max_chunks_per_source * 3
         
         # Check if we've already included max chunks from this source
         if source_key in source_chunk_count and source_chunk_count[source_key] >= max_allowed:
@@ -5038,57 +4618,47 @@ def _llm_ensure_answer_completeness(question: str, context_text: str, answer: st
         return answer
 
 
-def _enforce_complete_procedural_answer(question: str, context_text: str, answer: str) -> str:
-    if not answer or not OPENAI_API_KEY:
+def _llm_verify_answer_relevance(question: str, context_text: str, answer: str) -> str:
+    """
+    Final LLM gate: verify the answer actually addresses the specific question.
+    If the retrieved documents are about adjacent/related topics but do NOT contain
+    information that directly answers the question, replace the answer with an honest
+    'not found' message instead of fabricating steps from loosely related content.
+    """
+    if not answer or not OPENAI_API_KEY or not context_text:
         return answer
-
-    subtasks = _extract_procedural_subtasks(question, max_subtasks=6)
-    if len(subtasks) <= 1:
-        return answer
-
-    context_details = _subtask_coverage_details(question, context_text)
-    context_covered = list(context_details.get("covered_subtasks") or [])
-    if not context_covered:
-        return answer
-
-    answer_details = _subtask_coverage_details(question, answer, strict=True)
-    answer_covered = set(answer_details.get("covered_subtasks") or [])
-    context_covered_set = set(context_covered)
-    if context_covered_set.issubset(answer_covered):
-        return answer
-
-    requested_labels = [_format_subtask_label(action, object_phrase) for action, object_phrase in subtasks]
-    covered_labels = [_format_subtask_label(action, object_phrase) for action, object_phrase in context_covered]
-    missing_labels = [
-        _format_subtask_label(action, object_phrase)
-        for action, object_phrase in context_covered
-        if (action, object_phrase) not in answer_covered
-    ]
 
     prompt = (
-        "You are a strict completeness checker for a grounded RAG assistant.\n\n"
-        "Goal: ensure the final answer covers every requested subtask that is actually supported by CONTEXT.\n"
-        "Rules:\n"
-        "1) Keep only claims supported by CONTEXT.\n"
-        "2) If CONTEXT supports multiple requested subtasks, the answer must cover all of them.\n"
-        "3) Never stop after the first covered subtask if other covered subtasks also appear in CONTEXT.\n"
-        "4) If some requested subtasks are not supported by CONTEXT, explicitly say which requested parts are still missing from the available knowledge context.\n"
-        "5) Do not invent details for missing subtasks.\n"
-        "6) Return only the improved final answer.\n\n"
+        "You are a strict relevance judge for a RAG assistant.\n\n"
+        "TASK: Decide whether the ANSWER below genuinely answers the specific QUESTION asked, "
+        "using information that is directly present in CONTEXT.\n\n"
+        "CRITERIA FOR REJECTION:\n"
+        "- The answer describes a DIFFERENT procedure or topic than what was asked, even if it is related.\n"
+        "- The answer assembles vaguely related fragments into fabricated steps that are not explicitly described in CONTEXT.\n"
+        "- The CONTEXT contains information about a related but different concept, and the answer pretends it answers the question.\n"
+        "- Key terms from the question do not appear in substantive procedural detail in CONTEXT.\n\n"
+        "CRITERIA FOR ACCEPTANCE:\n"
+        "- The CONTEXT contains a direct explanation, procedure, or factual answer to the specific question.\n"
+        "- The answer accurately reflects what CONTEXT says about the specific topic asked.\n\n"
+        "OUTPUT:\n"
+        "- If the answer is RELEVANT and accurate: return it UNCHANGED.\n"
+        "- If the answer is NOT genuinely answering the question: return a helpful message that says:\n"
+        "  1) The current knowledge base does not contain a direct answer to this specific question.\n"
+        "  2) Briefly mention what related topics WERE found (1-2 sentences max).\n"
+        "  3) Suggest the user add the relevant documentation or rephrase their question.\n\n"
         f"QUESTION:\n{question}\n\n"
-        f"REQUESTED SUBTASKS:\n- " + "\n- ".join(requested_labels) + "\n\n"
-        f"SUBTASKS SUPPORTED BY CONTEXT:\n- " + "\n- ".join(covered_labels) + "\n\n"
-        f"SUPPORTED SUBTASKS MISSING FROM CURRENT ANSWER:\n- " + "\n- ".join(missing_labels) + "\n\n"
-        f"CONTEXT:\n{context_text}\n\n"
-        f"CURRENT ANSWER:\n{answer}\n"
+        f"CONTEXT:\n{context_text[:6000]}\n\n"
+        f"ANSWER:\n{answer}\n\n"
+        "Return ONLY the final answer text."
     )
-
     try:
-        improved = call_llm(prompt, temperature=0.0)
-        improved = (improved or "").strip()
-        return improved if improved else answer
+        result = call_llm(prompt, temperature=0.0)
+        result = (result or "").strip()
+        if result:
+            return result
+        return answer
     except Exception as e:
-        print(f"[API][CHAT][WARN] Completeness enforcement failed: {e}")
+        print(f"[API][CHAT][WARN] Relevance verification failed: {e}")
         return answer
 
 
@@ -5876,6 +5446,13 @@ def _count_exact_phrase_hits(question: str, text: str) -> int:
     return hits
 
 
+def _is_priority_document(source: str, meta: Optional[dict] = None) -> bool:
+    """Check if a document is a priority document that should be boosted in search."""
+    if meta and str(meta.get("priority", "")).strip().lower() == "user_upload":
+        return True
+    return str(source or "").lower().startswith("user:content:")
+
+
 def _is_generic_source_title(title: str, source: str = "") -> bool:
     candidate = f"{title} {source}".lower()
     generic_markers = [
@@ -5883,44 +5460,6 @@ def _is_generic_source_title(title: str, source: str = "") -> bool:
         "getting started", "guide", "documentation",
     ]
     return any(marker in candidate for marker in generic_markers)
-
-
-def _should_lock_primary_source(question: str, candidates: List[dict]) -> bool:
-    if not _question_has_procedural_intent(question) or not candidates:
-        return False
-    if _question_requests_broad_coverage(question):
-        return False
-
-    primary = candidates[0]
-    secondary = candidates[1] if len(candidates) > 1 else None
-    primary_overlap = float(primary.get("overlap_ratio") or 0.0)
-    primary_title_overlap = float(primary.get("title_overlap") or 0.0)
-    primary_phrase_hits = int(primary.get("phrase_hits") or 0)
-    primary_procedural = int(primary.get("procedural_markers") or 0)
-    primary_task_specificity = float(primary.get("task_specificity") or 0.0)
-    primary_score = float(primary.get("score") or 0.0)
-    secondary_task_specificity = float((secondary or {}).get("task_specificity") or 0.0)
-    secondary_score = float((secondary or {}).get("score") or 0.0)
-    is_generic_primary = _is_generic_source_title(
-        str(primary.get("title") or ""),
-        str(primary.get("source") or ""),
-    )
-
-    strong_primary = (
-        primary_phrase_hits >= 2
-        or primary_overlap >= 0.38
-        or primary_title_overlap >= 0.5
-        or (primary_procedural >= 2 and primary_overlap >= 0.24)
-        or primary_task_specificity >= 2.5
-    )
-    clear_margin = primary_score >= secondary_score + 2.5
-    specificity_margin = primary_task_specificity >= secondary_task_specificity + 1.0
-    return (
-        strong_primary
-        and primary_task_specificity > -0.5
-        and not is_generic_primary
-        and (secondary is None or (clear_margin and specificity_margin))
-    )
 
 
 def _build_source_context_candidates(
@@ -5996,6 +5535,8 @@ def _build_source_context_candidates(
 
         full_content = _merge_chunk_texts([row["content"] for row in rows])
         excerpt_limit = 3200 if broad_coverage_intent else (2600 if question_is_procedural else 1800)
+        if _is_priority_document(entry["source"], entry.get("seed_meta")):
+            excerpt_limit = max(excerpt_limit, 4000)
         excerpt = _merge_chunk_texts([row["content"] for row in rows], max_chars=excerpt_limit)
         seed_meta = rows[0]["metadata"] or entry["seed_meta"]
         top_chunk_signals = sorted(entry.get("chunk_signal_scores") or [0.0], reverse=True)[:3]
@@ -6016,10 +5557,16 @@ def _build_source_context_candidates(
         phrase_hits = _count_exact_phrase_hits(question, f"{title}\n{full_content}")
         coverage_details = _subtask_coverage_details(question, f"{title}\n{full_content}")
         subtask_coverage_bonus = _subtask_coverage_score(question, f"{title}\n{full_content}")
+        is_priority = _is_priority_document(entry["source"], entry.get("seed_meta"))
         chunk_count_penalty = min(6.0, math.log(max(1, len(rows)), 2) * 0.9) if len(rows) > 8 else 0.0
+        if is_priority:
+            chunk_count_penalty = min(chunk_count_penalty, 1.0)
         if entity_fact_intent and len(rows) > 4:
             chunk_count_penalty += min(3.5, math.log(max(1, len(rows)), 2) * 0.9)
-        generic_penalty = 4.5 if question_is_procedural and _is_generic_source_title(title, entry["source"]) else 0.0
+            if is_priority:
+                chunk_count_penalty = min(chunk_count_penalty, 1.5)
+        generic_penalty = 4.5 if question_is_procedural and _is_generic_source_title(title, entry["source"]) and not is_priority else 0.0
+        priority_boost = 6.0 if is_priority else 0.0
         compact_fact_bonus = 1.5 if entity_fact_intent and len(rows) <= 3 and entity_fact_bonus > 0 else 0.0
         task_specificity = _procedural_task_specificity_score(question, f"{title}\n{full_content}")
         solution_channel = _classify_source_solution_channel(title=title, source=entry["source"], text=full_content)
@@ -6045,6 +5592,7 @@ def _build_source_context_candidates(
             + (phrase_hits * 1.5)
             + subtask_coverage_bonus
             + solution_channel_bias
+            + priority_boost
             - chunk_count_penalty
             - generic_penalty
         )
@@ -6078,6 +5626,8 @@ def _build_source_context_candidates(
                 "chunk_signal_strength": round(chunk_signal_strength, 4),
                 "chunk_count_penalty": round(chunk_count_penalty, 4),
                 "generic_penalty": generic_penalty,
+                "priority_boost": priority_boost,
+                "is_priority": is_priority,
                 "solution_channel": solution_channel,
                 "solution_channel_bias": round(solution_channel_bias, 4),
                 "matched_chunk_ids": entry["matched_chunk_ids"],
@@ -6446,20 +5996,6 @@ class IngestResponse(BaseModel):
     message: Optional[str] = None
 
 
-class AdoLearnIngestRequest(BaseModel):
-    async_run: Optional[bool] = False
-    limit: Optional[int] = None
-    force: Optional[bool] = False
-
-
-class AdoLearnIngestResponse(BaseModel):
-    added_chunks: int
-    total_chunks: int
-    tickets_processed: int
-    tickets_skipped: int
-    message: Optional[str] = None
-
-
 class VectorDbDocumentUpdateRequest(BaseModel):
     collection_name: str
     source: str
@@ -6689,6 +6225,70 @@ def vector_db_delete_document(req: VectorDbDocumentDeleteRequest):
         "source": req.source,
         "deleted_chunks": len(existing_ids),
     }
+
+
+@app.post("/internal/reinsert-backup")
+def reinsert_backup():
+    """Temporary endpoint: re-insert User Guide chunks from backup JSON using the app's own DB connection."""
+    import json as _json
+    backup_path = "/app/chroma_db/user_guide_backup.json"
+    if not os.path.exists(backup_path):
+        raise HTTPException(status_code=404, detail="Backup file not found")
+
+    with open(backup_path) as f:
+        data = _json.load(f)
+    ids = data["ids"]
+    docs = data["documents"]
+    metas = data["metadatas"]
+    total = len(ids)
+    print(f"[REINSERT] Loaded {total} chunks from backup")
+
+    # Check which chunks already exist
+    existing = set()
+    for i in range(0, total, 500):
+        batch_ids = ids[i:i+500]
+        try:
+            got = collection.get(ids=batch_ids)
+            existing.update(got["ids"])
+        except Exception:
+            pass
+    print(f"[REINSERT] {len(existing)} chunks already exist, skipping those")
+
+    # Filter remaining
+    todo_ids, todo_docs, todo_metas = [], [], []
+    for i in range(total):
+        if ids[i] not in existing:
+            todo_ids.append(ids[i])
+            todo_docs.append(docs[i])
+            todo_metas.append(metas[i])
+    remaining = len(todo_ids)
+    print(f"[REINSERT] Need to insert {remaining} chunks")
+    if remaining == 0:
+        return {"message": "All chunks already present", "total": total, "inserted": 0, "collection_count": collection.count()}
+
+    BATCH = 50
+    inserted = 0
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    for i in range(0, remaining, BATCH):
+        b_ids = todo_ids[i:i+BATCH]
+        b_docs = todo_docs[i:i+BATCH]
+        b_metas = todo_metas[i:i+BATCH]
+
+        # Batch embed via OpenAI API
+        body = {"model": OPENAI_EMBEDDING_MODEL, "input": b_docs}
+        resp = requests.post(f"{OPENAI_URL}/embeddings", json=body, headers=headers, timeout=120)
+        if resp.status_code != 200:
+            return {"error": f"OpenAI embeddings failed at batch {i}: {resp.text[:300]}", "inserted_so_far": inserted}
+        embeddings = [item["embedding"] for item in sorted(resp.json()["data"], key=lambda x: x["index"])]
+
+        collection.add(ids=b_ids, documents=b_docs, metadatas=b_metas, embeddings=embeddings)
+        inserted += len(b_ids)
+        print(f"[REINSERT] Inserted {inserted}/{remaining} (collection count: {collection.count()})")
+
+    result = {"message": "Re-insertion complete", "total": total, "inserted": inserted, "collection_count": collection.count()}
+    print(f"[REINSERT] Done: {result}")
+    return result
+
 
 @app.get("/health")
 def health():
@@ -7178,157 +6778,6 @@ def compare_and_ingest(async_run: bool = False, background_tasks: BackgroundTask
 
 
 # ---------------------------------------------------------------------
-# Azure DevOps Learning Tickets Ingest Endpoint
-# ---------------------------------------------------------------------
-
-def ingest_learning_tickets_internal(limit: Optional[int] = None, force: bool = False) -> Tuple[int, int, int, int]:
-    if not (ADO_ORG and ADO_PROJECT and ADO_PAT):
-        raise RuntimeError("Azure DevOps is not configured. Set ADO_ORG, ADO_PROJECT, ADO_PAT env vars.")
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not configured; cannot generate ticket reports.")
-
-    ids = ado_list_learning_tickets(limit=limit)
-    if not ids:
-        return 0, collection.count(), 0, 0
-
-    existing_sources = set(get_ingested_sources()) if not force else set()
-    added_chunks = 0
-    tickets_processed = 0
-    tickets_skipped = 0
-
-    for idx, ticket_id in enumerate(ids, start=1):
-        source = f"ado:learn:{ticket_id}"
-        if source in existing_sources:
-            print(f"[ADO][LEARN] Skipping already ingested ticket {ticket_id}")
-            tickets_skipped += 1
-            continue
-
-        print(f"[ADO][LEARN] [{idx}/{len(ids)}] Processing ticket {ticket_id}")
-        try:
-            ticket = ado_fetch_ticket_full(ticket_id)
-            report = generate_professional_ticket_report(ticket)
-        except Exception as e:
-            print(f"[ADO][LEARN][ERROR] Failed to build report for ticket {ticket_id}: {e}")
-            traceback.print_exc()
-            tickets_skipped += 1
-            continue
-
-        chunks = chunk_text(report)
-        if not chunks:
-            print(f"[ADO][LEARN][WARN] No chunks for ticket {ticket_id} → skipping")
-            tickets_skipped += 1
-            continue
-
-        fields = ticket.get("fields", {})
-        meta_title = _first_field(fields, ["System.Title"]) or ""
-        meta_type = _first_field(fields, ["System.WorkItemType"]) or ""
-        meta_state = _first_field(fields, ["System.State"]) or ""
-
-        ids_to_add: List[str] = []
-        docs: List[str] = []
-        metas: List[dict] = []
-        embeds: List[List[float]] = []
-
-        for i, ch in enumerate(chunks):
-            try:
-                emb = embed_text(ch)
-            except Exception as e:
-                print(f"[ADO][LEARN][ERROR] Embedding failed ticket={ticket_id} chunk={i}: {e}")
-                traceback.print_exc()
-                continue
-            ids_to_add.append(str(uuid.uuid4()))
-            docs.append(ch)
-            metas.append(
-                {
-                    "source": source,
-                    "chunk": i,
-                    "ticket_id": ticket_id,
-                    "title": meta_title,
-                    "type": meta_type,
-                    "state": meta_state,
-                    "query": LEARN_QUERY_NAME,
-                }
-            )
-            embeds.append(emb)
-
-        if not ids_to_add:
-            print(f"[ADO][LEARN][WARN] No successful chunks for ticket {ticket_id} → skipping add()")
-            tickets_skipped += 1
-            continue
-
-        try:
-            collection.add(ids=ids_to_add, documents=docs, metadatas=metas, embeddings=embeds)
-            added_chunks += len(ids_to_add)
-            tickets_processed += 1
-            print(f"[ADO][LEARN] Added {len(ids_to_add)} chunks for ticket {ticket_id}")
-        except Exception as e:
-            print(f"[ADO][LEARN][ERROR] Failed to add chunks for ticket {ticket_id}: {e}")
-            traceback.print_exc()
-            tickets_skipped += 1
-
-    total_chunks = collection.count()
-    return added_chunks, total_chunks, tickets_processed, tickets_skipped
-
-
-@app.post("/azure/learn_tickets/ingest", response_model=AdoLearnIngestResponse)
-def ingest_learning_tickets(req: AdoLearnIngestRequest, background_tasks: BackgroundTasks = None):
-    """
-    Run the Azure DevOps 'ai_learn_tickets_query' style WIQL, generate
-    professional ticket reports, and store them in the Chroma collection.
-    """
-    if req.async_run:
-        print("[API][ADO][LEARN] async_run=True → scheduling background task")
-
-        def _bg_job():
-            try:
-                a, t, p, s = ingest_learning_tickets_internal(limit=req.limit, force=bool(req.force))
-                print(
-                    f"[API][ADO][LEARN][ASYNC] DONE: added_chunks={a}, total_chunks={t}, processed={p}, skipped={s}"
-                )
-            except Exception as e:
-                print(f"[API][ADO][LEARN][ASYNC][ERROR] {e}")
-                traceback.print_exc()
-
-        if background_tasks is not None:
-            background_tasks.add_task(_bg_job)
-        else:
-            asyncio.create_task(asyncio.to_thread(_bg_job))
-
-        try:
-            current_total = collection.count()
-        except Exception:
-            current_total = 0
-        return AdoLearnIngestResponse(
-            added_chunks=0,
-            total_chunks=current_total,
-            tickets_processed=0,
-            tickets_skipped=0,
-            message="api worked! learning tickets ingest started in background; check logs for progress",
-        )
-
-    try:
-        added, total, processed, skipped = ingest_learning_tickets_internal(
-            limit=req.limit, force=bool(req.force)
-        )
-        msg = (
-            f"Processed {processed} tickets, skipped {skipped}, added {added} chunks."
-            if processed or skipped
-            else "No tickets matched the query."
-        )
-        return AdoLearnIngestResponse(
-            added_chunks=added,
-            total_chunks=total,
-            tickets_processed=processed,
-            tickets_skipped=skipped,
-            message=msg,
-        )
-    except Exception as exc:
-        print(f"[API][ADO][LEARN][ERROR] {exc}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-# ---------------------------------------------------------------------
 # Chat Endpoint
 # ---------------------------------------------------------------------
 
@@ -7510,6 +6959,55 @@ def chat(req: ChatRequest):
     distances = agg_distances
     docs = agg_docs
     metas = agg_metas
+
+    # Dedicated priority-document search: ensure the best-matching chunks from
+    # priority documents (e.g. User Guide) are always in the candidate pool.
+    if primary_emb:
+        try:
+            _priority_sources = set()
+            for _m in metas:
+                if _m and _is_priority_document(str(_m.get("source", "")), _m):
+                    _priority_sources.add(str(_m.get("source", "")))
+            # Also scan a small sample to discover priority sources not yet in results
+            _sample = collection.get(limit=200, include=["metadatas"])
+            for _m in (_sample.get("metadatas") or []):
+                if _m and _is_priority_document(str(_m.get("source", "")), _m):
+                    _priority_sources.add(str(_m.get("source", "")))
+
+            existing_ids = set(ids)
+            for _ps in _priority_sources:
+                if not _ps:
+                    continue
+                for _col, _cl in ((collection, "wiki"), (memory_collection, "user_knowledge")):
+                    try:
+                        pr = _col.query(
+                            query_embeddings=[primary_emb],
+                            n_results=30,
+                            where={"source": _ps},
+                            include=["distances", "documents", "metadatas"],
+                        )
+                        pr_ids = pr.get("ids", [[]])[0]
+                        pr_dists = pr.get("distances", [[]])[0]
+                        pr_docs = pr.get("documents", [[]])[0]
+                        pr_metas = pr.get("metadatas", [[]])[0]
+                        added = 0
+                        for _i, _id in enumerate(pr_ids or []):
+                            if _id not in existing_ids:
+                                ids.append(_id)
+                                distances.append(pr_dists[_i])
+                                docs.append(pr_docs[_i])
+                                _pm = pr_metas[_i] or {}
+                                if "collection" not in _pm:
+                                    _pm = {**_pm, "collection": _cl}
+                                metas.append(_pm)
+                                existing_ids.add(_id)
+                                added += 1
+                        if added:
+                            print(f"[API][CHAT] Priority search: added {added} chunks from {_ps} via {_cl}")
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[API][CHAT][WARN] Priority document search failed: {e}")
 
     # Secondary search: ticket-aware similarity without overriding the question
     if ticket_context_hint:
@@ -7715,6 +7213,61 @@ def chat(req: ChatRequest):
     MAX_CONTEXT_SOURCES = 6 if broad_coverage_intent else 5
     print(f"[API][CHAT] Building context with MAX_CONTEXT_SOURCES={MAX_CONTEXT_SOURCES}")
 
+    # Guaranteed priority-document context: always query the largest priority document
+    # (User Guide) and inject the most relevant chunks as a mandatory context block.
+    _priority_context_block = None
+    _priority_source_str = None
+    _priority_already_in_candidates = False
+    if primary_emb:
+        try:
+            # Find the largest priority document source in the Intsight collection
+            _pri_source_counts: Dict[str, int] = {}
+            _all_metas = collection.get(include=["metadatas"]).get("metadatas", [])
+            for _pm in _all_metas:
+                if _pm and _is_priority_document(str(_pm.get("source", "")), _pm):
+                    _src = str(_pm.get("source", ""))
+                    _pri_source_counts[_src] = _pri_source_counts.get(_src, 0) + 1
+
+            # Pick the largest priority doc (User Guide = 1655 chunks)
+            _target_source = max(_pri_source_counts, key=_pri_source_counts.get) if _pri_source_counts else None
+
+            if _target_source:
+                _priority_already_in_candidates = any(
+                    c.get("source") == _target_source for c in source_candidates
+                )
+                # Query best-matching chunks from the User Guide
+                pr = collection.query(
+                    query_embeddings=[primary_emb],
+                    n_results=50,
+                    where={"source": _target_source},
+                    include=["distances", "documents", "metadatas"],
+                )
+                pr_docs = pr.get("documents", [[]])[0]
+                pr_dists = pr.get("distances", [[]])[0]
+                if pr_docs:
+                    paired = sorted(zip(pr_dists, pr_docs), key=lambda x: x[0])
+                    best_chunks = [doc for _, doc in paired[:25]]
+                    best_dist = paired[0][0] if paired else None
+                    priority_content = _merge_chunk_texts(best_chunks, max_chars=16000)
+                    if priority_content.strip():
+                        chunk_count = _pri_source_counts[_target_source]
+                        _priority_source_str = (
+                            f"Intsight::{_target_source} "
+                            f"({chunk_count} chunks, best_dist={best_dist})"
+                        )
+                        _priority_context_block = (
+                            f"PRIORITY REFERENCE: {_priority_source_str}\n"
+                            f"Title: User Guide (Priority Document)\n"
+                            f"{priority_content}"
+                        )
+                        print(
+                            f"[API][CHAT] Priority doc injection: source={_target_source} "
+                            f"chunks_queried=50 used=25 chars={len(priority_content)} "
+                            f"best_dist={best_dist} already_in_candidates={_priority_already_in_candidates}"
+                        )
+        except Exception as e:
+            print(f"[API][CHAT][WARN] Priority context injection failed: {e}")
+
     if source_candidates:
         remaining_slots = MAX_CONTEXT_SOURCES - (1 if selected_ticket_text else 0)
         for idx, candidate in enumerate(source_candidates[:remaining_slots]):
@@ -7726,9 +7279,11 @@ def chat(req: ChatRequest):
             source_strings.append(src)
             snippet = candidate["excerpt"][:200].replace("\n", " ")
             # Give EVERY source its full content so the LLM can extract all relevant parts
+            # Priority documents get a larger context window
+            max_content_chars = 12000 if candidate.get("is_priority") else 8000
             candidate_content = _merge_chunk_texts(
                 [str(candidate.get("full_content") or candidate.get("excerpt") or "")],
-                max_chars=8000,
+                max_chars=max_content_chars,
             )
             print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
             context_blocks.append(
@@ -7747,6 +7302,21 @@ def chat(req: ChatRequest):
             snippet = doc[:200].replace("\n", " ")
             print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
             context_blocks.append(f"Source: {src}\n{doc}")
+
+    # Inject priority document context block — always first, always present
+    if _priority_context_block:
+        # If the priority doc was already selected as a regular source, remove it
+        # to avoid duplication — the priority block has richer content
+        if _priority_already_in_candidates and _priority_source_str:
+            _pri_src_key = _priority_source_str.split("::")[1].split(" (")[0] if "::" in _priority_source_str else ""
+            context_blocks = [
+                b for b in context_blocks
+                if _pri_src_key not in b[:200]
+            ]
+            source_strings = [s for s in source_strings if _pri_src_key not in s]
+        context_blocks.insert(0, _priority_context_block)
+        if _priority_source_str:
+            source_strings.insert(0, _priority_source_str)
 
     if selected_ticket_text:
         src = f"azure-devops:{selected_ticket_id} (selected ticket)"
@@ -7900,6 +7470,7 @@ def chat(req: ChatRequest):
         answer = _ground_answer_against_context(question, combined_context, draft_answer)
         answer = _enforce_specific_grounded_answer(question, combined_context, answer)
         answer = _llm_ensure_answer_completeness(question, combined_context, answer)
+        answer = _llm_verify_answer_relevance(question, combined_context, answer)
         answer = _normalize_noncode_fenced_blocks(answer)
     except Exception as exc:
         print(f"[API][CHAT][ERROR] LLM call failed: {exc}")
@@ -7945,3 +7516,85 @@ def chat(req: ChatRequest):
 
     print(f"[API][CHAT] Returning answer len={len(answer)} with {len(source_strings)} sources")
     return ChatResponse(answer=answer, sources=source_strings)
+
+
+# ---------------------------------------------------------------------
+# TEMPORARY: Re-insert User Guide chunks from backup
+# ---------------------------------------------------------------------
+@app.post("/admin/reinsert-all")
+def admin_reinsert_all():
+    """Re-insert all documents from backup JSONs into both collections."""
+    import json as _json
+
+    results = {}
+    backups = [
+        ("Intsight", os.path.join(CHROMA_DIR, "Intsight_full_backup.json"), collection),
+        ("New_Knowledge", os.path.join(CHROMA_DIR, "New_Knowledge_full_backup.json"), memory_collection),
+    ]
+
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    BATCH = 50
+
+    for col_name, backup_path, col_obj in backups:
+        if not os.path.exists(backup_path):
+            print(f"[REINSERT][{col_name}] Backup file not found: {backup_path}")
+            results[col_name] = {"status": "skipped", "reason": "backup_not_found"}
+            continue
+
+        print(f"[REINSERT][{col_name}] Loading backup...")
+        with open(backup_path) as f:
+            data = _json.load(f)
+        ids = data["ids"]
+        docs = data["documents"]
+        metas = data["metadatas"]
+        total = len(ids)
+        print(f"[REINSERT][{col_name}] Loaded {total} chunks")
+
+        # Check which already exist
+        existing = set()
+        for i in range(0, total, 500):
+            try:
+                got = col_obj.get(ids=ids[i:i+500])
+                existing.update(got["ids"])
+            except Exception:
+                pass
+        print(f"[REINSERT][{col_name}] {len(existing)} already exist")
+
+        todo_ids, todo_docs, todo_metas = [], [], []
+        for i in range(total):
+            if ids[i] not in existing:
+                todo_ids.append(ids[i])
+                todo_docs.append(docs[i])
+                todo_metas.append(metas[i])
+
+        remaining = len(todo_ids)
+        if remaining == 0:
+            results[col_name] = {"status": "nothing_to_do", "already_exist": len(existing), "count": col_obj.count()}
+            print(f"[REINSERT][{col_name}] Nothing to insert")
+            continue
+
+        print(f"[REINSERT][{col_name}] Need to insert {remaining} chunks")
+        inserted = 0
+        for i in range(0, remaining, BATCH):
+            b_ids = todo_ids[i:i+BATCH]
+            b_docs = todo_docs[i:i+BATCH]
+            b_metas = todo_metas[i:i+BATCH]
+
+            body = {"model": OPENAI_EMBEDDING_MODEL, "input": b_docs}
+            resp = requests.post(f"{OPENAI_URL}/embeddings", json=body, headers=headers, timeout=120)
+            if resp.status_code != 200:
+                print(f"[REINSERT][{col_name}][ERROR] Embedding API error: {resp.text[:400]}")
+                results[col_name] = {"status": "error", "detail": resp.text[:400], "inserted_so_far": inserted}
+                break
+            emb_data = resp.json()
+            embeddings = [item["embedding"] for item in sorted(emb_data["data"], key=lambda x: x["index"])]
+
+            col_obj.add(ids=b_ids, documents=b_docs, metadatas=b_metas, embeddings=embeddings)
+            inserted += len(b_ids)
+            print(f"[REINSERT][{col_name}] {inserted}/{remaining} done")
+        else:
+            final_count = col_obj.count()
+            print(f"[REINSERT][{col_name}] Complete! Inserted {inserted}, final count: {final_count}")
+            results[col_name] = {"status": "done", "inserted": inserted, "skipped": len(existing), "count": final_count}
+
+    return results

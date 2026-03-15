@@ -2809,13 +2809,17 @@
       white-space: normal;
       overflow-wrap: anywhere;
       word-break: break-word;
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: hidden;
       position: relative;
+      contain: layout style;
+      scroll-behavior: auto;
     }
 
     .vector-virtual-spacer {
       width: 100%;
       flex: 0 0 auto;
+      pointer-events: none;
     }
 
     .vector-virtual-content {
@@ -2823,6 +2827,7 @@
       overflow-wrap: anywhere;
       word-break: break-word;
       min-width: 100%;
+      will-change: contents;
     }
 
     .vector-search-mark {
@@ -2831,6 +2836,61 @@
       border-radius: 4px;
       box-shadow: 0 0 0 1px rgba(84, 160, 255, 0.16);
       padding: 0 1px;
+    }
+
+    .vector-search-mark.active {
+      background: #ffa726;
+      box-shadow: 0 0 0 2px rgba(255, 152, 0, 0.4);
+    }
+
+    .vector-search-nav {
+      position: sticky;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      background: rgba(248, 250, 253, 0.95);
+      backdrop-filter: blur(6px);
+      border-bottom: 1px solid #d8e3f3;
+      border-radius: 12px 12px 0 0;
+      margin: -18px -18px 12px -18px;
+      font-size: 13px;
+      color: #4a5568;
+    }
+
+    .vector-search-nav-label {
+      flex: 1;
+      font-weight: 500;
+    }
+
+    .vector-search-nav-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border: 1px solid #d8e3f3;
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+      color: #2d3748;
+      font-size: 14px;
+      font-weight: bold;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    .vector-search-nav-btn:hover:not(:disabled) {
+      background: #edf2f7;
+      border-color: #a0aec0;
+    }
+
+    .vector-search-nav-btn:disabled {
+      opacity: 0.4;
+      cursor: default;
     }
 
     .vector-document-editor.editing {
@@ -3568,7 +3628,7 @@
       isSaving: false
     };
     const vectorDocumentCache = new Map();
-    const VECTOR_VIEWER_OVERSCAN_ROWS = 120;
+    const VECTOR_VIEWER_OVERSCAN_ROWS = 40;
     const VECTOR_CACHE_MAX_ENTRIES = 24;
 
     function getChatConversationId() {
@@ -3931,7 +3991,17 @@
         viewport._vectorResizeObserver.disconnect();
       }
 
-      viewport.innerHTML = '<div class="vector-virtual-spacer" data-role="top"></div><div class="vector-virtual-content" data-role="content"></div><div class="vector-virtual-spacer" data-role="bottom"></div>';
+      viewport.innerHTML =
+        '<div class="vector-search-nav" data-role="searchnav" style="display:none">' +
+          '<span data-role="searchlabel">0 of 0</span>' +
+          '<button class="vector-search-nav-btn" data-role="searchprev" title="Previous match">&#x25B2;</button>' +
+          '<button class="vector-search-nav-btn" data-role="searchnext" title="Next match">&#x25BC;</button>' +
+        '</div>' +
+        '<div class="vector-virtual-spacer" data-role="top"></div>' +
+        '<div class="vector-virtual-content" data-role="content"></div>' +
+        '<div class="vector-virtual-spacer" data-role="bottom"></div>';
+      const searchNav = viewport.querySelector('[data-role="searchnav"]');
+      const searchLabel = viewport.querySelector('[data-role="searchlabel"]');
       const topSpacer = viewport.querySelector('[data-role="top"]');
       const contentEl = viewport.querySelector('[data-role="content"]');
       const bottomSpacer = viewport.querySelector('[data-role="bottom"]');
@@ -3939,12 +4009,40 @@
       const activeSearchText = String(vectorState.search || '').trim();
       let rafId = 0;
 
+      function scrollToActiveMatch(lineHeight, cumulativeRows) {
+        if (model.activeMatchIdx < 0 || model.activeMatchIdx >= model.matchPositions.length) return;
+        const matchCharPos = model.matchPositions[model.activeMatchIdx];
+        const matchLineIdx = findVectorLineIndexForChar(model.lineStarts, matchCharPos);
+        const targetRow = cumulativeRows[matchLineIdx] || 0;
+        const targetTop = targetRow * lineHeight;
+        const viewMid = viewport.clientHeight / 2;
+        viewport.scrollTop = Math.max(0, targetTop - viewMid);
+      }
+
+      function navigateMatch(delta) {
+        if (!model.matchPositions || model.matchPositions.length === 0) return;
+        const total = model.matchPositions.length;
+        model.activeMatchIdx = ((model.activeMatchIdx + delta) % total + total) % total;
+        const metrics = ensureVectorViewerMetrics(model, viewport);
+        scrollToActiveMatch(metrics.lineHeight, model.cumulativeRows || [0, 1]);
+        requestDraw();
+      }
+
+      viewport.querySelector('[data-role="searchprev"]').addEventListener('click', function() { navigateMatch(-1); });
+      viewport.querySelector('[data-role="searchnext"]').addEventListener('click', function() { navigateMatch(1); });
+
       function draw() {
         rafId = 0;
         const metrics = ensureVectorViewerMetrics(model, viewport);
         const lineHeight = metrics.lineHeight;
         const cumulativeRows = model.cumulativeRows || [0, 1];
         ensureVectorViewerSearchState(model, activeSearchText);
+
+        const hasMatches = model.matchPositions && model.matchPositions.length > 0;
+        searchNav.style.display = hasMatches ? '' : 'none';
+        if (hasMatches) {
+          searchLabel.textContent = (model.activeMatchIdx + 1) + ' of ' + model.matchPositions.length;
+        }
 
         const searchScrollKey = `${detail.source}::${model.searchKey}`;
         if (model.searchKey && model.firstMatchLineIndex >= 0 && viewport._vectorScrollAppliedKey !== searchScrollKey) {
@@ -3971,9 +4069,26 @@
           lines.push(model.text.slice(start, end));
         }
 
+        // Compute active match index relative to the visible slice
+        let activeInSlice;
+        if (hasMatches && model.activeMatchIdx >= 0) {
+          const sliceStart = model.lineStarts[startLine];
+          const sliceEnd = getVectorLineEnd(model, safeEndLine);
+          const globalActivePos = model.matchPositions[model.activeMatchIdx];
+          if (globalActivePos >= sliceStart && globalActivePos < sliceEnd) {
+            // Count matches before the slice start to get the offset
+            let matchesBefore = 0;
+            for (let i = 0; i < model.matchPositions.length; i++) {
+              if (model.matchPositions[i] < sliceStart) matchesBefore++;
+              else break;
+            }
+            activeInSlice = model.activeMatchIdx - matchesBefore;
+          }
+        }
+
         topSpacer.style.height = (cumulativeRows[startLine] * lineHeight) + 'px';
         bottomSpacer.style.height = (Math.max(0, model.totalRows - cumulativeRows[safeEndLine + 1]) * lineHeight) + 'px';
-        contentEl.innerHTML = renderVectorSearchHighlightedHtml(lines.join('\n'), activeSearchText);
+        contentEl.innerHTML = renderVectorSearchHighlightedHtml(lines.join('\n'), activeSearchText, activeInSlice);
       }
 
       function requestDraw() {
@@ -4219,7 +4334,7 @@
       return pattern ? new RegExp(`(${pattern})`, 'gi') : null;
     }
 
-    function renderVectorSearchHighlightedHtml(text, searchText) {
+    function renderVectorSearchHighlightedHtml(text, searchText, activeMatchIndex) {
       const rawText = String(text || '');
       const highlightRegex = buildVectorSearchRegex(searchText);
       if (!highlightRegex) {
@@ -4228,6 +4343,7 @@
 
       let result = '';
       let lastIndex = 0;
+      let matchCount = 0;
       let match = highlightRegex.exec(rawText);
       while (match) {
         const matchText = match[0] || '';
@@ -4237,8 +4353,12 @@
         }
 
         result += escapeHtml(rawText.slice(lastIndex, matchIndex));
-        result += `<mark class="vector-search-mark">${escapeHtml(matchText)}</mark>`;
+        const isActive = (typeof activeMatchIndex === 'number' && matchCount === activeMatchIndex);
+        const cls = isActive ? 'vector-search-mark active' : 'vector-search-mark';
+        const idAttr = isActive ? ' id="vector-search-active-mark"' : '';
+        result += `<mark class="${cls}"${idAttr}>${escapeHtml(matchText)}</mark>`;
         lastIndex = matchIndex + matchText.length;
+        matchCount++;
         match = highlightRegex.exec(rawText);
       }
 
@@ -4269,6 +4389,8 @@
       model.searchKey = searchKey;
       model.firstMatchIndex = -1;
       model.firstMatchLineIndex = -1;
+      model.matchPositions = [];
+      model.activeMatchIdx = -1;
       if (!searchKey) {
         return;
       }
@@ -4278,13 +4400,18 @@
         return;
       }
 
-      const match = highlightRegex.exec(model.text);
-      if (!match || typeof match.index !== 'number') {
-        return;
+      // Find ALL match positions
+      let match;
+      while ((match = highlightRegex.exec(model.text)) !== null) {
+        if (!match[0]) break;
+        model.matchPositions.push(match.index);
       }
 
-      model.firstMatchIndex = match.index;
-      model.firstMatchLineIndex = findVectorLineIndexForChar(model.lineStarts, match.index);
+      if (model.matchPositions.length > 0) {
+        model.firstMatchIndex = model.matchPositions[0];
+        model.firstMatchLineIndex = findVectorLineIndexForChar(model.lineStarts, model.matchPositions[0]);
+        model.activeMatchIdx = 0;
+      }
     }
 
     function sortVectorDocumentsInPlace() {
