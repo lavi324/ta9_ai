@@ -131,9 +131,11 @@ DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
     "2. When you see [Image Content from ...] sections, that means the image has been analyzed - describe what you see in the analysis naturally.\n"
     "3. For images: Provide a comprehensive explanation of what is shown in the provided analysis. Highlight key details, technical context, and likely causes when relevant.\n"
     "4. When a ticket is selected, use it to understand the user's issue and provide relevant solutions.\n"
+    "4.1 For ticket responses, begin with a short explanation of the ticket before listing the solution steps.\n"
     "5. Use knowledge base context to supplement your answer or provide additional related information.\n"
-    "6. Use fenced code blocks (```bash, ```python, ```sql, etc.) only for real commands, code, SQL, JSON, config, or other text the user may copy exactly as-is.\n"
-    "6.1 Do NOT use fenced code blocks for UI navigation, button names, field labels, prose examples, or short key-value notes such as 'Source: ...' or 'Type: ...'. Render those as normal text or bullets.\n"
+    "6. Use fenced code blocks (```bash, ```python, ```sql, etc.) only for real commands, code, SQL queries, JSON, config files, or other text the user may copy and run exactly as-is.\n"
+    "6.1 Do NOT use fenced code blocks for numbered steps, UI navigation sequences, button names, field labels, prose instructions, or short key-value notes such as 'Source: ...' or 'Type: ...'. Render those as normal Markdown text, numbered lists, or bullet points.\n"
+    "6.2 A summary of steps (e.g., '1. Open Admin Studio and log in. 2. Locate the data model...') is NOT code — always render it as a plain numbered list, never inside a code fence.\n"
     "7. If the context contains redundant or overlapping information, synthesize it into a single coherent answer.\n"
     "8. Do NOT repeat information from different sources - intelligently merge related points.\n"
     "8.1 Use a balanced approach across both collections (Intsight and New_Knowledge) and do not assume one is always better.\n"
@@ -141,11 +143,25 @@ DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
     "9. Grounding is mandatory: only state facts supported by the provided context sections.\n"
     "9.1 If a requested detail is not in context, explicitly say it is not available in the current knowledge context.\n"
     "9.2 Never invent commands, configuration keys, UI paths, API names, or procedural steps.\n"
+    "9.3 If the response is about a BUG ticket and the issue is not fully resolved, frame the ending as an INTERNAL escalation from support to engineering or R&D. Never tell the support engineer to 'contact support', 'reach out to support', or use wording that treats support as the customer.\n"
     "10. Keep a professional, helpful tone that encourages follow-up questions.\n"
     "11. Answer naturally and conversationally - avoid rigid structured formats unless specifically requested.\n"
-    "12. For Intsight or system configuration guidance, prioritize instructions that use Admin Studio (UI-based configuration) by default.\n"
-    "13. Provide database-level (DB) configuration instructions only when the user explicitly asks for DB configuration, SQL/database changes, or backend table-level steps.\n"
+    "12. For Intsight or system configuration guidance, ALWAYS provide instructions using Admin Studio (UI-based configuration) by default. Do NOT include SQL queries, INSERT/UPDATE statements, or direct database table manipulation unless the user explicitly asks.\n"
+    "13. Provide database-level (DB) configuration instructions ONLY when the user explicitly mentions 'database', 'SQL', 'DB', 'table', 'query', or specifically requests backend/database-level steps. If the context contains both Admin Studio steps and DB-level steps for the same task, present ONLY the Admin Studio steps unless DB steps are explicitly requested.\n"
+    "13.1 When DB steps are explicitly requested, you may include SQL queries and table-level instructions alongside the Admin Studio approach.\n"
     "14. Never hard-refuse when at least partial context exists; provide the best grounded answer possible, explicitly flag uncertainty, and ask one focused clarifying question if needed.\n"
+    "14.1 For BUG tickets that remain unresolved, end with a brief internal handoff note to engineering or R&D and the information support should gather before escalation. Do NOT say 'contact support'.\n\n"
+    "SOURCE SEPARATION AND ACCURACY:\n"
+    "15. Each context block (labeled PRIMARY MATCH, SUPPLEMENTAL MATCH, or PRIORITY REFERENCE) comes from a DIFFERENT document. Treat each document as a separate, self-contained source.\n"
+    "15.1 NEVER combine or merge procedural steps from different source documents into a single procedure. Each document describes its own workflow — mixing steps from Document A with steps from Document B creates incorrect instructions.\n"
+    "15.2 If two source documents describe different procedures for related but distinct tasks, present them separately with clear labels. Do NOT interleave their steps.\n"
+    "15.3 When multiple sources cover the same topic, use the one that best matches the user's specific question. Use supplemental sources only for additional context that the primary source does not cover.\n\n"
+    "QUESTION ANALYSIS:\n"
+    "16. Before answering, carefully analyze the user's question to understand what they ALREADY HAVE vs what they NEED:\n"
+    "16.1 If the user says 'in a data model' or 'in my data model', the data model already exists — do NOT provide steps to create it. Focus on the specific operation they are asking about.\n"
+    "16.2 If the user says 'configure X' or 'define X', they want to set up that specific feature — do NOT provide steps for creating the parent object that already exists.\n"
+    "16.3 Pay attention to prepositions: 'in', 'on', 'for', 'within' usually indicate an existing context. 'Create', 'new', 'set up from scratch' indicate they need to build something new.\n"
+    "16.4 Match the scope of your answer to the scope of the question. If the user asks about one specific feature within a larger system, focus your answer on that feature — do not explain the entire system setup.\n"
 )
 
 app = FastAPI(title="Wiki RAG API")
@@ -5228,7 +5244,7 @@ def _group_collection_documents(collection_name: str) -> List[dict]:
 
 
 def _normalize_vector_search_value(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9_\-\s]", " ", str(text or "").lower())).strip()
+    return re.sub(r"\s+", " ", str(text or "").lower()).strip()
 
 
 def _build_vector_search_preview(content: str, query: str, fallback_preview: str) -> str:
@@ -6243,7 +6259,7 @@ def vector_db_update_document(req: VectorDbDocumentUpdateRequest):
             chunk_limit=VECTOR_DB_DEFAULT_CHUNK_LIMIT,
             chunk_offset=0,
             include_embeddings=False,
-            include_full_content=True,
+            include_full_content=False,
         ),
     }
 
@@ -7316,7 +7332,8 @@ def chat(req: ChatRequest):
     if source_candidates:
         remaining_slots = MAX_CONTEXT_SOURCES - (1 if selected_ticket_text else 0)
         for idx, candidate in enumerate(source_candidates[:remaining_slots]):
-            match_label = "PRIMARY MATCH" if idx == 0 else "SUPPLEMENTAL MATCH"
+            doc_number = idx + 1
+            match_label = f"DOCUMENT {doc_number} — PRIMARY MATCH" if idx == 0 else f"DOCUMENT {doc_number} — SUPPLEMENTAL MATCH"
             src = (
                 f"{candidate['collection_name']}::{candidate['source']} "
                 f"({candidate['chunk_count']} chunks, best_dist={candidate['best_distance']})"
@@ -7332,9 +7349,11 @@ def chat(req: ChatRequest):
             )
             print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
             context_blocks.append(
-                f"{match_label}: {src}\n"
+                f"=== {match_label}: {src} ===\n"
                 f"Title: {candidate['title']}\n"
-                f"{candidate_content}"
+                f"(This is a separate document. Do NOT mix its steps with other documents.)\n"
+                f"{candidate_content}\n"
+                f"=== END DOCUMENT {doc_number} ==="
             )
     else:
         # Fallback to chunk-level context if source consolidation could not be built.
@@ -7438,12 +7457,14 @@ def chat(req: ChatRequest):
     if source_candidates and question_is_procedural:
         context_sections.append(
             "=== RETRIEVAL & COMPLETENESS PRIORITY ===\n"
-            "For how-to or configuration questions, use ALL relevant procedure sections from the retrieved documents.\n"
-            "If the user's question asks about MULTIPLE actions or objects (e.g. 'entities AND relations'), "
-            "you MUST provide the full step-by-step procedure for EACH requested part using the retrieved context.\n"
-            "Do NOT stop after covering only the first part. Do NOT treat a brief mention of a topic as sufficient "
-            "coverage — if the context contains a dedicated section with steps, fields, and configuration for that topic, use it fully.\n"
-            "When a single document contains procedures for multiple requested topics, extract and present ALL of them.\n"
+            "For how-to or configuration questions, identify which retrieved document BEST answers the specific question asked.\n"
+            "Use that document's procedure as your primary answer. Do NOT merge procedural steps from different documents.\n"
+            "If the user's question asks about MULTIPLE distinct operations (e.g. 'entities AND relations'), "
+            "provide the procedure for each from its own source document, clearly separated.\n"
+            "CRITICAL: Each retrieved document describes a SPECIFIC procedure. Before using content from a document, "
+            "verify that the document's procedure matches what the user is asking. A document about 'creating a relation data model' "
+            "is NOT the same as 'defining link analysis in an existing data model'. Use only the document whose topic matches the question.\n"
+            "If only one document matches the user's actual question, use only that document and ignore unrelated ones.\n"
         )
 
     if source_candidates and broad_coverage_intent:

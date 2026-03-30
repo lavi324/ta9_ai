@@ -2816,17 +2816,19 @@
       scroll-behavior: auto;
     }
 
-    .vector-virtual-spacer {
+    .vector-virtual-wrapper {
+      position: relative;
       width: 100%;
-      flex: 0 0 auto;
-      pointer-events: none;
+      overflow: hidden;
     }
 
     .vector-virtual-content {
+      position: absolute;
+      left: 0;
+      right: 0;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       word-break: break-word;
-      min-width: 100%;
       will-change: contents;
     }
 
@@ -2844,22 +2846,16 @@
     }
 
     .vector-search-nav {
-      position: sticky;
-      top: 0;
-      left: 0;
-      right: 0;
-      z-index: 10;
-      display: flex;
+      display: none;
       align-items: center;
-      gap: 8px;
-      padding: 6px 12px;
-      background: rgba(248, 250, 253, 0.95);
-      backdrop-filter: blur(6px);
-      border-bottom: 1px solid #d8e3f3;
-      border-radius: 12px 12px 0 0;
-      margin: -18px -18px 12px -18px;
+      gap: 6px;
       font-size: 13px;
       color: #4a5568;
+      margin-left: auto;
+    }
+
+    .vector-search-nav.visible {
+      display: flex;
     }
 
     .vector-search-nav-label {
@@ -2894,9 +2890,74 @@
     }
 
     .vector-document-editor.editing {
-      background: #ffffff;
+      background: transparent;
       border-color: #0c3d6b;
       box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.08);
+      position: relative;
+      z-index: 2;
+      color: #1f2d3d;
+    }
+
+    .vector-editor-container {
+      position: relative;
+      flex: 1 1 auto;
+      display: flex;
+      min-height: 0;
+    }
+
+    .vector-chunk-nav {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 6px 12px;
+      font-size: 13px;
+      color: #445566;
+      background: #f4f8fd;
+      border: 1px solid #d8e3f3;
+      border-bottom: none;
+      border-radius: 16px 16px 0 0;
+    }
+    .vector-chunk-nav + .vector-editor-container .vector-document-editor {
+      border-top-left-radius: 0;
+      border-top-right-radius: 0;
+    }
+    .vector-chunk-btn {
+      background: none;
+      border: 1px solid #bcd0e8;
+      border-radius: 6px;
+      padding: 2px 10px;
+      cursor: pointer;
+      font-size: 14px;
+      color: #3a5a8c;
+      line-height: 1;
+    }
+    .vector-chunk-btn:hover:not(:disabled) {
+      background: #dce8f5;
+    }
+    .vector-chunk-btn:disabled {
+      opacity: 0.35;
+      cursor: default;
+    }
+
+    .vector-editor-backdrop {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      border-radius: 16px;
+      border: 1px solid transparent;
+      background: #ffffff;
+      padding: 18px;
+      font-size: 15px;
+      line-height: 1.8;
+      color: transparent;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      overflow: auto;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      white-space: pre-wrap;
+      pointer-events: none;
+      box-sizing: border-box;
     }
 
     .vector-doc-status {
@@ -3461,7 +3522,7 @@
         <button id="system-prompt-close" type="button" class="knowledge-modal-close" aria-label="Close">×</button>
       </div>
       <div id="system-prompt-status" class="system-prompt-status" aria-live="polite"></div>
-      <textarea id="system-prompt-editor" class="system-prompt-editor" spellcheck="false" placeholder="Loading..."></textarea>
+      <textarea id="system-prompt-editor" class="system-prompt-editor" spellcheck="false" placeholder="Write here"></textarea>
       <div class="modal-actions">
         <button id="system-prompt-refresh" type="button" class="knowledge-action-btn clear">Refresh</button>
         <div class="modal-actions-right">
@@ -3624,12 +3685,17 @@
       detail: null,
       detailRequestId: 0,
       draftContent: '',
+      hasDraftContent: false,
       isEditing: false,
-      isSaving: false
+      isSaving: false,
+      saveState: 'idle',
+      saveMessage: ''
     };
     const vectorDocumentCache = new Map();
     const VECTOR_VIEWER_OVERSCAN_ROWS = 40;
     const VECTOR_CACHE_MAX_ENTRIES = 24;
+    const VECTOR_LARGE_EDIT_THRESHOLD = 200000;
+    const VECTOR_LARGE_EDITOR_LOAD_STEP = 250000;
 
     function getChatConversationId() {
       try {
@@ -3992,19 +4058,13 @@
       }
 
       viewport.innerHTML =
-        '<div class="vector-search-nav" data-role="searchnav" style="display:none">' +
-          '<span data-role="searchlabel">0 of 0</span>' +
-          '<button class="vector-search-nav-btn" data-role="searchprev" title="Previous match">&#x25B2;</button>' +
-          '<button class="vector-search-nav-btn" data-role="searchnext" title="Next match">&#x25BC;</button>' +
-        '</div>' +
-        '<div class="vector-virtual-spacer" data-role="top"></div>' +
-        '<div class="vector-virtual-content" data-role="content"></div>' +
-        '<div class="vector-virtual-spacer" data-role="bottom"></div>';
-      const searchNav = viewport.querySelector('[data-role="searchnav"]');
-      const searchLabel = viewport.querySelector('[data-role="searchlabel"]');
-      const topSpacer = viewport.querySelector('[data-role="top"]');
+        '<div class="vector-virtual-wrapper" data-role="wrapper">' +
+          '<div class="vector-virtual-content" data-role="content"></div>' +
+        '</div>';
+      const searchNav = document.getElementById('vector-search-nav');
+      const searchLabel = document.getElementById('vector-search-label');
+      const wrapper = viewport.querySelector('[data-role="wrapper"]');
       const contentEl = viewport.querySelector('[data-role="content"]');
-      const bottomSpacer = viewport.querySelector('[data-role="bottom"]');
       const model = cacheEntry.viewerModel;
       const activeSearchText = String(vectorState.search || '').trim();
       let rafId = 0;
@@ -4028,8 +4088,10 @@
         requestDraw();
       }
 
-      viewport.querySelector('[data-role="searchprev"]').addEventListener('click', function() { navigateMatch(-1); });
-      viewport.querySelector('[data-role="searchnext"]').addEventListener('click', function() { navigateMatch(1); });
+      const prevBtn = document.getElementById('vector-search-prev');
+      const nextBtn = document.getElementById('vector-search-next');
+      prevBtn.addEventListener('click', function() { navigateMatch(-1); });
+      nextBtn.addEventListener('click', function() { navigateMatch(1); });
 
       function draw() {
         rafId = 0;
@@ -4039,10 +4101,15 @@
         ensureVectorViewerSearchState(model, activeSearchText);
 
         const hasMatches = model.matchPositions && model.matchPositions.length > 0;
-        searchNav.style.display = hasMatches ? '' : 'none';
-        if (hasMatches) {
-          searchLabel.textContent = (model.activeMatchIdx + 1) + ' of ' + model.matchPositions.length;
+        const hasSearch = !!activeSearchText;
+        if (searchNav) searchNav.style.display = hasSearch ? 'flex' : 'none';
+        if (searchLabel) {
+          searchLabel.textContent = hasMatches
+            ? (model.activeMatchIdx + 1) + ' of ' + model.matchPositions.length
+            : '0 results';
         }
+        if (prevBtn) prevBtn.disabled = !hasMatches;
+        if (nextBtn) nextBtn.disabled = !hasMatches;
 
         const searchScrollKey = `${detail.source}::${model.searchKey}`;
         if (model.searchKey && model.firstMatchLineIndex >= 0 && viewport._vectorScrollAppliedKey !== searchScrollKey) {
@@ -4086,8 +4153,8 @@
           }
         }
 
-        topSpacer.style.height = (cumulativeRows[startLine] * lineHeight) + 'px';
-        bottomSpacer.style.height = (Math.max(0, model.totalRows - cumulativeRows[safeEndLine + 1]) * lineHeight) + 'px';
+        wrapper.style.height = (model.totalRows * lineHeight) + 'px';
+        contentEl.style.top = (cumulativeRows[startLine] * lineHeight) + 'px';
         contentEl.innerHTML = renderVectorSearchHighlightedHtml(lines.join('\n'), activeSearchText, activeInSlice);
       }
 
@@ -4622,6 +4689,7 @@
       vectorState.detail = null;
       vectorState.draftContent = '';
       vectorState.isEditing = false;
+      setVectorSaveState('idle', '');
       vectorState.offset = 0;
       vectorState.sort = 'updated_desc';
       vectorState.search = (vectorSearchInput && vectorSearchInput.value ? vectorSearchInput.value : '').trim();
@@ -4631,6 +4699,299 @@
       renderVectorCollections();
       renderVectorEmptyState('Select a document', VECTOR_SELECT_DOCUMENT_TEXT);
       loadVectorDocuments();
+    }
+
+    // -- Chunked editing helpers for large documents --
+    function splitEditorChunks(text, chunkSize) {
+      if (!text || text.length <= chunkSize) return [text || ''];
+      var chunks = [];
+      var pos = 0;
+      while (pos < text.length) {
+        var end = Math.min(pos + chunkSize, text.length);
+        if (end < text.length) {
+          var nl = text.lastIndexOf('\n', end);
+          if (nl > pos) end = nl + 1;
+        }
+        chunks.push(text.slice(pos, end));
+        pos = end;
+      }
+      return chunks;
+    }
+
+    function scrollEditorToChar(editor, charPos) {
+      var cs = getComputedStyle(editor);
+      var padL = parseFloat(cs.paddingLeft) || 0;
+      var padR = parseFloat(cs.paddingRight) || 0;
+      var padT = parseFloat(cs.paddingTop) || 0;
+      // Mirror div uses the exact text content width (clientWidth minus padding)
+      var mirror = document.createElement('div');
+      mirror.style.cssText = 'position:fixed;left:-9999px;top:0;visibility:hidden;overflow:hidden;';
+      mirror.style.width = (editor.clientWidth - padL - padR) + 'px';
+      mirror.style.fontSize = cs.fontSize;
+      mirror.style.fontFamily = cs.fontFamily;
+      mirror.style.fontWeight = cs.fontWeight;
+      mirror.style.fontStyle = cs.fontStyle;
+      mirror.style.letterSpacing = cs.letterSpacing;
+      mirror.style.wordSpacing = cs.wordSpacing;
+      mirror.style.lineHeight = cs.lineHeight;
+      mirror.style.whiteSpace = 'pre-wrap';
+      mirror.style.overflowWrap = cs.overflowWrap || 'break-word';
+      mirror.style.wordBreak = cs.wordBreak || 'normal';
+      // Insert text before match, then a marker span at the match position
+      mirror.appendChild(document.createTextNode(editor.value.slice(0, charPos)));
+      var marker = document.createElement('span');
+      marker.textContent = '\u200b';
+      mirror.appendChild(marker);
+      document.body.appendChild(mirror);
+      var markerTop = marker.offsetTop;
+      document.body.removeChild(mirror);
+      // markerTop is relative to mirror (no padding), add textarea paddingTop
+      editor.scrollTop = Math.max(0, (padT + markerTop) - (editor.clientHeight / 2));
+    }
+
+    function syncEditorDraftContent(editor) {
+      if (!editor) return vectorState.draftContent || '';
+      vectorState.draftContent = editor.value || '';
+      vectorState.hasDraftContent = true;
+      return vectorState.draftContent;
+    }
+
+    function getSearchMatchLengthAt(text, searchText, matchIndex) {
+      const regex = buildVectorSearchRegex(searchText);
+      const fallbackLength = Math.max(1, String(searchText || '').trim().length);
+      if (!regex) return fallbackLength;
+      const sample = String(text || '').slice(matchIndex, matchIndex + Math.max(256, fallbackLength * 4));
+      const match = regex.exec(sample);
+      return match && match.index === 0 && match[0] ? match[0].length : fallbackLength;
+    }
+
+    function seedLargeEditorMatches(editor, detail, text, isDisabled) {
+      if (!editor || !detail) return;
+      const activeSearch = String(vectorState.search || '').trim();
+      if (!activeSearch) {
+        editor._editorMatches = null;
+        editor._editorMatchesDisabled = false;
+        return;
+      }
+
+      const cacheEntry = getVectorViewerCacheEntry(detail);
+      const model = cacheEntry && cacheEntry.viewerModel;
+      const searchKey = activeSearch.toLowerCase();
+      if (!model || model.text !== text || model.searchKey !== searchKey || !Array.isArray(model.matchPositions)) {
+        editor._editorMatches = null;
+        editor._editorMatchesDisabled = false;
+        return;
+      }
+
+      editor._editorMatches = {
+        search: activeSearch,
+        positions: model.matchPositions.slice(),
+        idx: model.activeMatchIdx >= 0 ? model.activeMatchIdx : (model.matchPositions.length ? 0 : -1),
+      };
+      editor._editorMatchesDisabled = !!isDisabled;
+    }
+
+    function loadLargeEditorContent(editor, text, onDone) {
+      if (!editor) {
+        if (typeof onDone === 'function') onDone();
+        return;
+      }
+      const fullText = String(text || '');
+      setTimeout(() => {
+        editor.value = fullText;
+        if (typeof onDone === 'function') onDone();
+      }, 0);
+    }
+
+    function setVectorSaveState(state, message) {
+      vectorState.saveState = state || 'idle';
+      vectorState.saveMessage = message || '';
+    }
+
+    function getVectorSaveStatusMarkup() {
+      if (vectorState.saveState === 'idle' || !vectorState.saveMessage) return '';
+      const classes = ['vector-doc-status'];
+      if (vectorState.saveState === 'saving') classes.push('saving');
+      if (vectorState.saveState === 'saved') classes.push('saved');
+      if (vectorState.saveState === 'error') classes.push('error');
+      return `
+        <div class="${classes.join(' ')}">
+          <span class="vector-doc-status-text">${escapeHtml(vectorState.saveMessage)}</span>
+        </div>
+      `;
+    }
+
+    function updateEditorSearchNav(editor) {
+      const searchNav = document.getElementById('vector-search-nav');
+      const searchLabel = document.getElementById('vector-search-label');
+      const prevBtn = document.getElementById('vector-search-prev');
+      const nextBtn = document.getElementById('vector-search-next');
+      if (!searchNav) return;
+      if (editor && editor._editorNoBackdrop) {
+        const seededMatches = editor._editorMatches;
+        const hasMatches = !!(seededMatches && Array.isArray(seededMatches.positions) && seededMatches.positions.length);
+        const activeSearch = String(vectorState.search || '').trim();
+        searchNav.style.display = activeSearch ? 'flex' : 'none';
+        if (searchLabel) {
+          searchLabel.textContent = hasMatches
+            ? ((seededMatches.idx >= 0 ? seededMatches.idx : 0) + 1) + ' of ' + seededMatches.positions.length
+            : '0 results';
+        }
+        if (prevBtn) prevBtn.disabled = !hasMatches || !!editor._editorMatchesDisabled;
+        if (nextBtn) nextBtn.disabled = !hasMatches || !!editor._editorMatchesDisabled;
+        return;
+      }
+      const activeSearch = String(vectorState.search || '').trim();
+      if (!activeSearch) {
+        searchNav.style.display = 'none';
+        if (editor) editor._editorMatches = null;
+        if (!editor._editorNoBackdrop) updateEditorBackdrop(editor, -1);
+        return;
+      }
+      searchNav.style.display = 'flex';
+
+      // Use draftContent from memory instead of reading editor.value (DOM read is slow for large docs)
+      let text;
+      text = (editor && vectorState.draftContent) ? vectorState.draftContent : (editor ? editor.value : '');
+      const regex = buildVectorSearchRegex(activeSearch);
+      if (!regex || !text) {
+        if (searchLabel) searchLabel.textContent = '0 results';
+        if (prevBtn) prevBtn.disabled = true;
+        if (nextBtn) nextBtn.disabled = true;
+        if (editor) editor._editorMatches = null;
+        if (!editor._editorNoBackdrop) updateEditorBackdrop(editor, -1);
+        return;
+      }
+
+      // Collect all match positions
+      const positions = [];
+      const searchRegex = new RegExp(regex.source, 'gi');
+      let m;
+      while ((m = searchRegex.exec(text)) !== null) {
+        if (!m[0]) break;
+        positions.push({ index: m.index, length: m[0].length });
+      }
+
+      if (!editor._editorMatches || editor._editorMatches.search !== activeSearch) {
+        editor._editorMatches = { search: activeSearch, positions: positions, idx: positions.length ? 0 : -1 };
+      } else {
+        editor._editorMatches.positions = positions;
+        if (editor._editorMatches.idx >= positions.length) {
+          editor._editorMatches.idx = positions.length ? 0 : -1;
+        }
+      }
+
+      const em = editor._editorMatches;
+      const hasMatches = positions.length > 0;
+      if (searchLabel) {
+        searchLabel.textContent = hasMatches
+          ? (em.idx + 1) + ' of ' + positions.length
+          : '0 results';
+      }
+      if (prevBtn) prevBtn.disabled = !hasMatches;
+      if (nextBtn) nextBtn.disabled = !hasMatches;
+
+      if (!editor._editorNoBackdrop) updateEditorBackdrop(editor, em.idx);
+    }
+
+    function updateEditorBackdrop(editor, activeIdx) {
+      const backdrop = document.getElementById('vector-editor-backdrop');
+      if (!backdrop || !editor) {
+        if (backdrop) backdrop.innerHTML = '';
+        return;
+      }
+      const text = editor.value;
+      // Skip backdrop highlighting for extremely large docs (>2M chars) to avoid freeze
+      if (text.length > 2000000) {
+        backdrop.innerHTML = '';
+        return;
+      }
+      const activeSearch = String(vectorState.search || '').trim();
+      const regex = buildVectorSearchRegex(activeSearch);
+      if (!regex || !text || !activeSearch) {
+        backdrop.innerHTML = escapeHtml(text) + '\n';
+        return;
+      }
+
+      // Render highlighted HTML with active mark — same as view mode
+      let result = '';
+      let lastIndex = 0;
+      let matchCount = 0;
+      const searchRegex = new RegExp(regex.source, 'gi');
+      let match = searchRegex.exec(text);
+      while (match) {
+        const matchText = match[0] || '';
+        if (!matchText) break;
+        result += escapeHtml(text.slice(lastIndex, match.index));
+        const isActive = (matchCount === activeIdx);
+        const cls = isActive ? 'vector-search-mark active' : 'vector-search-mark';
+        const idAttr = isActive ? ' id="vector-editor-active-mark"' : '';
+        result += '<mark class="' + cls + '"' + idAttr + '>' + escapeHtml(matchText) + '</mark>';
+        lastIndex = match.index + matchText.length;
+        matchCount++;
+        match = searchRegex.exec(text);
+      }
+      result += escapeHtml(text.slice(lastIndex));
+      // Trailing newline ensures backdrop height matches textarea
+      backdrop.innerHTML = result + '\n';
+    }
+
+    function editorNavigateMatch(editor, delta) {
+      if (!editor) return;
+      if (editor.disabled) return;
+      if (!editor._editorMatches) return;
+      const em = editor._editorMatches;
+      if (!em.positions.length) return;
+      const total = em.positions.length;
+      em.idx = ((em.idx + delta) % total + total) % total;
+      const rawHit = em.positions[em.idx];
+      const selectionStart = typeof rawHit === 'number' ? rawHit : rawHit.index;
+      const searchSource = editor._editorNoBackdrop
+        ? (vectorState.hasDraftContent
+          ? vectorState.draftContent
+          : stripVectorFilePrefix((vectorState.detail && vectorState.detail.full_content) || '', (vectorState.detail && vectorState.detail.input_type) || ''))
+        : editor.value;
+      const resolvedLength = typeof rawHit === 'number'
+        ? getSearchMatchLengthAt(searchSource, em.search, selectionStart)
+        : rawHit.length;
+      const selectionEnd = selectionStart + resolvedLength;
+
+      // Select the match in the textarea
+      editor.focus();
+      editor.setSelectionRange(selectionStart, selectionEnd);
+
+      // Scroll to the match
+      const backdrop = document.getElementById('vector-editor-backdrop');
+      if (!editor._editorNoBackdrop && backdrop && backdrop.childNodes.length > 0) {
+        // Swap active mark in backdrop without rebuilding all HTML
+        const prevActive = document.getElementById('vector-editor-active-mark');
+        if (prevActive) {
+          prevActive.className = 'vector-search-mark';
+          prevActive.removeAttribute('id');
+        }
+        const marks = backdrop.querySelectorAll('.vector-search-mark');
+        if (marks[em.idx]) {
+          marks[em.idx].className = 'vector-search-mark active';
+          marks[em.idx].id = 'vector-editor-active-mark';
+        }
+        const activeMark = document.getElementById('vector-editor-active-mark');
+        if (activeMark) {
+          const markTop = activeMark.offsetTop;
+          const markHeight = activeMark.offsetHeight;
+          const viewHeight = editor.clientHeight;
+          editor.scrollTop = Math.max(0, markTop - (viewHeight / 2) + (markHeight / 2));
+          backdrop.scrollTop = editor.scrollTop;
+        }
+      } else {
+        // Scroll using mirror measurement
+        scrollEditorToChar(editor, selectionStart);
+      }
+
+      // Update label
+      const searchLabel = document.getElementById('vector-search-label');
+      if (searchLabel) {
+        searchLabel.textContent = (em.idx + 1) + ' of ' + em.positions.length;
+      }
     }
 
     function renderVectorDetail() {
@@ -4643,8 +5004,11 @@
       const detail = vectorState.detail;
       const isEditing = !!vectorState.isEditing;
       const contentValue = isEditing
-        ? vectorState.draftContent
+        ? (vectorState.hasDraftContent
+          ? vectorState.draftContent
+          : stripVectorFilePrefix(detail.full_content || '', detail.input_type))
         : stripVectorFilePrefix(detail.full_content || '', detail.input_type);
+      const isLargeEditDoc = isEditing && contentValue.length > VECTOR_LARGE_EDIT_THRESHOLD;
 
       vectorDetail.innerHTML = `
         <div class="vector-detail-header">
@@ -4671,9 +5035,15 @@
         <div class="vector-editor-panel">
           <div class="vector-section-head">
             <div class="vector-section-title">Document text</div>
+            <div id="vector-search-nav" class="vector-search-nav" style="display:none">
+              <span id="vector-search-label">0 of 0</span>
+              <button class="vector-search-nav-btn" id="vector-search-prev" title="Previous match">&#x25B2;</button>
+              <button class="vector-search-nav-btn" id="vector-search-next" title="Next match">&#x25BC;</button>
+            </div>
           </div>
+          ${getVectorSaveStatusMarkup()}
           ${isEditing
-            ? '<textarea id="vector-document-editor" class="vector-document-editor editing"></textarea>'
+            ? '<div class="vector-editor-container"><div id="vector-editor-backdrop" class="vector-editor-backdrop"></div><textarea id="vector-document-editor" class="vector-document-editor editing" placeholder="Loading document content..."></textarea></div>'
             : '<pre id="vector-document-view" class="vector-document-view"></pre>'}
         </div>
       `;
@@ -4684,10 +5054,91 @@
         renderVirtualizedVectorDocument(documentView, detail);
       }
       if (editor) {
-        editor.value = contentValue;
+        const isLargeDoc = isLargeEditDoc;
+        editor._editorNoBackdrop = isLargeDoc;
+
+        const backdrop = document.getElementById('vector-editor-backdrop');
+        if (isLargeDoc) {
+          if (backdrop) backdrop.remove();
+          editor.style.background = '#ffffff';
+          editor.wrap = 'off';
+          editor.spellcheck = false;
+          editor.setAttribute('autocorrect', 'off');
+          editor.setAttribute('autocapitalize', 'off');
+          editor.setAttribute('autocomplete', 'off');
+          editor.style.overflowWrap = 'normal';
+          editor.style.wordBreak = 'normal';
+          seedLargeEditorMatches(editor, detail, contentValue, true);
+        }
+
+        // Wire search nav buttons
+        const prevBtn = document.getElementById('vector-search-prev');
+        const nextBtn = document.getElementById('vector-search-next');
+        if (prevBtn) prevBtn.addEventListener('click', () => editorNavigateMatch(editor, -1));
+        if (nextBtn) nextBtn.addEventListener('click', () => editorNavigateMatch(editor, 1));
+
+        // Sync backdrop scroll with textarea scroll (small docs only)
+        if (!isLargeDoc && backdrop) {
+          editor.addEventListener('scroll', () => {
+            backdrop.scrollTop = editor.scrollTop;
+          });
+        }
+
+        // Debounced search + backdrop update on input
+        let editorSearchTimer = 0;
         editor.addEventListener('input', () => {
           vectorState.draftContent = editor.value;
+          vectorState.hasDraftContent = true;
+          if (vectorState.saveState === 'saved' || vectorState.saveState === 'idle') {
+            setVectorSaveState('dirty', 'Unsaved changes');
+          }
+          if (isLargeDoc) {
+            return;
+          }
+          clearTimeout(editorSearchTimer);
+          editorSearchTimer = setTimeout(() => {
+            syncEditorDraftContent(editor);
+            updateEditorSearchNav(editor);
+          }, 350);
         });
+
+        if (isLargeDoc) {
+          editor.disabled = true;
+          editor.placeholder = 'Preparing large document for editing\u2026';
+          updateEditorSearchNav(editor);
+          requestAnimationFrame(() => {
+            loadLargeEditorContent(editor, contentValue, () => {
+              editor.disabled = false;
+              editor.placeholder = '';
+              editor._editorMatchesDisabled = false;
+              setVectorSaveState('idle', '');
+              updateEditorSearchNav(editor);
+            });
+          });
+        } else {
+          editor.disabled = true;
+          editor.placeholder = 'Loading document content\u2026';
+
+          setTimeout(() => {
+            editor.value = contentValue;
+            editor.disabled = false;
+            editor.placeholder = '';
+            vectorState.draftContent = editor.value;
+
+            setTimeout(() => {
+              updateEditorSearchNav(editor);
+              if (backdrop) {
+                updateEditorBackdrop(editor, -1);
+              }
+
+              setTimeout(() => {
+                if (editor._editorMatches && editor._editorMatches.positions.length > 0) {
+                  editorNavigateMatch(editor, 0);
+                }
+              }, 0);
+            }, 0);
+          }, 0);
+        }
       }
 
       const editBtn = document.getElementById('vector-edit-document-btn');
@@ -4699,7 +5150,12 @@
             return;
           }
           vectorState.isEditing = true;
-          vectorState.draftContent = stripVectorFilePrefix(vectorState.detail.full_content || '', vectorState.detail.input_type);
+          vectorState.draftContent = '';
+          vectorState.hasDraftContent = false;
+          setVectorSaveState(
+            (vectorState.detail.full_content || '').length > VECTOR_LARGE_EDIT_THRESHOLD ? 'loading' : 'idle',
+            (vectorState.detail.full_content || '').length > VECTOR_LARGE_EDIT_THRESHOLD ? 'Preparing large document for editing...' : ''
+          );
           renderVectorDetail();
         });
       }
@@ -4708,7 +5164,9 @@
       if (cancelBtn) {
         cancelBtn.addEventListener('click', () => {
           vectorState.isEditing = false;
-          vectorState.draftContent = stripVectorFilePrefix(detail.full_content || '', detail.input_type);
+          setVectorSaveState('idle', '');
+          vectorState.draftContent = '';
+          vectorState.hasDraftContent = false;
           renderVectorDetail();
         });
       }
@@ -4741,6 +5199,9 @@
       const includeFullContent = options.includeFullContent !== undefined
         ? !!options.includeFullContent
         : true;
+      if (!sameSource) {
+        setVectorSaveState('idle', '');
+      }
 
       const cachedDetail = !forceRefresh
         ? getCachedVectorDetail(vectorState.selectedCollection, source)
@@ -4749,7 +5210,8 @@
         vectorState.selectedSource = source;
         vectorState.detail = { ...cachedDetail };
         if (!vectorState.isEditing || !sameSource) {
-          vectorState.draftContent = stripVectorFilePrefix(vectorState.detail.full_content || '', vectorState.detail.input_type);
+          vectorState.draftContent = '';
+          vectorState.hasDraftContent = false;
           vectorState.isEditing = false;
         }
         renderVectorDocumentList();
@@ -4801,7 +5263,8 @@
         cacheVectorDetail(vectorState.detail);
 
         if (!vectorState.isEditing || !sameSource) {
-          vectorState.draftContent = stripVectorFilePrefix(vectorState.detail.full_content || '', vectorState.detail.input_type);
+          vectorState.draftContent = '';
+          vectorState.hasDraftContent = false;
           vectorState.isEditing = false;
         }
 
@@ -4814,13 +5277,22 @@
 
     async function saveVectorDocument() {
       if (!vectorState.detail || !vectorState.selectedCollection) return;
-      const nextContent = vectorState.draftContent || '';
+      const editor = document.getElementById('vector-document-editor');
+      if (vectorState.hasDraftContent) {
+        syncEditorDraftContent(editor);
+      }
+      const nextContent = vectorState.hasDraftContent
+        ? (vectorState.draftContent || '')
+        : stripVectorFilePrefix(vectorState.detail.full_content || '', vectorState.detail.input_type);
       if (!nextContent.trim()) {
+        setVectorSaveState('error', 'Document content cannot be empty.');
         showKnowledgeToast('Document content cannot be empty.', true);
+        renderVectorDetail();
         return;
       }
 
       vectorState.isSaving = true;
+      setVectorSaveState('saving', 'Saving document...');
       renderVectorDetail();
       try {
         const resp = await fetch('/adminchat/api/vector-db/document', {
@@ -4836,22 +5308,25 @@
         if (!resp.ok) {
           throw new Error((data && (data.detail || data.message)) || 'Failed to save document.');
         }
-        vectorState.detail = data.detail || vectorState.detail;
-        vectorState.draftContent = stripVectorFilePrefix(vectorState.detail.full_content || nextContent, vectorState.detail.input_type);
+
+        const savedDetail = data.detail || {};
+        vectorState.detail = {
+          ...vectorState.detail,
+          ...savedDetail,
+          full_content: nextContent,
+        };
+        vectorState.draftContent = '';
+        vectorState.hasDraftContent = false;
         cacheVectorDetail(vectorState.detail);
         vectorState.isEditing = false;
         syncVectorSummaryFromDetail(vectorState.detail);
+        setVectorSaveState('saved', data.message || 'Saved successfully.');
         renderVectorDocumentList();
         renderVectorDetail();
         showKnowledgeToast(data.message || 'Document updated successfully.', false);
-        loadVectorCollections().catch((err) => {
-          console.error('Vector DB collections refresh error:', err);
-        });
-        loadVectorDocuments().catch((err) => {
-          console.error('Vector DB document refresh error:', err);
-        });
       } catch (err) {
         console.error('Vector DB save error:', err);
+        setVectorSaveState('error', (err && err.message) ? err.message : 'Failed to save document.');
         showKnowledgeToast((err && err.message) ? err.message : 'Failed to save document.', true);
       } finally {
         vectorState.isSaving = false;
@@ -4885,7 +5360,9 @@
         removeVectorSummary(deletedSource);
         vectorState.detail = null;
         vectorState.draftContent = '';
+        vectorState.hasDraftContent = false;
         vectorState.isEditing = false;
+        setVectorSaveState('idle', '');
         vectorState.selectedSource = null;
         renderVectorDocumentList();
         renderVectorEmptyState('Document deleted', 'Select another document to continue browsing the live vector database.');
@@ -6232,6 +6709,35 @@
       return sanitizeMarkdownHtml(parsed);
     }
 
+    // Post-process rendered HTML: add <br> after sentence-ending periods
+    function addSentenceBreaks(container) {
+      var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+      var nodes = [];
+      var n;
+      while ((n = walker.nextNode())) nodes.push(n);
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        // Skip nodes inside <pre>, <code>, <a>, <table> elements
+        var parent = node.parentElement;
+        if (!parent) continue;
+        var tag = parent.closest('pre, code, a, table, .code-header');
+        if (tag) continue;
+        var text = node.textContent;
+        // Match period followed by space and uppercase letter (sentence boundary)
+        if (!/\. [A-Z]/.test(text)) continue;
+        var frag = document.createDocumentFragment();
+        var parts = text.split(/(\. )(?=[A-Z])/);
+        for (var p = 0; p < parts.length; p++) {
+          frag.appendChild(document.createTextNode(parts[p]));
+          // After ". " delimiter part, insert a <br>
+          if (parts[p] === '. ' && p + 1 < parts.length) {
+            frag.appendChild(document.createElement('br'));
+          }
+        }
+        node.parentNode.replaceChild(frag, node);
+      }
+    }
+
     function wrapTables(container) {
       const tables = container.querySelectorAll('table');
       tables.forEach((table) => {
@@ -6246,27 +6752,49 @@
     function enhanceCodeBlocks(container) {
       function looksLikeActualCode(language, text) {
         const lang = String(language || '').trim().toLowerCase();
-        if (['bash', 'sh', 'shell', 'zsh', 'powershell', 'ps1', 'python', 'py', 'sql', 'json', 'yaml', 'yml', 'xml', 'javascript', 'js', 'typescript', 'ts', 'html', 'css', 'ini', 'toml', 'diff', 'dockerfile'].includes(lang)) {
-          return true;
-        }
+        const knownLangs = ['bash', 'sh', 'shell', 'zsh', 'powershell', 'ps1', 'python', 'py', 'sql', 'json', 'yaml', 'yml', 'xml', 'javascript', 'js', 'typescript', 'ts', 'html', 'css', 'ini', 'toml', 'diff', 'dockerfile'];
+        const hasKnownLang = knownLangs.includes(lang);
 
         const lines = String(text || '').split('\n').map((line) => line.trim()).filter(Boolean);
-        if (!lines.length) return false;
+        if (!lines.length) return hasKnownLang;
 
-        let codeLikeCount = 0;
+        // Count lines that look like numbered steps / UI instructions vs actual code
+        let numberedStepCount = 0;
         let uiLikeCount = 0;
+        let codeLikeCount = 0;
         let keyValueCount = 0;
+        let subStepCount = 0;
         for (const line of lines) {
-          if (/^(sudo |docker |kubectl |python |pip |npm |yarn |git |curl |wget )/i.test(line)) codeLikeCount += 1;
-          if (/[`{}();=<>]/.test(line)) codeLikeCount += 1;
-          if (/^(--|#|\/\*|\*)/.test(line)) codeLikeCount += 1;
-          if (/^[A-Za-z0-9_.-]+\s*=\s*.+$/.test(line)) codeLikeCount += 1;
-          if (/\b(click|select|open|navigate|button|tab|screen|ui|portainer|admin studio|field|dropdown|checkbox|page|section)\b/i.test(line)) uiLikeCount += 1;
-          if (/^[A-Za-z][A-Za-z0-9_ /()-]{1,40}:\s+.+$/.test(line)) keyValueCount += 1;
+          // Numbered steps like "1. Open Admin Studio" or "3. Set the field:"
+          if (/^\d+\.\s+/.test(line)) numberedStepCount += 1;
+          // Sub-steps like "- Mark the field as ..." or "- Set \"Is Free Text\""
+          if (/^[-•]\s+/.test(line)) subStepCount += 1;
+          // UI-related language
+          if (/\b(click|select|open|navigate|button|tab|screen|ui|portainer|admin studio|field|dropdown|checkbox|page|section|log\s*in|settings?|configure|ensure|mark|locate|save|check|verify|repository|data\s*model|index|role|visibility|property|option)\b/i.test(line)) uiLikeCount += 1;
+          // Real code patterns
+          if (/^(sudo |docker |kubectl |python |pip |npm |yarn |git |curl |wget |apt |brew |chmod |chown |mkdir |cp |mv |rm |cat |echo |export |source |alias )/i.test(line)) codeLikeCount += 1;
+          if (/^(SELECT |INSERT |UPDATE |DELETE |CREATE |ALTER |DROP |EXEC |DECLARE |BEGIN |SET |USE |FROM |WHERE |JOIN |GRANT |REVOKE )/i.test(line)) codeLikeCount += 1;
+          if (/[{}();]/.test(line) && !/[{}();]/.test(line.replace(/[^{}();]/g, '').length > 0 ? '' : '')) codeLikeCount += 0;
+          if (/[{}]/.test(line)) codeLikeCount += 1;
+          if (/^(--|#!\/|#\s|#[A-Z]|\/\*|\*\/|\*\s|import |from |def |class |function |const |let |var |return |if\s*\(|for\s*\(|while\s*\()/.test(line)) codeLikeCount += 1;
+          if (/^[A-Za-z0-9_.-]+\s*=\s*.+$/.test(line) && !/^\d+\./.test(line)) codeLikeCount += 1;
+          if (/^[A-Za-z][A-Za-z0-9_ /()-]{1,40}:\s+.+$/.test(line) && !/^\d+\./.test(line)) keyValueCount += 1;
         }
 
+        const instructionLikeCount = numberedStepCount + subStepCount + uiLikeCount;
+        const totalLines = lines.length;
+
+        // If the majority of lines are numbered steps / UI instructions, it's NOT code
+        if (numberedStepCount >= 3 && numberedStepCount >= totalLines * 0.3) return false;
+        if (instructionLikeCount > codeLikeCount && numberedStepCount >= 2) return false;
+        if (uiLikeCount > totalLines * 0.4 && codeLikeCount <= 1) return false;
+
+        // If a known language tag is present and content actually looks like code, trust it
+        if (hasKnownLang && codeLikeCount > 0) return true;
+        if (hasKnownLang && codeLikeCount === 0 && totalLines <= 2) return true;
+
         if (codeLikeCount === 0 && (uiLikeCount > 0 || keyValueCount > 0)) return false;
-        return codeLikeCount > Math.max(0, Math.floor(lines.length / 4));
+        return codeLikeCount > Math.max(0, Math.floor(totalLines / 4));
       }
 
       const codeBlocks = container.querySelectorAll('pre code');
@@ -6294,12 +6822,15 @@
         }
 
         const rawCodeText = codeBlock.textContent || '';
-        if (!looksLikeActualCode(language, rawCodeText)) {
-          const note = document.createElement('div');
-          note.className = 'ui-note-block';
-          note.textContent = rawCodeText;
-          pre.replaceWith(note);
-          return;
+
+        // Detect language for label
+        let displayLang = language;
+        if (displayLang === 'code' && rawCodeText) {
+          // Try to auto-detect if it's SQL
+          const firstLine = rawCodeText.trimStart().split('\n')[0] || '';
+          if (/^(SELECT |INSERT |UPDATE |DELETE |CREATE |ALTER |DROP |EXEC |DECLARE |BEGIN |SET |USE |GRANT |REVOKE |WITH )/i.test(firstLine)) {
+            displayLang = 'sql';
+          }
         }
 
         const header = document.createElement('div');
@@ -6307,7 +6838,7 @@
 
         const langLabel = document.createElement('span');
         langLabel.className = 'code-language';
-        langLabel.textContent = language;
+        langLabel.textContent = displayLang;
 
         const copyBtn = document.createElement('button');
         copyBtn.type = 'button';
@@ -6644,6 +7175,7 @@
 
         wrapTables(targetBox);
         enhanceCodeBlocks(targetBox);
+        addSentenceBreaks(targetBox);
         appendAnswerSources(targetBox, sources);
       } catch (e) {
         console.error('[renderAnswer] Error:', e);
