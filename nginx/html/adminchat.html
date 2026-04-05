@@ -87,7 +87,6 @@
     .logo {
       height: 50px;
       width: auto;
-      cursor: pointer;
     }
 
     .title {
@@ -329,6 +328,330 @@
       color: #17314d;
     }
 
+    .ticket-dropdown-manual-item {
+      margin-top: 8px;
+      width: 100%;
+      border: 1px dashed #b8d0e9;
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: #ffffff;
+      color: #0c3d6b;
+      font: inherit;
+      font-weight: 600;
+      text-align: left;
+      cursor: pointer;
+      transition: background 0.18s ease, border-color 0.18s ease;
+    }
+
+    .ticket-dropdown-manual-item:hover,
+    .ticket-dropdown-manual-item:focus {
+      background: #eef6ff;
+      border-color: #0c3d6b;
+      outline: none;
+    }
+
+    .ticket-dropdown-manual-item.open,
+    .ticket-dropdown-keyword-item.open {
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
+      margin-bottom: 0;
+      border-bottom-color: transparent;
+      background: #eef6ff;
+    }
+
+    .ticket-dropdown-manual-panel {
+      margin-top: 8px;
+      border: 1px solid #cfe0f2;
+      border-radius: 10px;
+      background: #ffffff;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .ticket-dropdown-manual-panel.connected {
+      margin-top: 0;
+      border-top-left-radius: 0;
+      border-top-right-radius: 0;
+    }
+
+    .ticket-dropdown-manual-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #17314d;
+    }
+
+    .ticket-dropdown-manual-input-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .ticket-dropdown-manual-input {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid #bfd0e4;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      color: #10233f;
+      background: #ffffff;
+      outline: none;
+    }
+
+    .ticket-dropdown-manual-input:focus {
+      border-color: #0c3d6b;
+      box-shadow: 0 0 0 2px rgba(12, 61, 107, 0.1);
+    }
+
+    .ticket-dropdown-manual-editable {
+      flex: 1;
+      min-width: 0;
+      min-height: 34px;
+      border: 1px solid #bfd0e4;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      color: #10233f;
+      background: #ffffff;
+      outline: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .ticket-dropdown-manual-editable:focus {
+      border-color: #0c3d6b;
+      box-shadow: 0 0 0 2px rgba(12, 61, 107, 0.1);
+    }
+
+    .ticket-dropdown-manual-editable:empty::before {
+      content: attr(data-placeholder);
+      color: #6b7b8c;
+      pointer-events: none;
+    }
+
+    .ticket-dropdown-manual-input::-webkit-credentials-auto-fill-button,
+    .ticket-dropdown-manual-input::-webkit-contacts-auto-fill-button {
+      visibility: hidden;
+      display: none !important;
+      pointer-events: none;
+    }
+
+    .ticket-dropdown-manual-submit,
+    .ticket-dropdown-manual-cancel {
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 8px 10px;
+      min-width: 56px;
+      height: 34px;
+      border: 1px solid transparent;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease;
+      white-space: nowrap;
+    }
+
+    .ticket-dropdown-manual-submit {
+      background: #0c3d6b;
+      border-color: #0c3d6b;
+      color: #ffffff;
+    }
+
+    .ticket-dropdown-manual-submit:hover {
+      background: #0a2f53;
+      border-color: #0a2f53;
+    }
+
+    .ticket-dropdown-manual-cancel {
+      background: #ffffff;
+      border-color: #bfd0e4;
+      color: #17314d;
+    }
+
+    .ticket-dropdown-manual-cancel:hover {
+      background: #eef6ff;
+      border-color: #8fb5dc;
+    }
+
+    .ticket-dropdown-manual-error {
+      min-height: 16px;
+      font-size: 12px;
+      color: #b42318;
+      line-height: 1.3;
+    }
+
+    .ticket-dropdown-keyword-item {
+      margin-top: 8px;
+      width: 100%;
+      border: 1px dashed #95b8db;
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: #ffffff;
+      color: #0c3d6b;
+      font: inherit;
+      font-weight: 600;
+      text-align: left;
+      cursor: pointer;
+      transition: background 0.18s ease, border-color 0.18s ease;
+    }
+
+    .ticket-dropdown-keyword-item:hover,
+    .ticket-dropdown-keyword-item:focus {
+      background: #e4effd;
+      border-color: #0c3d6b;
+      outline: none;
+    }
+
+    .ticket-dropdown-keyword-panel {
+      margin-top: 8px;
+      border: 1px solid #c5d9ef;
+      border-radius: 10px;
+      background: #ffffff;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .ticket-dropdown-keyword-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #17314d;
+    }
+
+    .ticket-dropdown-keyword-editable {
+      flex: 1;
+      min-width: 0;
+      min-height: 34px;
+      border: 1px solid #bfd0e4;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      color: #10233f;
+      background: #ffffff;
+      outline: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .ticket-dropdown-keyword-editable:focus {
+      border-color: #0c3d6b;
+      box-shadow: 0 0 0 2px rgba(12, 61, 107, 0.1);
+    }
+
+    .ticket-dropdown-keyword-editable:empty::before {
+      content: attr(data-placeholder);
+      color: #6b7b8c;
+      pointer-events: none;
+    }
+
+    .ticket-dropdown-keyword-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .ticket-dropdown-keyword-btn,
+    .ticket-dropdown-keyword-cancel {
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 8px 10px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease;
+      white-space: nowrap;
+    }
+
+    .ticket-dropdown-keyword-btn {
+      background: #0c3d6b;
+      border-color: #0c3d6b;
+      color: #ffffff;
+    }
+
+    .ticket-dropdown-keyword-btn:hover {
+      background: #0a2f53;
+      border-color: #0a2f53;
+    }
+
+    .ticket-dropdown-keyword-cancel {
+      background: #ffffff;
+      border-color: #bfd0e4;
+      color: #17314d;
+    }
+
+    .ticket-dropdown-keyword-cancel:hover {
+      background: #eef6ff;
+      border-color: #8fb5dc;
+    }
+
+    .ticket-dropdown-keyword-status {
+      min-height: 16px;
+      font-size: 12px;
+      color: #0c3d6b;
+      line-height: 1.3;
+    }
+
+    .ticket-dropdown-keyword-status.error {
+      color: #b42318;
+    }
+
+    .ticket-dropdown-keyword-status .dots-animated span {
+      animation: dotPulse 1.4s infinite;
+      opacity: 0;
+    }
+    .ticket-dropdown-keyword-status .dots-animated span:nth-child(1) { animation-delay: 0s; }
+    .ticket-dropdown-keyword-status .dots-animated span:nth-child(2) { animation-delay: 0.2s; }
+    .ticket-dropdown-keyword-status .dots-animated span:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes dotPulse {
+      0%, 80%, 100% { opacity: 0; }
+      40% { opacity: 1; }
+    }
+
+    .ticket-dropdown-keyword-results {
+      margin-top: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .ticket-dropdown-keyword-results-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #17314d;
+    }
+
+    .ticket-dropdown-keyword-results-select {
+      width: 100%;
+      border: 1px solid #bfd0e4;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      color: #10233f;
+      background: #ffffff;
+      outline: none;
+      cursor: pointer;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease, background 0.15s ease;
+    }
+
+    .ticket-dropdown-keyword-results-select:hover {
+      border-color: #0c3d6b;
+      background: #f7fbff;
+      transform: translateY(-1px);
+    }
+
+    .ticket-dropdown-keyword-results-select:focus {
+      border-color: #0c3d6b;
+      box-shadow: 0 0 0 2px rgba(12, 61, 107, 0.1);
+    }
+
     .ghost-btn {
       background: #0c3d6b;
       border: 1px solid #0c3d6b;
@@ -389,8 +712,10 @@
 
     .knowledge-dock {
       display: flex;
-      align-items: center;
+      flex-direction: column;
+      align-items: flex-start;
       justify-content: flex-start;
+      gap: 10px;
       margin-bottom: 10px;
       padding-left: 6px;
     }
@@ -408,6 +733,7 @@
       min-height: 56px;
     }
 
+    .prompt-menu-wrap,
     .knowledge-menu-wrap {
       position: relative;
       display: flex;
@@ -415,12 +741,14 @@
       flex-shrink: 0;
     }
 
+    .prompt-btn,
     .knowledge-btn {
       background: #0c3d6b;
       color: #ffffff;
       border: none;
       border-radius: 999px;
       padding: 10px 16px;
+      width: 170px;
       font-size: 13px;
       font-weight: 600;
       cursor: pointer;
@@ -428,15 +756,18 @@
       box-shadow: 0 6px 14px rgba(12, 61, 107, 0.2);
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 8px;
       white-space: nowrap;
     }
 
+    .prompt-btn:hover,
     .knowledge-btn:hover {
       background: #0a2f53;
       transform: translateY(-1px);
     }
 
+    .prompt-menu,
     .knowledge-menu {
       position: absolute;
       left: 0;
@@ -453,6 +784,7 @@
       z-index: 1200;
     }
 
+    .prompt-menu button,
     .knowledge-menu button {
       background: #f3f6fb;
       border: 1px solid #d6e1ef;
@@ -465,6 +797,7 @@
       transition: all 0.15s ease;
     }
 
+    .prompt-menu button:hover,
     .knowledge-menu button:hover {
       background: #e8f0fb;
       border-color: #0c3d6b;
@@ -1208,8 +1541,6 @@
       align-items: center;
       justify-content: center;
       cursor: pointer;
-      font-size: 26px;
-      font-weight: 300;
       transition: all 0.15s ease;
       padding: 0;
       flex-shrink: 0;
@@ -3262,7 +3593,7 @@
 
     <div class="ticket-section">
       <div class="ticket-card">
-        <label for="ticket-select" class="ticket-label">Select Support Ticket (Optional)</label>
+        <label for="ticket-select" class="ticket-label">Select Ticket (Optional)</label>
         <div class="ticket-controls">
           <div id="ticket-select-wrap" class="ticket-select-wrap">
             <select id="ticket-select" class="ticket-select-native">
@@ -3348,6 +3679,16 @@
 
     <div class="input-dock">
       <div class="knowledge-dock">
+        <div class="prompt-menu-wrap">
+          <button id="predefined-prompts-btn" type="button" class="prompt-btn">Predefined Prompts</button>
+          <div id="predefined-prompts-menu" class="prompt-menu hidden">
+            <button type="button" class="predefined-prompt-option" data-prompt="Solve this ticket step by step">Solve this ticket step by step</button>
+            <button type="button" class="predefined-prompt-option" data-prompt="Summarize this ticket">Summarize this ticket</button>
+            <button type="button" class="predefined-prompt-option" data-prompt="Explain those logs">Explain those logs</button>
+            <button type="button" class="predefined-prompt-option" data-prompt="Explain the error in the picture">Explain the error in the picture</button>
+            <button type="button" class="predefined-prompt-option" data-prompt="What does that file contain?">What does that file contain?</button>
+          </div>
+        </div>
         <div class="knowledge-menu-wrap">
           <button id="knowledge-btn" type="button" class="knowledge-btn">Add Knowledge</button>
           <div id="knowledge-menu" class="knowledge-menu hidden">
@@ -3359,7 +3700,9 @@
       <form id="chat-form" class="input-row">
         <input id="knowledge-upload-input" type="file" multiple accept=".pdf,.doc,.docx,.rtf,.odt,.eml,.msg,.xlsx,.xls,.xlsm,.xltx,.xltm,.xlsb,.ods,.csv,.tsv,.txt,.md,.markdown,.rst,.log,.ini,.cfg,.conf,.properties,.json,.jsonl,.xml,.yaml,.yml,.toml,.sql,.ppt,.pptx,.odp,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff,.svg,.ico,.heic,.heif,.avif,.jfif,.zip,.rar,.7z,.tar,.gz,.mp3,.wav,.m4a,.aac,.ogg,.flac,.mp4,.mkv,.mov,.avi,.wmv,.webm" style="display: none;">
         <button id="upload-file-btn" type="button" class="file-upload-btn" title="Upload files (images, Excel, PDF, etc.)">
-          <span>+</span>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M8 1V15M1 8H15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
         </button>
         <input id="file-input" type="file" multiple accept=".pdf,.doc,.docx,.rtf,.odt,.eml,.msg,.xlsx,.xls,.xlsm,.xltx,.xltm,.xlsb,.ods,.csv,.tsv,.txt,.md,.markdown,.rst,.log,.ini,.cfg,.conf,.properties,.json,.jsonl,.xml,.yaml,.yml,.toml,.sql,.ppt,.pptx,.odp,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff,.svg,.ico,.heic,.heif,.avif,.jfif,.zip,.rar,.7z,.tar,.gz,.mp3,.wav,.m4a,.aac,.ogg,.flac,.mp4,.mkv,.mov,.avi,.wmv,.webm" style="display: none;">
         <div class="textarea-wrapper">
@@ -3593,6 +3936,9 @@
     const systemPromptToast = document.getElementById('system-prompt-toast');
     const filePreviewBody = document.getElementById('file-preview-body');
     const filePreviewContent = document.getElementById('file-preview-content');
+    const predefinedPromptsBtn = document.getElementById('predefined-prompts-btn');
+    const predefinedPromptsMenu = document.getElementById('predefined-prompts-menu');
+    const predefinedPromptOptions = Array.from(document.querySelectorAll('.predefined-prompt-option'));
     const knowledgeBtn = document.getElementById('knowledge-btn');
     const knowledgeMenu = document.getElementById('knowledge-menu');
     const knowledgeUploadOption = document.getElementById('knowledge-upload-option');
@@ -3667,7 +4013,16 @@
     let systemPromptCloseTimer = null;
     let systemPromptToastTimer = null;
     let ticketLoadPromise = null;
+    let ticketBaseItems = [];
     let ticketItems = [];
+    let ticketKeywordState = {
+      active: false,
+      panelOpen: false,
+      loading: false,
+      query: '',
+      status: '',
+      isError: false,
+    };
     let isTicketDropdownOpen = false;
     const KNOWLEDGE_DRAFT_KEY = 'ta9_knowledge_draft_html_v1';
     const CHAT_CONVERSATION_KEY = 'ta9_chat_conversation_id_v1';
@@ -5586,10 +5941,33 @@
 
     function toggleKnowledgeMenu(show) {
       if (show) {
+        togglePromptMenu(false);
         knowledgeMenu.classList.remove('hidden');
       } else {
         knowledgeMenu.classList.add('hidden');
       }
+    }
+
+    function togglePromptMenu(show) {
+      if (show) {
+        toggleKnowledgeMenu(false);
+        predefinedPromptsMenu.classList.remove('hidden');
+      } else {
+        predefinedPromptsMenu.classList.add('hidden');
+      }
+    }
+
+    function applyPredefinedPrompt(promptText) {
+      const normalizedPrompt = String(promptText || '').trim();
+      if (!normalizedPrompt) {
+        return;
+      }
+      togglePromptMenu(false);
+      questionInput.value = normalizedPrompt;
+      questionInput.dispatchEvent(new Event('input', { bubbles: true }));
+      questionInput.focus();
+      const end = questionInput.value.length;
+      questionInput.setSelectionRange(end, end);
     }
 
     function openKnowledgeContentModal() {
@@ -6173,6 +6551,14 @@
       return `pasted-image-${Date.now()}-${index + 1}.${safeExt}`;
     }
 
+    if (predefinedPromptsBtn) {
+      predefinedPromptsBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        const isHidden = predefinedPromptsMenu.classList.contains('hidden');
+        togglePromptMenu(isHidden);
+      });
+    }
+
     knowledgeBtn.addEventListener('click', (e) => {
       e.preventDefault();
       const isHidden = knowledgeMenu.classList.contains('hidden');
@@ -6180,9 +6566,23 @@
     });
 
     document.addEventListener('click', (e) => {
+      if (
+        predefinedPromptsMenu
+        && predefinedPromptsBtn
+        && !predefinedPromptsMenu.contains(e.target)
+        && !predefinedPromptsBtn.contains(e.target)
+      ) {
+        togglePromptMenu(false);
+      }
       if (!knowledgeMenu.contains(e.target) && !knowledgeBtn.contains(e.target)) {
         toggleKnowledgeMenu(false);
       }
+    });
+
+    predefinedPromptOptions.forEach((button) => {
+      button.addEventListener('click', () => {
+        applyPredefinedPrompt(button.dataset.prompt || button.textContent || '');
+      });
     });
 
     knowledgeUploadOption.addEventListener('click', () => {
@@ -7249,11 +7649,86 @@
 
       const selectedOption = ticketSelect.options[ticketSelect.selectedIndex];
       if (ticketSelect.value && selectedOption) {
-        ticketSelectTriggerLabel.textContent = selectedOption.textContent || 'Select a support ticket';
+        ticketSelectTriggerLabel.textContent = selectedOption.textContent || 'Select a ticket';
         ticketSelectTrigger.classList.remove('placeholder');
       } else {
-        ticketSelectTriggerLabel.textContent = 'Select a support ticket';
+        ticketSelectTriggerLabel.textContent = '';
         ticketSelectTrigger.classList.add('placeholder');
+      }
+    }
+
+    function normalizeTicketIdInput(rawValue) {
+      const normalized = String(rawValue || '').trim().replace(/^#/, '');
+      return /^\d+$/.test(normalized) ? normalized : '';
+    }
+
+    function normalizeTicketKeywordInput(rawValue) {
+      return String(rawValue || '').replace(/\s+/g, ' ').trim();
+    }
+
+    async function selectTicketByTypedId(rawValue, errorNode, submitButton) {
+      const ticketId = normalizeTicketIdInput(rawValue);
+      if (!ticketId) {
+        if (errorNode) {
+          errorNode.textContent = 'Enter a numeric ticket ID (example: 57069).';
+        }
+        return;
+      }
+
+      if (errorNode) {
+        errorNode.textContent = '';
+      }
+
+      if (ticketSelectWrap) {
+        ticketSelectWrap.classList.add('loading');
+      }
+      ticketSelect.setAttribute('aria-busy', 'true');
+      if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.textContent = 'Loading...';
+      }
+
+      try {
+        const resp = await fetch(`/adminchat/api/azure/ticket-by-id?id=${encodeURIComponent(ticketId)}`, { cache: 'no-store' });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          const detail = typeof data.detail === 'string' ? data.detail : `Ticket fetch failed with status ${resp.status}`;
+          throw new Error(detail);
+        }
+
+        const item = data.item;
+        if (!item || !item.url) {
+          throw new Error(`Ticket #${ticketId} was not found.`);
+        }
+
+        const updatedItems = [...(ticketBaseItems.length ? ticketBaseItems : ticketItems)];
+        const existingIndex = updatedItems.findIndex((it) => String(it.id) === String(item.id));
+        if (existingIndex === -1) {
+          updatedItems.push(item);
+        } else {
+          updatedItems[existingIndex] = item;
+        }
+
+        ticketBaseItems = [...updatedItems];
+
+        renderTicketOptions(updatedItems, item.url);
+        ticketSelect.value = item.url;
+        ticketSelect.dispatchEvent(new Event('change'));
+        setTicketDropdownOpen(false);
+      } catch (err) {
+        console.warn('Failed to load ticket by ID', err);
+        if (errorNode) {
+          errorNode.textContent = err && err.message ? err.message : 'Unable to load ticket by ID.';
+        }
+      } finally {
+        if (ticketSelectWrap) {
+          ticketSelectWrap.classList.remove('loading');
+        }
+        ticketSelect.setAttribute('aria-busy', 'false');
+        if (submitButton) {
+          submitButton.disabled = false;
+          submitButton.textContent = 'Search';
+        }
       }
     }
 
@@ -7265,43 +7740,402 @@
       ticketDropdownContent.innerHTML = '';
 
       if (!ticketItems.length) {
-        renderTicketEmptyState('No current tickets found.');
-        return;
-      }
+        const empty = document.createElement('div');
+        empty.className = 'ticket-dropdown-empty';
+        empty.textContent = 'No current tickets found.';
+        ticketDropdownContent.appendChild(empty);
+      } else {
+        const list = document.createElement('div');
+        list.className = 'ticket-dropdown-list';
+        list.setAttribute('role', 'listbox');
 
-      const list = document.createElement('div');
-      list.className = 'ticket-dropdown-list';
-      list.setAttribute('role', 'listbox');
+        for (const item of ticketItems) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'ticket-dropdown-item';
+          if (ticketSelect.value === item.url) {
+            button.classList.add('selected');
+          }
+          button.setAttribute('role', 'option');
+          button.setAttribute('aria-selected', ticketSelect.value === item.url ? 'true' : 'false');
 
-      for (const item of ticketItems) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'ticket-dropdown-item';
-        if (ticketSelect.value === item.url) {
-          button.classList.add('selected');
+          const id = document.createElement('span');
+          id.className = 'ticket-dropdown-item-id';
+          id.textContent = `#${item.id}`;
+
+          const title = document.createElement('span');
+          title.className = 'ticket-dropdown-item-title';
+          title.textContent = item.project ? `[${item.project}] ${item.title}` : item.title;
+
+          button.appendChild(id);
+          button.appendChild(title);
+          button.addEventListener('click', () => {
+            ticketSelect.value = item.url;
+            ticketSelect.dispatchEvent(new Event('change'));
+            setTicketDropdownOpen(false);
+          });
+          list.appendChild(button);
         }
-        button.setAttribute('role', 'option');
-        button.setAttribute('aria-selected', ticketSelect.value === item.url ? 'true' : 'false');
 
-        const id = document.createElement('span');
-        id.className = 'ticket-dropdown-item-id';
-        id.textContent = `#${item.id}`;
-
-        const title = document.createElement('span');
-        title.className = 'ticket-dropdown-item-title';
-        title.textContent = item.project ? `[${item.project}] ${item.title}` : item.title;
-
-        button.appendChild(id);
-        button.appendChild(title);
-        button.addEventListener('click', () => {
-          ticketSelect.value = item.url;
-          ticketSelect.dispatchEvent(new Event('change'));
-          setTicketDropdownOpen(false);
-        });
-        list.appendChild(button);
+        ticketDropdownContent.appendChild(list);
       }
 
-      ticketDropdownContent.appendChild(list);
+      const manualAction = document.createElement('button');
+      manualAction.type = 'button';
+      manualAction.className = 'ticket-dropdown-manual-item';
+      manualAction.textContent = 'Choose by ticket ID';
+      const manualPanel = document.createElement('div');
+      manualPanel.className = 'ticket-dropdown-manual-panel hidden';
+
+      const manualLabel = document.createElement('div');
+      manualLabel.className = 'ticket-dropdown-manual-label';
+      manualLabel.textContent = 'Type ticket ID:';
+
+      const manualRow = document.createElement('div');
+      manualRow.className = 'ticket-dropdown-manual-input-row';
+
+      const manualInput = document.createElement('div');
+      manualInput.className = 'ticket-dropdown-manual-editable';
+      manualInput.setAttribute('contenteditable', 'true');
+      manualInput.setAttribute('role', 'textbox');
+      manualInput.setAttribute('aria-label', 'Ticket ID');
+      manualInput.setAttribute('data-placeholder', 'Example: 57069');
+
+      const manualSubmit = document.createElement('button');
+      manualSubmit.type = 'button';
+      manualSubmit.className = 'ticket-dropdown-manual-submit';
+      manualSubmit.textContent = 'Search';
+
+      const manualCancel = document.createElement('button');
+      manualCancel.type = 'button';
+      manualCancel.className = 'ticket-dropdown-manual-cancel';
+      manualCancel.textContent = 'Cancel';
+
+      const manualError = document.createElement('div');
+      manualError.className = 'ticket-dropdown-manual-error';
+
+      const hideManualPanel = () => {
+        manualPanel.classList.add('hidden');
+        manualPanel.classList.remove('connected');
+        manualAction.classList.remove('open');
+        manualInput.textContent = '';
+        manualError.textContent = '';
+      };
+
+      const showManualPanel = () => {
+        manualPanel.classList.remove('hidden');
+        manualPanel.classList.add('connected');
+        manualAction.classList.add('open');
+        manualInput.focus();
+      };
+
+      manualAction.addEventListener('click', () => {
+        showManualPanel();
+      });
+
+      manualCancel.addEventListener('click', () => {
+        hideManualPanel();
+      });
+
+      manualSubmit.addEventListener('click', () => {
+        void selectTicketByTypedId(manualInput.textContent || '', manualError, manualSubmit);
+      });
+
+      manualInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          void selectTicketByTypedId(manualInput.textContent || '', manualError, manualSubmit);
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          hideManualPanel();
+        }
+      });
+
+      manualInput.addEventListener('input', () => {
+        const raw = manualInput.textContent || '';
+        const cleaned = raw.replace(/[^0-9#]/g, '').replace(/^([^#\d]*#?)(.*)$/g, '$1$2');
+        if (raw !== cleaned) {
+          manualInput.textContent = cleaned;
+          const range = document.createRange();
+          const sel = window.getSelection();
+          range.selectNodeContents(manualInput);
+          range.collapse(false);
+          if (sel) {
+            sel.removeAllRanges();
+            sel.addRange(range);
+          }
+        }
+      });
+
+      manualRow.appendChild(manualInput);
+      manualRow.appendChild(manualSubmit);
+      manualRow.appendChild(manualCancel);
+      manualPanel.appendChild(manualLabel);
+      manualPanel.appendChild(manualRow);
+      manualPanel.appendChild(manualError);
+
+      ticketDropdownContent.appendChild(manualAction);
+      ticketDropdownContent.appendChild(manualPanel);
+
+      const keywordAction = document.createElement('button');
+      keywordAction.type = 'button';
+      keywordAction.className = 'ticket-dropdown-keyword-item';
+      keywordAction.textContent = 'Choose by key words';
+
+      const keywordPanel = document.createElement('div');
+      keywordPanel.className = 'ticket-dropdown-manual-panel hidden';
+
+      const keywordLabel = document.createElement('div');
+      keywordLabel.className = 'ticket-dropdown-manual-label';
+      keywordLabel.textContent = 'Search in ticket:';
+
+      const keywordEditable = document.createElement('div');
+      keywordEditable.className = 'ticket-dropdown-manual-editable';
+      keywordEditable.setAttribute('contenteditable', 'true');
+      keywordEditable.setAttribute('role', 'textbox');
+      keywordEditable.setAttribute('aria-label', 'Ticket keyword search');
+      keywordEditable.setAttribute('data-placeholder', 'Example: parser plugin error 500 swagger');
+
+      const keywordInputRow = document.createElement('div');
+      keywordInputRow.className = 'ticket-dropdown-manual-input-row';
+
+      const keywordSearchBtn = document.createElement('button');
+      keywordSearchBtn.type = 'button';
+      keywordSearchBtn.className = 'ticket-dropdown-manual-submit';
+      keywordSearchBtn.textContent = 'Search';
+
+      const keywordCancelBtn = document.createElement('button');
+      keywordCancelBtn.type = 'button';
+      keywordCancelBtn.className = 'ticket-dropdown-manual-cancel';
+      keywordCancelBtn.textContent = 'Cancel';
+
+      const keywordStatus = document.createElement('div');
+      keywordStatus.className = 'ticket-dropdown-keyword-status';
+
+      const keywordResults = document.createElement('div');
+      keywordResults.className = 'ticket-dropdown-keyword-results hidden';
+
+      const keywordResultsLabel = document.createElement('div');
+      keywordResultsLabel.className = 'ticket-dropdown-keyword-results-label';
+      keywordResultsLabel.textContent = 'Matching tickets:';
+
+      const keywordResultsSelect = document.createElement('select');
+      keywordResultsSelect.className = 'ticket-dropdown-keyword-results-select';
+
+      const hideKeywordPanel = () => {
+        keywordPanel.classList.add('hidden');
+        keywordPanel.classList.remove('connected');
+        keywordAction.classList.remove('open');
+        ticketKeywordState.panelOpen = false;
+      };
+
+      const showKeywordPanel = () => {
+        keywordPanel.classList.remove('hidden');
+        keywordPanel.classList.add('connected');
+        keywordAction.classList.add('open');
+        ticketKeywordState.panelOpen = true;
+        keywordEditable.focus();
+      };
+
+      const setKeywordStatus = (text, isError = false) => {
+        keywordStatus.classList.toggle('error', !!isError);
+        if (!isError && text && text.endsWith('...')) {
+          const base = text.slice(0, -3);
+          keywordStatus.innerHTML = base + '<span class="dots-animated"><span>.</span><span>.</span><span>.</span></span>';
+        } else {
+          keywordStatus.textContent = text || '';
+        }
+      };
+
+      const applyKeywordUiState = () => {
+        keywordEditable.textContent = ticketKeywordState.query || '';
+        setKeywordStatus(ticketKeywordState.status, ticketKeywordState.isError);
+        keywordSearchBtn.disabled = !!ticketKeywordState.loading;
+        keywordSearchBtn.textContent = 'Search';
+
+        keywordResultsSelect.innerHTML = '';
+        if (ticketKeywordState.active && ticketItems.length > 0) {
+          keywordResults.classList.remove('hidden');
+
+          for (const item of ticketItems) {
+            const option = document.createElement('option');
+            option.value = item.url;
+            option.textContent = `#${item.id} | ${item.project ? `[${item.project}] ` : ''}${item.title}`;
+            keywordResultsSelect.appendChild(option);
+          }
+
+          keywordResultsSelect.selectedIndex = -1;
+        } else {
+          keywordResults.classList.add('hidden');
+        }
+
+        if (ticketKeywordState.panelOpen) {
+          keywordPanel.classList.remove('hidden');
+          keywordPanel.classList.add('connected');
+          keywordAction.classList.add('open');
+        }
+      };
+
+      const runKeywordSearch = async () => {
+        const keywordQuery = normalizeTicketKeywordInput(keywordEditable.textContent || '');
+        if (keywordQuery.length < 2) {
+          ticketKeywordState = {
+            ...ticketKeywordState,
+            panelOpen: true,
+            loading: false,
+            query: keywordQuery,
+            status: 'Enter at least 2 characters to search.',
+            isError: true,
+          };
+          setKeywordStatus('Enter at least 2 characters to search.', true);
+          return;
+        }
+
+        ticketKeywordState = {
+          ...ticketKeywordState,
+          panelOpen: true,
+          loading: true,
+          query: keywordQuery,
+          status: 'Searching tickets...',
+          isError: false,
+        };
+        setKeywordStatus('Searching tickets...');
+        keywordSearchBtn.disabled = true;
+        keywordSearchBtn.textContent = 'Search';
+        if (ticketSelectWrap) {
+          ticketSelectWrap.classList.add('loading');
+        }
+        ticketSelect.setAttribute('aria-busy', 'true');
+
+        let didRerender = false;
+        try {
+          const resp = await fetch(`/adminchat/api/azure/tickets/search?query=${encodeURIComponent(keywordQuery)}&limit=100&max_scan=500`, { cache: 'no-store' });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) {
+            const detail = typeof data.detail === 'string' ? data.detail : `Search failed with status ${resp.status}`;
+            throw new Error(detail);
+          }
+
+          const items = Array.isArray(data.items) ? data.items : [];
+          if (!items.length) {
+            ticketKeywordState = {
+              ...ticketKeywordState,
+              active: false,
+              loading: false,
+              status: 'No tickets matched those keywords.',
+              isError: true,
+            };
+            setKeywordStatus('No tickets matched those keywords in Description/Discussion.', true);
+            return;
+          }
+
+          ticketKeywordState = {
+            ...ticketKeywordState,
+            active: true,
+            loading: false,
+            status: `Found ${items.length} matching ticket(s), choose a ticket from the list under.`,
+            isError: false,
+          };
+          renderTicketOptions(items, ticketSelect.value);
+          didRerender = true;
+        } catch (err) {
+          console.warn('Ticket keyword search failed', err);
+          ticketKeywordState = {
+            ...ticketKeywordState,
+            active: false,
+            loading: false,
+            status: err && err.message ? err.message : 'Unable to search tickets right now.',
+            isError: true,
+          };
+          setKeywordStatus(ticketKeywordState.status, true);
+        } finally {
+          ticketKeywordState = {
+            ...ticketKeywordState,
+            loading: false,
+          };
+          keywordSearchBtn.disabled = false;
+          keywordSearchBtn.textContent = 'Search';
+          if (ticketSelectWrap) {
+            ticketSelectWrap.classList.remove('loading');
+          }
+          ticketSelect.setAttribute('aria-busy', 'false');
+          if (!didRerender) {
+            renderTicketDropdownItems();
+          }
+        }
+      };
+
+      keywordAction.addEventListener('click', () => {
+        showKeywordPanel();
+      });
+
+      keywordSearchBtn.addEventListener('click', () => {
+        void runKeywordSearch();
+      });
+
+      keywordEditable.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          void runKeywordSearch();
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          hideKeywordPanel();
+        }
+      });
+
+      keywordCancelBtn.addEventListener('click', () => {
+        ticketKeywordState = {
+          ...ticketKeywordState,
+          panelOpen: false,
+          active: false,
+          query: '',
+          status: '',
+          isError: false,
+        };
+        keywordEditable.textContent = '';
+        setKeywordStatus('');
+        keywordResults.classList.add('hidden');
+        keywordResultsSelect.innerHTML = '';
+        hideKeywordPanel();
+      });
+
+      keywordResultsSelect.addEventListener('change', () => {
+        const selectedUrl = keywordResultsSelect.value || '';
+        if (!selectedUrl) {
+          return;
+        }
+        ticketSelect.value = selectedUrl;
+        ticketSelect.dispatchEvent(new Event('change'));
+        setTicketDropdownOpen(false);
+
+        ticketKeywordState = {
+          ...ticketKeywordState,
+          panelOpen: false,
+          active: false,
+          query: '',
+          status: '',
+          isError: false,
+        };
+        keywordEditable.textContent = '';
+        setKeywordStatus('');
+        keywordResults.classList.add('hidden');
+        keywordResultsSelect.innerHTML = '';
+        hideKeywordPanel();
+      });
+
+      keywordInputRow.appendChild(keywordEditable);
+      keywordInputRow.appendChild(keywordSearchBtn);
+      keywordInputRow.appendChild(keywordCancelBtn);
+      keywordPanel.appendChild(keywordLabel);
+      keywordPanel.appendChild(keywordInputRow);
+      keywordPanel.appendChild(keywordStatus);
+      keywordResults.appendChild(keywordResultsLabel);
+      keywordResults.appendChild(keywordResultsSelect);
+      keywordPanel.appendChild(keywordResults);
+      applyKeywordUiState();
+
+      ticketDropdownContent.appendChild(keywordAction);
+      ticketDropdownContent.appendChild(keywordPanel);
     }
 
     function setTicketLoading(isLoading, message = 'Fetching current tickets...') {
@@ -7353,7 +8187,7 @@
       const showLoading = options.showLoading !== false;
 
       if (showLoading) {
-        setTicketLoading(true, 'Refreshing support tickets from Azure DevOps...');
+        setTicketLoading(true, 'Refreshing tickets from Azure DevOps...');
       }
 
       ticketLoadPromise = (async () => {
@@ -7364,6 +8198,7 @@
 
         const data = await resp.json();
         const items = (data && data.items) || [];
+        ticketBaseItems = items;
         renderTicketOptions(items, previousValue);
       })();
 
@@ -7386,6 +8221,13 @@
       if (ticketLoadPromise) {
         return;
       }
+
+      if (ticketKeywordState.active || ticketKeywordState.panelOpen || ticketKeywordState.loading) {
+        setTicketDropdownOpen(true);
+        renderTicketDropdownItems();
+        return;
+      }
+
       void loadTickets({ showLoading: true });
     }
 
@@ -7433,7 +8275,9 @@
       }
     });
     document.addEventListener('click', (e) => {
-      if (!ticketSelectWrap.contains(e.target)) {
+      if (!isTicketDropdownOpen) return;
+      const ticketCard = ticketSelectWrap.closest('.ticket-card') || ticketSelectWrap;
+      if (!ticketCard.contains(e.target)) {
         setTicketDropdownOpen(false);
       }
     });
@@ -7577,10 +8421,11 @@
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const question = questionInput.value.trim();
-      if (!question) {
+      if (!question && attachedFiles.length === 0) {
         showKnowledgeToast('Message is empty.', true);
         return;
       }
+      const effectiveQuestion = question || 'Please analyze the attached file(s).';
 
       // Check if ticket selection changed - if so, reset tracking
       const currentTicket = ticketSelect.value || null;
@@ -7599,7 +8444,7 @@
 
       // Show chat card and add question bubble
       chatCard.classList.remove('hidden');
-      const qaPair = addQuestionBubble(question);
+      const qaPair = addQuestionBubble(effectiveQuestion);
       
       // Clear input
       questionInput.value = '';
@@ -7628,7 +8473,7 @@
 
       try {
         const requestBody = {
-          question: question,
+          question: effectiveQuestion,
           top_k: 5,
           conversation_id: getChatConversationId(),
           ticket_url: ticketSelect.value || null,

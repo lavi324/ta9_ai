@@ -1,6 +1,6 @@
 services:
   wiki_rag_api:
-    image: wiki-rag-api:2.0.6
+    image: wiki-rag-api:2.2.1
     networks:
       - shared-ai-net
     environment:
@@ -27,6 +27,8 @@ services:
       ADO_PROJECT: ${ADO_PROJECT}
       ADO_PROJECT_TICKET_SUMMARY: ${ADO_PROJECT_TICKET_SUMMARY}
       ADO_PAT: ${ADO_PAT}
+      ADO_KEYWORD_TICKET_QUERY_TARGETS: ${ADO_KEYWORD_TICKET_QUERY_TARGETS}
+      ADO_KEYWORD_WIQL: ${ADO_KEYWORD_WIQL}
       WIKI_DIR: ${WIKI_DIR}
       CHROMA_DIR: ${CHROMA_DIR}
       SYSTEM_PROMPT_FILE: /app/system_prompt_template.txt

@@ -24,6 +24,7 @@ import tempfile
 import shutil
 import json
 import mimetypes
+import difflib
 from io import BytesIO
 from urllib.parse import unquote, quote, urlsplit, urlunsplit, parse_qsl, urlencode
 import threading
@@ -548,6 +549,13 @@ ADO_SUPPORT_TICKET_ASSIGNED_TO = os.getenv(
     "ADO_SUPPORT_TICKET_ASSIGNED_TO",
     "Support <support@ta-9.com>",
 )
+ADO_KEYWORD_TICKET_QUERY_TARGETS = os.getenv(
+    "ADO_KEYWORD_TICKET_QUERY_TARGETS",
+    f"{ADO_PROJECT}::My Queries/New Query" if ADO_PROJECT else "",
+)
+# Direct WIQL override for keyword ticket search – bypasses saved query fetch entirely.
+# If set, this WIQL is executed directly to get the pool of ticket IDs to search.
+ADO_KEYWORD_WIQL = os.getenv("ADO_KEYWORD_WIQL", "").strip()
 
 def _ado_headers() -> dict:
     if not (ADO_ORG and ADO_PROJECT and ADO_PAT):
@@ -597,6 +605,23 @@ def _ado_support_ticket_query_definitions() -> List[Tuple[str, str]]:
         default_project = (ADO_PROJECT_TICKET_SUMMARY or ADO_PROJECT or "").strip()
         if default_project:
             targets.append((default_project, "My Queries/external tickets"))
+    return targets
+
+
+def _ado_keyword_ticket_query_definitions() -> List[Tuple[str, str]]:
+    targets: List[Tuple[str, str]] = []
+    for raw_target in str(ADO_KEYWORD_TICKET_QUERY_TARGETS or "").split("|"):
+        target = raw_target.strip()
+        if not target:
+            continue
+        if "::" not in target:
+            print(f"[ADO][TICKETS][WARN] Ignoring malformed keyword query target '{target}'. Expected Project::Query Path.")
+            continue
+        project, query_path = target.split("::", 1)
+        project = project.strip()
+        query_path = query_path.strip()
+        if project and query_path:
+            targets.append((project, query_path))
     return targets
 
 
@@ -1491,6 +1516,10 @@ def process_uploaded_file(
             return _process_text_file(file_name, file_bytes)
         elif file_ext in ["doc", "docx"]:
             return _process_word_file(file_name, file_bytes)
+        elif file_ext == "zip":
+            return _process_archive_file(file_name, file_bytes, describe_image_func=describe_image_func, cancel_check=cancel_check, request_id=request_id)
+        elif any(file_name.lower().endswith(ext) for ext in (".tar.gz", ".tgz", ".tar.bz2", ".tar")) or file_ext == "tar":
+            return _process_archive_file(file_name, file_bytes, describe_image_func=describe_image_func, cancel_check=cancel_check, request_id=request_id)
         elif file_ext in POPULAR_OTHER_EXTS:
             return _process_unstructured_popular_file(file_name, file_ext)
         else:
@@ -1844,6 +1873,105 @@ def _process_word_file(file_name: str, file_bytes: bytes) -> str:
         return f"**File: {file_name}** [Error reading Word doc: {str(e)}]"
 
 
+def _process_archive_file(
+    file_name: str,
+    file_bytes: bytes,
+    describe_image_func=None,
+    cancel_check=None,
+    request_id: Optional[str] = None,
+) -> str:
+    """Extract and process all files from a zip or tar archive.
+    Images inside the archive are passed through the vision model.
+    """
+    import io
+    import zipfile
+    import tarfile as tarfile_mod
+
+    MAX_EXTRACTED_BYTES = 200 * 1024 * 1024  # 200 MB total extracted size guard
+    MAX_FILES = 50  # max number of entries to process
+
+    file_name_lower = file_name.lower()
+    file_ext = file_name.split(".")[-1].lower()
+    results: List[str] = []
+    total_extracted_bytes = 0
+
+    def _process_entry(entry_name: str, entry_bytes: bytes) -> None:
+        nonlocal total_extracted_bytes
+        total_extracted_bytes += len(entry_bytes)
+        if total_extracted_bytes > MAX_EXTRACTED_BYTES:
+            results.append(
+                f"[TRUNCATED] Archive size limit of {MAX_EXTRACTED_BYTES // (1024 * 1024)} MB reached. "
+                "Remaining files not processed."
+            )
+            return
+        display_name = os.path.basename(entry_name) or entry_name
+        entry_b64 = base64.b64encode(entry_bytes).decode("utf-8")
+        mime_type, _ = mimetypes.guess_type(display_name)
+        entry_data = {"name": display_name, "type": mime_type or "", "data": entry_b64}
+        print(f"[ARCHIVE] Processing entry '{display_name}' ({len(entry_bytes)} bytes) from {file_name}")
+        content = process_uploaded_file(
+            entry_data,
+            describe_image_func=describe_image_func,
+            cancel_check=cancel_check,
+            request_id=request_id,
+        )
+        results.append(f"[From archive: {file_name} → {display_name}]\n{content}")
+
+    try:
+        if file_ext == "zip":
+            try:
+                with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                    entries = [e for e in zf.infolist() if not e.is_dir()]
+                    if not entries:
+                        return f"**Archive: {file_name}**\n\n[Archive is empty]"
+                    for entry in entries[:MAX_FILES]:
+                        if cancel_check and cancel_check():
+                            break
+                        if total_extracted_bytes > MAX_EXTRACTED_BYTES:
+                            break
+                        try:
+                            entry_bytes = zf.read(entry.filename)
+                        except Exception as e:
+                            results.append(f"[From {file_name} → {entry.filename}]\n[Error reading entry: {e}]")
+                            continue
+                        _process_entry(entry.filename, entry_bytes)
+            except zipfile.BadZipFile:
+                return f"**Archive: {file_name}**\n\n[Invalid or corrupted zip file]"
+        else:
+            # tar, tar.gz, tgz, tar.bz2 — tarfile auto-detects compression
+            try:
+                with tarfile_mod.open(fileobj=io.BytesIO(file_bytes)) as tf:
+                    members = [m for m in tf.getmembers() if m.isfile()]
+                    if not members:
+                        return f"**Archive: {file_name}**\n\n[Archive is empty]"
+                    for member in members[:MAX_FILES]:
+                        if cancel_check and cancel_check():
+                            break
+                        if total_extracted_bytes > MAX_EXTRACTED_BYTES:
+                            break
+                        try:
+                            f = tf.extractfile(member)
+                            if f is None:
+                                continue
+                            entry_bytes = f.read()
+                        except Exception as e:
+                            results.append(f"[From {file_name} → {member.name}]\n[Error reading entry: {e}]")
+                            continue
+                        _process_entry(member.name, entry_bytes)
+            except tarfile_mod.TarError as e:
+                return f"**Archive: {file_name}**\n\n[Invalid or corrupted archive: {e}]"
+
+        if not results:
+            return f"**Archive: {file_name}**\n\n[No processable files found in archive]"
+
+        header = f"**Archive: {file_name}** ({len(results)} file(s) extracted)\n\n"
+        return header + "\n\n---ARCHIVE ENTRY SEPARATOR---\n\n".join(results)
+
+    except Exception as e:
+        print(f"[FILE] Error processing archive {file_name}: {e}")
+        return f"**Archive: {file_name}**\n\n[Error extracting archive: {e}]"
+
+
 def build_file_context(
     files: Optional[List[Dict[str, str]]],
     describe_image_func=None,
@@ -2022,6 +2150,424 @@ def ado_list_tickets(tag_contains: str = "CC") -> List[dict]:
         )
 
     results.sort(key=lambda item: (item.get("changedDate") or "", item.get("id") or 0), reverse=True)
+    return results
+
+
+def ado_get_ticket_picker_item(work_item_id: int) -> dict:
+    """Fetch a single work item and normalize it for the ticket dropdown picker."""
+    base = _ado_project_base(None)
+    hdrs = _ado_headers()
+    resp = requests.get(
+        f"{base}/_apis/wit/workitems/{work_item_id}?$expand=fields&api-version=7.1",
+        headers=hdrs,
+        timeout=60,
+    )
+
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"Ticket #{work_item_id} was not found in Azure DevOps.")
+    if resp.status_code != 200:
+        raise RuntimeError(f"ADO workitem lookup error ({resp.status_code}): {resp.text}")
+
+    wi = resp.json() or {}
+    fields = wi.get("fields", {}) or {}
+    project_name = str(fields.get("System.TeamProject") or ADO_PROJECT or "").strip()
+    expected_project = str(ADO_PROJECT or "").strip()
+    if expected_project and project_name and project_name.lower() != expected_project.lower():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Ticket #{work_item_id} belongs to project '{project_name}'. "
+                f"Please provide a ticket from '{expected_project}'."
+            ),
+        )
+
+    title = str(fields.get("System.Title") or "").strip()
+    state = str(fields.get("System.State") or "").strip()
+    tags = str(fields.get("System.Tags") or "").strip()
+    changed_date = str(fields.get("System.ChangedDate") or "").strip()
+    web_url = f"https://dev.azure.com/{ADO_ORG}/{project_name}/_workitems/edit/{work_item_id}"
+
+    return {
+        "id": int(wi.get("id") or work_item_id),
+        "title": title or f"Work item {work_item_id}",
+        "state": state,
+        "tags": tags,
+        "project": project_name,
+        "changedDate": changed_date,
+        "url": web_url,
+    }
+
+
+def _normalize_ticket_search_text(value: str) -> str:
+    text = unescape(_strip_html(str(value or "")))
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _ticket_search_terms(query: str) -> List[str]:
+    normalized = _normalize_ticket_search_text(query)
+    if not normalized:
+        return []
+    stopwords = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "it",
+        "of", "on", "or", "that", "the", "this", "to", "was", "were", "with", "not",
+    }
+    parts = [p for p in normalized.split(" ") if len(p) >= 2 and p not in stopwords]
+    seen = set()
+    terms: List[str] = []
+    for part in parts:
+        if part in seen:
+            continue
+        seen.add(part)
+        terms.append(part)
+    return terms
+
+
+def _ticket_stem(term: str) -> str:
+    token = str(term or "")
+    for suffix in ("ingly", "edly", "ing", "ed", "es", "s"):
+        if len(token) > 4 and token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def _ticket_soft_phrase_similarity(query_phrase: str, haystack: str) -> float:
+    """Return best soft similarity between query phrase and local token windows in text."""
+    phrase = _normalize_ticket_search_text(query_phrase)
+    text = _normalize_ticket_search_text(haystack)
+    if not phrase or not text:
+        return 0.0
+
+    phrase_tokens = phrase.split(" ")
+    text_tokens = text.split(" ")
+    if not phrase_tokens or not text_tokens:
+        return 0.0
+
+    window_size = max(2, min(len(phrase_tokens) + 2, 10))
+    max_windows = 500
+    best = 0.0
+
+    if len(text_tokens) <= window_size:
+        return difflib.SequenceMatcher(None, phrase, " ".join(text_tokens)).ratio()
+
+    checked = 0
+    for index in range(0, len(text_tokens) - window_size + 1):
+        if checked >= max_windows:
+            break
+        window = " ".join(text_tokens[index:index + window_size])
+        ratio = difflib.SequenceMatcher(None, phrase, window).ratio()
+        if ratio > best:
+            best = ratio
+            if best >= 0.95:
+                break
+        checked += 1
+
+    return best
+
+
+def _ticket_keyword_match_score(query: str, title: str, description: str, discussion: str) -> Tuple[float, int, int]:
+    """Return (score, exact_term_hits, fuzzy_term_hits) for title+description+discussion search."""
+    phrase = _normalize_ticket_search_text(query)
+    if not phrase:
+        return 0.0, 0, 0
+
+    terms = _ticket_search_terms(query)
+    
+    title_norm = _normalize_ticket_search_text(title)
+    description_norm = _normalize_ticket_search_text(description)
+    discussion_norm = _normalize_ticket_search_text(discussion)
+    body_combined = f"{description_norm} {discussion_norm}".strip()
+    all_combined = f"{title_norm} {body_combined}".strip()
+    
+    if not all_combined:
+        return 0.0, 0, 0
+
+    # Soft similarity first - this is the primary matching strategy for "data model" type queries
+    soft_title_similarity = _ticket_soft_phrase_similarity(phrase, title_norm) if title_norm else 0.0
+    soft_body_similarity = _ticket_soft_phrase_similarity(phrase, body_combined) if body_combined else 0.0
+    soft_similarity = max(soft_title_similarity, soft_body_similarity)
+    
+    # If we have decent soft similarity, that's a match
+    if soft_similarity >= 0.50:
+        return 2.0 + (soft_similarity * 3.0), 0, 0
+
+    # Otherwise try exact/partial/fuzzy matching as secondary strategy
+    if not terms:
+        # If no terms extracted but phrase is present exactly, score it
+        if phrase in all_combined:
+            return 3.0, 1, 0
+        return 0.0, 0, 0
+
+    phrase_boost = 0.0
+    if phrase in body_combined:
+        phrase_boost += 2.5
+    if phrase in title_norm:
+        phrase_boost += 1.2
+
+    words = set(all_combined.split(" "))
+    title_words = set(title_norm.split(" ")) if title_norm else set()
+    stems = {_ticket_stem(w) for w in words if w}
+    exact_hits = 0
+    fuzzy_hits = 0
+    partial_hits = 0
+    total_occurrences = 0
+
+    for term in terms:
+        term_stem = _ticket_stem(term)
+        body_occurrences = body_combined.count(term)
+        title_occurrences = title_norm.count(term)
+        occurrences = body_occurrences + title_occurrences
+        total_occurrences += occurrences
+        # Slightly prefer title matches while keeping body text as primary signal.
+        if term in words or occurrences > 0:
+            exact_hits += 1
+            continue
+        if term_stem and (
+            term_stem in stems
+            or any(w.startswith(term_stem) or term_stem.startswith(w) for w in words if w)
+        ):
+            partial_hits += 1
+            continue
+        close = difflib.get_close_matches(term, list(words), n=1, cutoff=0.72)
+        if close:
+            fuzzy_hits += 1
+
+    # Very permissive threshold - include anything with at least soft similarity or ANY matching signal
+    if exact_hits == 0 and fuzzy_hits == 0 and partial_hits == 0 and phrase_boost == 0 and soft_similarity < 0.40:
+        return 0.0, 0, 0
+
+    exact_ratio = exact_hits / len(terms) if terms else 0
+    fuzzy_ratio = fuzzy_hits / len(terms) if terms else 0
+    partial_ratio = partial_hits / len(terms) if terms else 0
+    occurrence_boost = min(2.0, total_occurrences * 0.15)
+    title_exact_boost = 0.4 * sum(1 for term in terms if term in title_words)
+    soft_similarity_boost = max(0.0, soft_similarity - 0.30) * 4.0
+    
+    score = (
+        phrase_boost
+        + (exact_ratio * 4.0)
+        + (partial_ratio * 1.7)
+        + (fuzzy_ratio * 1.2)
+        + occurrence_boost
+        + title_exact_boost
+        + soft_similarity_boost
+    )
+    
+    return score, exact_hits, fuzzy_hits
+
+
+def _ado_inject_keyword_conditions(base_wiql: str, query: str) -> str:
+    """Inject keyword filtering into an existing WIQL using Contains Words on Title and Description."""
+    terms = _ticket_search_terms(query)
+    if not terms:
+        return base_wiql
+
+    # Build keyword condition: each term must appear in Title OR Description
+    term_conditions = []
+    for term in terms:
+        safe_term = term.replace("'", "''")
+        term_conditions.append(
+            f"([System.Title] Contains Words '{safe_term}' "
+            f"OR [System.Description] Contains Words '{safe_term}')"
+        )
+    keyword_clause = " AND ".join(term_conditions)
+
+    wiql_upper = base_wiql.upper()
+    order_pos = wiql_upper.rfind("ORDER BY")
+
+    if order_pos > 0:
+        before_order = base_wiql[:order_pos].rstrip()
+        order_part = base_wiql[order_pos:]
+        return f"{before_order} AND ({keyword_clause}) {order_part}"
+    else:
+        return f"{base_wiql.rstrip()} AND ({keyword_clause})"
+
+
+def _ado_fetch_work_items_lightweight(ids: List[int]) -> List[dict]:
+    """Fetch work items requesting only the fields needed for keyword search (fast)."""
+    if not ids:
+        return []
+
+    fields = [
+        "System.Id", "System.Title", "System.Description",
+        "Microsoft.VSTS.TCM.ReproSteps", "System.State",
+        "System.Tags", "System.TeamProject", "System.ChangedDate",
+    ]
+    fields_param = ",".join(fields)
+    results: List[dict] = []
+    org_base = _ado_project_base(None)
+    for start in range(0, len(ids), 200):
+        batch_ids = ids[start:start + 200]
+        det_url = (
+            f"{org_base}/_apis/wit/workitems?ids={','.join(str(item_id) for item_id in batch_ids)}"
+            f"&fields={fields_param}&api-version=7.1"
+        )
+        det = requests.get(det_url, headers=_ado_headers(), timeout=30)
+        if det.status_code != 200:
+            print(f"[ADO][TICKETS][ERROR] Lightweight work item fetch returned {det.status_code}: {det.text[:300]}")
+            raise RuntimeError(f"ADO workitems details error: {det.text}")
+        results.extend(det.json().get("value", []))
+    return results
+
+
+def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 500) -> List[dict]:
+    """Search work items from configured keyword query targets by Title, Description, and Discussion."""
+    normalized_query = _normalize_ticket_search_text(query)
+    terms = _ticket_search_terms(query)
+
+    print(f"[ADO][SEARCH][INIT] query='{query}' | normalized='{normalized_query}' | terms={terms}")
+
+    if not normalized_query or len(normalized_query) < 1:
+        print(f"[ADO][SEARCH][REJECT] normalized_query too short or empty")
+        return []
+
+    safe_max_scan = max(1, min(int(max_scan or 500), 2000))
+    safe_limit = max(1, min(int(limit or 100), 100))
+
+    # --- Phase 1: Collect ticket IDs using keyword-filtered WIQL -------------
+    merged_ids: List[int] = []
+    seen_ids: set = set()
+
+    def _add_ids(ids: List[int]):
+        for item_id in ids:
+            if item_id not in seen_ids:
+                seen_ids.add(item_id)
+                merged_ids.append(item_id)
+
+    # Strategy A: Direct WIQL override with keyword injection
+    if ADO_KEYWORD_WIQL:
+        filtered_wiql = _ado_inject_keyword_conditions(ADO_KEYWORD_WIQL, query)
+        print(f"[ADO][SEARCH] Using keyword-filtered WIQL: {filtered_wiql[:200]}")
+        try:
+            project = (ADO_PROJECT or "").strip()
+            ids = _ado_execute_wiql(project, filtered_wiql, "ADO_KEYWORD_WIQL_FILTERED")
+            print(f"[ADO][SEARCH] Keyword-filtered WIQL returned {len(ids)} IDs")
+            _add_ids(ids)
+        except Exception as exc:
+            print(f"[ADO][SEARCH][WARN] Keyword-filtered WIQL failed, falling back to unfiltered: {exc}")
+            try:
+                ids = _ado_execute_wiql(project, ADO_KEYWORD_WIQL, "ADO_KEYWORD_WIQL")
+                print(f"[ADO][SEARCH] Unfiltered WIQL returned {len(ids)} IDs")
+                _add_ids(ids)
+            except Exception as exc2:
+                print(f"[ADO][SEARCH][ERROR] Unfiltered WIQL also failed: {exc2}")
+
+    # Strategy B: Saved query targets with keyword injection
+    if not merged_ids:
+        query_targets = _ado_keyword_ticket_query_definitions()
+        print(f"[ADO][SEARCH] query_targets={query_targets}")
+        for project, query_path in query_targets:
+            label = f"{project}::{query_path}"
+            print(f"[ADO][SEARCH] trying saved query target: {label}")
+            try:
+                wiql = _ado_fetch_saved_query_wiql(project, query_path)
+                filtered_wiql = _ado_inject_keyword_conditions(wiql, query)
+                print(f"[ADO][SEARCH] fetched & filtered WIQL: {filtered_wiql[:200]}")
+                ids = _ado_execute_wiql(project, filtered_wiql, f"{label}_filtered")
+                print(f"[ADO][SEARCH] got {len(ids)} IDs")
+                _add_ids(ids)
+            except Exception as exc:
+                print(f"[ADO][SEARCH][ERROR] saved query '{label}' failed: {exc}")
+                continue
+
+    # Strategy C: Fallback – keyword-filtered project-wide WIQL
+    if not merged_ids and ADO_PROJECT:
+        print(f"[ADO][SEARCH] All query strategies failed. Falling back to keyword-filtered project-wide WIQL.")
+        project_name = (ADO_PROJECT or '').strip()
+        fallback_wiql = (
+            "SELECT [System.Id] FROM WorkItems "
+            f"WHERE [System.TeamProject] = '{project_name}' "
+            "ORDER BY [System.ChangedDate] DESC"
+        )
+        filtered_fallback = _ado_inject_keyword_conditions(fallback_wiql, query)
+        try:
+            ids = _ado_execute_wiql(project_name, filtered_fallback, "fallback-keyword-filtered")
+            print(f"[ADO][SEARCH] Fallback keyword-filtered WIQL returned {len(ids)} IDs")
+            _add_ids(ids)
+        except Exception as exc:
+            print(f"[ADO][SEARCH][ERROR] Fallback keyword-filtered WIQL failed: {exc}")
+
+    print(f"[ADO][SEARCH] Total merged IDs: {len(merged_ids)}")
+
+    if not merged_ids:
+        print(f"[ADO][SEARCH] No ticket IDs found from any strategy.")
+        return []
+
+    # --- Phase 2: Fetch work item details (lightweight, specific fields) -----
+    candidate_ids = merged_ids[:safe_max_scan]
+    print(f"[ADO][SEARCH] Fetching details for {len(candidate_ids)} candidates...")
+    candidates: List[dict] = []
+    try:
+        for wi in _ado_fetch_work_items_lightweight(candidate_ids):
+            fid = wi.get("id")
+            flds = wi.get("fields", {})
+            title = flds.get("System.Title", "")
+            description = flds.get("System.Description", "") or flds.get("Microsoft.VSTS.TCM.ReproSteps", "") or ""
+            state = flds.get("System.State", "")
+            tags = flds.get("System.Tags", "")
+            project_name = flds.get("System.TeamProject", "")
+            changed_date = flds.get("System.ChangedDate", "")
+            web_url = f"https://dev.azure.com/{ADO_ORG}/{project_name}/_workitems/edit/{fid}"
+            candidates.append(
+                {
+                    "id": fid,
+                    "title": title,
+                    "state": state,
+                    "tags": tags,
+                    "project": project_name,
+                    "changedDate": changed_date,
+                    "url": web_url,
+                    "_description": description,
+                }
+            )
+    except Exception as exc:
+        print(f"[ADO][SEARCH][ERROR] Work item batch fetch failed: {exc}")
+
+    print(f"[ADO][SEARCH] Scoring {len(candidates)} candidates against query '{query}'...")
+
+    # --- Phase 3: Score candidates for ranking --------------------------------
+    # Since WIQL already pre-filtered by keywords, every candidate is a confirmed
+    # match. Scoring is used only for *ranking* (best matches first), not filtering.
+    # Candidates that score 0 locally still get a baseline score so they appear at
+    # the bottom rather than being dropped entirely.
+    BASELINE_SCORE = 0.1
+    ranked: List[dict] = []
+    for item in candidates:
+        work_item_id = item.get("id")
+        if not work_item_id:
+            continue
+        title = item.get("title", "") or ""
+        description = item.get("_description", "") or ""
+
+        score, exact_hits, fuzzy_hits = _ticket_keyword_match_score(query, title, description, "")
+        # Never discard – WIQL already confirmed the match
+        effective_score = max(score, BASELINE_SCORE)
+
+        ranked.append(
+            {
+                **item,
+                "_score": effective_score,
+                "_exact_hits": exact_hits,
+                "_fuzzy_hits": fuzzy_hits,
+            }
+        )
+
+    ranked.sort(
+        key=lambda x: (
+            -float(x.get("_score") or 0.0),
+            -int(x.get("_exact_hits") or 0),
+            -int(x.get("_fuzzy_hits") or 0),
+            str(x.get("changedDate") or ""),
+        )
+    )
+
+    results = [
+        {k: v for k, v in item.items() if not k.startswith("_")}
+        for item in ranked[:safe_limit]
+    ]
+    print(f"[ADO][SEARCH] Done. {len(ranked)} scored from {len(candidates)} candidates, returning top {len(results)}")
     return results
 
 def ado_parse_id_from_url(url: str) -> Optional[int]:
@@ -4346,6 +4892,97 @@ def _should_use_history_for_question(
     return len(explicit_topic_tokens) < 3
 
 
+def _resolve_question_with_history(
+    question: str,
+    stored_history: List[Dict[str, str]],
+    explicit_is_followup: bool = False,
+) -> Dict[str, Any]:
+    """
+    Decide whether the current question depends on recent turns and, if needed,
+    rewrite it into a standalone retrieval-friendly question.
+    """
+    original = str(question or "").strip()
+    heuristic_followup = _should_use_history_for_question(
+        original,
+        stored_history,
+        explicit_is_followup=explicit_is_followup,
+    )
+    result: Dict[str, Any] = {
+        "use_history": bool(heuristic_followup),
+        "relation": "related" if heuristic_followup else "standalone",
+        "confidence": 0.55 if heuristic_followup else 0.7,
+        "resolved_question": original,
+        "reason": "heuristic",
+    }
+
+    if not original or not stored_history:
+        return result
+
+    history_text = _format_history_for_prompt(stored_history, max_messages=8)
+    if not history_text or not OPENAI_API_KEY:
+        return result
+
+    prompt = (
+        "You are a conversation linkage resolver for a support chatbot.\n"
+        "Decide if the CURRENT QUESTION should be interpreted using recent conversation history.\n"
+        "Return strict JSON only with keys: relation, use_history, confidence, resolved_question, reason.\n\n"
+        "Rules:\n"
+        "1) relation must be one of: dependent, related, standalone.\n"
+        "2) use_history=true for dependent or related; false for standalone.\n"
+        "3) If dependent/related, resolved_question must rewrite the current question into a clear standalone question by adding only context explicitly present in history.\n"
+        "4) If standalone, resolved_question should equal the current question.\n"
+        "5) Do not invent facts or topics not present in history.\n"
+        "6) confidence must be a number between 0 and 1.\n"
+        "7) Keep reason short (max 20 words).\n\n"
+        f"Explicit follow-up flag: {str(bool(explicit_is_followup)).lower()}\n\n"
+        f"RECENT HISTORY:\n{history_text}\n\n"
+        f"CURRENT QUESTION:\n{original}\n"
+    )
+
+    try:
+        verdict_text = call_llm(prompt, temperature=0.0, model=OPENAI_RERANK_MODEL)
+        try:
+            parsed = json.loads(verdict_text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{[\s\S]*\}", verdict_text)
+            if not match:
+                return result
+            parsed = json.loads(match.group(0))
+
+        relation = str(parsed.get("relation") or "").strip().lower()
+        if relation not in {"dependent", "related", "standalone"}:
+            relation = "related" if bool(parsed.get("use_history")) else "standalone"
+
+        llm_use_history = bool(parsed.get("use_history"))
+        if relation == "standalone":
+            llm_use_history = False
+        elif relation in {"dependent", "related"}:
+            llm_use_history = True
+
+        try:
+            confidence = float(parsed.get("confidence", 0.0))
+        except Exception:
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+
+        resolved_question = str(parsed.get("resolved_question") or "").strip() or original
+        reason = str(parsed.get("reason") or "llm").strip() or "llm"
+
+        if relation == "standalone" and heuristic_followup and confidence < 0.55:
+            return result
+
+        return {
+            "use_history": llm_use_history,
+            "relation": relation,
+            "confidence": confidence,
+            "resolved_question": resolved_question,
+            "reason": reason,
+        }
+    except Exception as exc:
+        print(f"[API][CHAT][WARN] History resolution failed; fallback to heuristic: {exc}")
+        return result
+
+
 _GENERIC_ANCHOR_TERMS = {
     "ticket", "issue", "problem", "error", "bug", "case", "item", "thing", "things", "one", "ones",
     "service", "system", "module", "component", "file", "document", "doc", "guide", "article",
@@ -6379,6 +7016,41 @@ def azure_tickets(tag: str = "CC"):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/azure/ticket-by-id")
+def azure_ticket_by_id(id: int):
+    print(f"[API][ADO] /azure/ticket-by-id lookup id={id}")
+    if id <= 0:
+        raise HTTPException(status_code=400, detail="id must be a positive integer")
+
+    try:
+        item = ado_get_ticket_picker_item(id)
+        return {"item": item}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[API][ADO][ERROR] ticket-by-id lookup failed for id={id}: {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/azure/tickets/search")
+def azure_ticket_search(query: str, limit: int = 100, max_scan: int = 500):
+    normalized_query = str(query or "").strip()
+    if len(normalized_query) < 2:
+        raise HTTPException(status_code=400, detail="query must be at least 2 characters")
+
+    print(f"[API][ADO] /azure/tickets/search query='{normalized_query}' limit={limit} max_scan={max_scan}")
+    try:
+        items = ado_search_tickets_by_keywords(normalized_query, limit=limit, max_scan=max_scan)
+        return {"items": items, "query": normalized_query, "count": len(items)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[API][ADO][ERROR] ticket search failed: {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/system-prompt")
 def get_system_prompt():
     template = _read_system_prompt_template()
@@ -6846,6 +7518,7 @@ def compare_and_ingest(async_run: bool = False, background_tasks: BackgroundTask
 def chat(req: ChatRequest):
     print(f"[API][CHAT] /chat called question='{req.question[:200]}' top_k={req.top_k} force_reingest={req.force_reingest} files={len(req.files) if req.files else 0}")
     question = (req.question or "").strip()
+    resolved_question = question
     total_rag_steps = 8
     _rag_log_step(1, total_rag_steps, "Request received", f"question_len={len(question)} files={len(req.files) if req.files else 0}")
 
@@ -6856,16 +7529,26 @@ def chat(req: ChatRequest):
         conversation_store[conversation_key] = dq
     stored_history = list(conversation_store.get(conversation_key, deque()))
     conversation_state = dict(conversation_state_store.get(conversation_key) or {})
-    use_history_context = _should_use_history_for_question(
+    history_resolution = _resolve_question_with_history(
         question,
         stored_history,
         explicit_is_followup=bool(req.is_followup),
     )
+    use_history_context = bool(history_resolution.get("use_history"))
+    resolved_question = str(history_resolution.get("resolved_question") or question).strip() or question
     history_context = _format_history_for_prompt(stored_history, max_messages=8) if use_history_context else ""
     if history_context:
-        print(f"[API][CHAT] Using conversation history context key={conversation_key} messages={len(stored_history)}")
+        print(
+            f"[API][CHAT] Using conversation history context key={conversation_key} "
+            f"messages={len(stored_history)} relation={history_resolution.get('relation')} "
+            f"confidence={history_resolution.get('confidence')}"
+        )
     else:
         print(f"[API][CHAT] Treating question as standalone key={conversation_key}")
+
+    retrieval_question = resolved_question if use_history_context else question
+    if retrieval_question != question:
+        print(f"[API][CHAT] Resolved follow-up question for retrieval: '{retrieval_question[:240]}'")
 
     # Process uploaded files early to include their content in context
     file_context = ""
@@ -6946,12 +7629,16 @@ def chat(req: ChatRequest):
         print("[API][CHAT] force_reingest=True → calling ingest_wiki_files(force=True)")
         ingest_wiki_files(force=True)
 
-    ta9_mode = _is_ta9_question(question)
-    is_foundational = _is_foundational_question(question)
-    query_variants = _build_query_variants(question, ta9_mode)
+    ta9_mode = _is_ta9_question(retrieval_question)
+    is_foundational = _is_foundational_question(retrieval_question)
+    query_variants = _build_query_variants(retrieval_question, ta9_mode)
     _rag_log_step(4, total_rag_steps, "Preparing retrieval queries", f"variants={len(query_variants)} history_used={bool(history_context)}")
     if history_context:
-        history_seed = f"Conversation context:\n{history_context}\n\nCurrent question:\n{question}"
+        history_seed = (
+            f"Conversation context:\n{history_context}\n\n"
+            f"Current question:\n{question}\n\n"
+            f"Resolved question for retrieval:\n{retrieval_question}"
+        )
         query_variants = [history_seed] + query_variants
         query_variants = query_variants[:4]
     ticket_context_hint = None
@@ -7073,7 +7760,7 @@ def chat(req: ChatRequest):
     # Secondary search: ticket-aware similarity without overriding the question
     if ticket_context_hint:
         try:
-            similar_query = question + "\n\nRelated ticket context:\n" + ticket_context_hint
+            similar_query = retrieval_question + "\n\nRelated ticket context:\n" + ticket_context_hint
             if history_context:
                 similar_query += "\n\nRecent conversation:\n" + history_context
             sim_emb = embed_text(similar_query)
@@ -7121,7 +7808,7 @@ def chat(req: ChatRequest):
     # Also include memory snippets related to the question
     # Gather memory docs (generic + ticket-specific) but do not pin them; they will be reranked
     try:
-        mem_query_emb = primary_emb or embed_text(question)
+        mem_query_emb = primary_emb or embed_text(retrieval_question)
         mem = memory_collection.query(
             query_embeddings=[mem_query_emb],
             n_results=6,
@@ -7141,9 +7828,9 @@ def chat(req: ChatRequest):
         print(f"[API][CHAT][WARN] memory query failed: {e}")
 
     # Topic-agnostic fallback retrieval when initial context is weak or empty
-    initial_profile = _context_confidence_profile(question, docs, distances)
+    initial_profile = _context_confidence_profile(retrieval_question, docs, distances)
     if not file_context and not selected_ticket_text and (not docs or initial_profile["confidence"] < 0.42):
-        fallback_variants = _build_fallback_query_variants(question)
+        fallback_variants = _build_fallback_query_variants(retrieval_question)
         print(
             f"[API][CHAT] Triggering fallback retrieval: docs={len(docs)} "
             f"confidence={initial_profile['confidence']} variants={len(fallback_variants)}"
@@ -7201,14 +7888,14 @@ def chat(req: ChatRequest):
         )
         return ChatResponse(answer=answer, sources=[])
 
-    docs, metas, distances, ids = rerank_results(question, docs, metas, distances=distances, ids=ids)
+    docs, metas, distances, ids = rerank_results(retrieval_question, docs, metas, distances=distances, ids=ids)
     _rag_log_step(6, total_rag_steps, "Ranking and consolidating sources", f"candidate_docs={len(docs)}")
-    question_is_procedural = _question_has_procedural_intent(question)
-    entity_fact_intent = _question_has_entity_fact_intent(question)
-    broad_coverage_intent = _question_requests_broad_coverage(question)
+    question_is_procedural = _question_has_procedural_intent(retrieval_question)
+    entity_fact_intent = _question_has_entity_fact_intent(retrieval_question)
+    broad_coverage_intent = _question_requests_broad_coverage(retrieval_question)
 
     # Confidence-based behavior: avoid hard refusals and answer in best-effort mode when confidence is low
-    final_profile = _context_confidence_profile(question, docs, distances)
+    final_profile = _context_confidence_profile(retrieval_question, docs, distances)
     low_confidence_mode = (
         not file_context
         and not selected_ticket_text
@@ -7223,7 +7910,7 @@ def chat(req: ChatRequest):
     context_blocks: List[str] = []
     source_strings: List[str] = []
     source_candidates = _build_source_context_candidates(
-        question,
+        retrieval_question,
         docs,
         metas,
         distances=distances,
@@ -7240,7 +7927,7 @@ def chat(req: ChatRequest):
     )
     if should_run_lexical_rescue:
         lexical_candidates = _build_global_lexical_source_candidates(
-            question,
+            retrieval_question,
             max_sources=7 if broad_coverage_intent else (6 if question_is_procedural else 4),
         )
         source_candidates = _merge_source_candidate_lists(
@@ -7260,7 +7947,7 @@ def chat(req: ChatRequest):
     )
     if should_run_llm_rerank:
         source_candidates = _llm_select_source_candidates(
-            question,
+            retrieval_question,
             source_candidates,
             max_sources=6 if broad_coverage_intent else 5,
         )
@@ -7432,7 +8119,7 @@ def chat(req: ChatRequest):
     # Screenshot-only context is often insufficient for actionable guidance.
     should_include_rag_context = True
     if file_context:
-        question_lc = (question or "").lower()
+        question_lc = (retrieval_question or "").lower()
         procedural_intent = any(term in question_lc for term in [
             "how", "step", "steps", "add", "create", "configure", "setup", "set up"
         ])
@@ -7507,6 +8194,15 @@ def chat(req: ChatRequest):
         context_sections.append(
             "=== QUESTION ISOLATION RULE ===\n"
             "Treat the current user question as standalone. Do not use previous conversation topics to infer missing nouns, products, areas, or procedures unless the current question explicitly refers back to them.\n"
+        )
+
+    if retrieval_question != question:
+        context_sections.append(
+            "=== FOLLOW-UP INTERPRETATION ===\n"
+            "The current question was interpreted with recent context for retrieval.\n"
+            f"Original user wording: {question}\n"
+            f"Resolved standalone retrieval question: {retrieval_question}\n"
+            "Answer the user's original wording while using the resolved intent for accuracy.\n"
         )
     
     combined_context = "\n\n".join(context_sections)
