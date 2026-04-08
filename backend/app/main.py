@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple, Dict, Any, Deque
 from collections import Counter, defaultdict, deque
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import requests
@@ -28,6 +29,7 @@ import difflib
 from io import BytesIO
 from urllib.parse import unquote, quote, urlsplit, urlunsplit, parse_qsl, urlencode
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 # Try to import optional dependencies
 try:
@@ -145,6 +147,11 @@ DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
     "9.1 If a requested detail is not in context, explicitly say it is not available in the current knowledge context.\n"
     "9.2 Never invent commands, configuration keys, UI paths, API names, or procedural steps.\n"
     "9.3 If the response is about a BUG ticket and the issue is not fully resolved, frame the ending as an INTERNAL escalation from support to engineering or R&D. Never tell the support engineer to 'contact support', 'reach out to support', or use wording that treats support as the customer.\n"
+    "9.4 When the context provides a specific value (URL, endpoint, path, command, setting name, etc.), state it directly and confidently. "
+    "NEVER hedge with words like 'usually', 'typically', 'something like', 'often', 'generally', or 'might be' when the exact value is present in the context. "
+    "Replace vague phrasing with the concrete detail from the context.\n"
+    "9.5 If the context contains the answer, present it as established fact — do NOT fall back to generic guidance or speculative patterns. "
+    "Only use generic language when the specific detail is genuinely absent from all provided context.\n"
     "10. Keep a professional, helpful tone that encourages follow-up questions.\n"
     "11. Answer naturally and conversationally - avoid rigid structured formats unless specifically requested.\n"
     "12. For Intsight or system configuration guidance, ALWAYS provide instructions using Admin Studio (UI-based configuration) by default. Do NOT include SQL queries, INSERT/UPDATE statements, or direct database table manipulation unless the user explicitly asks.\n"
@@ -153,7 +160,7 @@ DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
     "14. Never hard-refuse when at least partial context exists; provide the best grounded answer possible, explicitly flag uncertainty, and ask one focused clarifying question if needed.\n"
     "14.1 For BUG tickets that remain unresolved, end with a brief internal handoff note to engineering or R&D and the information support should gather before escalation. Do NOT say 'contact support'.\n\n"
     "SOURCE SEPARATION AND ACCURACY:\n"
-    "15. Each context block (labeled PRIMARY MATCH, SUPPLEMENTAL MATCH, or PRIORITY REFERENCE) comes from a DIFFERENT document. Treat each document as a separate, self-contained source.\n"
+    "15. Each context block (labeled PRIMARY MATCH or SUPPLEMENTAL MATCH) comes from a DIFFERENT document. Treat each document as a separate, self-contained source.\n"
     "15.1 NEVER combine or merge procedural steps from different source documents into a single procedure. Each document describes its own workflow — mixing steps from Document A with steps from Document B creates incorrect instructions.\n"
     "15.2 If two source documents describe different procedures for related but distinct tasks, present them separately with clear labels. Do NOT interleave their steps.\n"
     "15.3 When multiple sources cover the same topic, use the one that best matches the user's specific question. Use supplemental sources only for additional context that the primary source does not cover.\n\n"
@@ -189,6 +196,39 @@ knowledge_job_store_lock = threading.Lock()
 VECTOR_DOCUMENT_CACHE_MAX_ITEMS = int(os.getenv("VECTOR_DOCUMENT_CACHE_MAX_ITEMS", "24"))
 vector_document_cache: Dict[str, dict] = {}
 vector_document_cache_lock = threading.Lock()
+
+# In-memory cache for collection metadata to avoid repeated full-collection dumps.
+# Keys: collection name, Values: {"metadatas": [...], "documents": [...], "timestamp": float}
+_collection_cache: Dict[str, dict] = {}
+_collection_cache_lock = threading.Lock()
+_COLLECTION_CACHE_TTL = 120  # seconds
+
+
+def _get_cached_collection_data(col_obj, collection_name: str, include_documents: bool = False) -> dict:
+    """Return cached collection data (metadatas + optionally documents). Refreshes every TTL seconds."""
+    cache_key = f"{collection_name}:{'docs' if include_documents else 'meta'}"
+    with _collection_cache_lock:
+        cached = _collection_cache.get(cache_key)
+        if cached and (time.time() - cached["timestamp"]) < _COLLECTION_CACHE_TTL:
+            return cached["data"]
+    includes = ["metadatas"]
+    if include_documents:
+        includes.append("documents")
+    data = col_obj.get(include=includes)
+    with _collection_cache_lock:
+        _collection_cache[cache_key] = {"data": data, "timestamp": time.time()}
+    return data
+
+
+def invalidate_collection_cache(collection_name: Optional[str] = None):
+    """Clear collection cache after modifications (add/delete/update)."""
+    with _collection_cache_lock:
+        if collection_name:
+            keys_to_remove = [k for k in _collection_cache if k.startswith(f"{collection_name}:")]
+            for k in keys_to_remove:
+                del _collection_cache[k]
+        else:
+            _collection_cache.clear()
 
 
 def _request_log_prefix(request_id: Optional[str]) -> str:
@@ -349,22 +389,35 @@ def _build_system_prompt(
     combined_context: str,
     foundational_instruction: str = "",
     ta9_instruction: str = "",
-) -> str:
+) -> Tuple[str, str]:
+    """Return (system_message, user_message) for proper role separation."""
     template = _read_system_prompt_template().strip()
-    sections: List[str] = [template]
 
+    # --- System message: persona + rules ---
+    system_parts: List[str] = [template]
     if foundational_instruction and foundational_instruction.strip():
-        sections.append(foundational_instruction.strip())
-
+        system_parts.append(foundational_instruction.strip())
     if ta9_instruction and ta9_instruction.strip():
-        sections.append(ta9_instruction.strip())
+        system_parts.append(ta9_instruction.strip())
+    system_msg = "\n\n".join(part for part in system_parts if part)
 
+    # --- User message: retrieved context + question ---
+    user_parts: List[str] = []
     if combined_context and combined_context.strip():
-        sections.append(combined_context.strip())
+        user_parts.append(
+            "Below are the retrieved context documents. READ THEM CAREFULLY — your answer MUST be based on their content.\n\n"
+            + combined_context.strip()
+        )
+        user_parts.append(
+            "IMPORTANT REMINDER: The documents above contain the information you need. "
+            "Extract and use the relevant details from these documents to answer the question below. "
+            "Do NOT say the information is unavailable if it appears anywhere in the documents above."
+        )
+    user_parts.append(f"Question: {question}")
+    user_parts.append("Answer (based on the retrieved documents above):")
+    user_msg = "\n\n".join(part for part in user_parts if part)
 
-    sections.append(f"Question: {question}")
-    sections.append("Answer:")
-    return "\n\n".join(section for section in sections if section)
+    return system_msg, user_msg
 
 
 # ---------------------------------------------------------------------
@@ -408,19 +461,60 @@ def embed_text(text: str) -> List[float]:
     return emb
 
 
-def call_llm(prompt: str, temperature: float = 0.2, model: Optional[str] = None) -> str:
-    """Call OpenAI chat for final answer."""
-    selected_model = (model or OPENAI_CHAT_MODEL).strip() or OPENAI_CHAT_MODEL
-    print(f"[LLM] Calling OpenAI chat model={selected_model} prompt_len={len(prompt)} temp={temperature}")
+def embed_texts_batch(texts: List[str]) -> List[List[float]]:
+    """Batch embed multiple texts in a single API call. Much faster than sequential embed_text calls."""
+    if not texts:
+        return []
+    if len(texts) == 1:
+        return [embed_text(texts[0])]
+    print(f"[EMBED_BATCH] Calling OpenAI embeddings model={OPENAI_EMBEDDING_MODEL} batch_size={len(texts)}")
     start = time.time()
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    body = {"model": OPENAI_EMBEDDING_MODEL, "input": texts}
+    try:
+        resp = requests.post(f"{OPENAI_URL}/embeddings", json=body, headers=headers, timeout=120)
+    except Exception as e:
+        print(f"[EMBED_BATCH][ERROR] Exception: {e}")
+        traceback.print_exc()
+        raise RuntimeError(f"Failed to call OpenAI embeddings batch: {e}")
+    duration = time.time() - start
+    print(f"[EMBED_BATCH] OpenAI embeddings status={resp.status_code} took={duration:.2f}s count={len(texts)}")
+    if resp.status_code != 200:
+        print(f"[EMBED_BATCH][ERROR] Non-200: {resp.text[:400]}")
+        raise RuntimeError(f"OpenAI embeddings batch error: {resp.text}")
+    data = resp.json()
+    try:
+        sorted_items = sorted(data["data"], key=lambda x: x["index"])
+        embeddings = [item["embedding"] for item in sorted_items]
+    except Exception as e:
+        print(f"[EMBED_BATCH][ERROR] Unexpected response shape: {e}")
+        raise RuntimeError(f"OpenAI embeddings batch parse error: {e}")
+    print(f"[EMBED_BATCH] Got {len(embeddings)} embeddings in {duration:.2f}s")
+    return embeddings
+
+
+def call_llm(prompt: str, temperature: float = 0.2, model: Optional[str] = None, max_tokens: Optional[int] = None, system_message: Optional[str] = None) -> str:
+    """Call OpenAI chat for final answer."""
+    selected_model = (model or OPENAI_CHAT_MODEL).strip() or OPENAI_CHAT_MODEL
+    print(f"[LLM] Calling OpenAI chat model={selected_model} prompt_len={len(prompt)} temp={temperature} max_tokens={max_tokens} has_system={bool(system_message)}")
+    start = time.time()
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    if system_message:
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt},
+        ]
+    else:
+        messages = [{"role": "user", "content": prompt}]
     body = {
         "model": selected_model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "temperature": temperature,
     }
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
     try:
-        resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=600)
+        resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=120)
     except Exception as e:
         print(f"[LLM][ERROR] Exception while calling OpenAI chat: {e}")
         traceback.print_exc()
@@ -442,6 +536,51 @@ def call_llm(prompt: str, temperature: float = 0.2, model: Optional[str] = None)
 
     print(f"[LLM] Got OpenAI answer length={len(msg)}")
     return msg
+
+
+def call_llm_stream(prompt: str, temperature: float = 0.2, model: str = None, max_tokens: int = None, system_message: str = None):
+    """Call OpenAI chat with streaming. Yields text chunks as they arrive."""
+    selected_model = (model or OPENAI_CHAT_MODEL).strip() or OPENAI_CHAT_MODEL
+    print(f"[LLM-STREAM] Calling OpenAI chat model={selected_model} prompt_len={len(prompt)} temp={temperature} max_tokens={max_tokens} has_system={bool(system_message)}")
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    if system_message:
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt},
+        ]
+    else:
+        messages = [{"role": "user", "content": prompt}]
+    body = {
+        "model": selected_model,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": True,
+    }
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
+    try:
+        resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=120, stream=True)
+    except Exception as e:
+        print(f"[LLM-STREAM][ERROR] Exception: {e}")
+        raise RuntimeError(f"Failed to call OpenAI chat: {e}")
+    if resp.status_code != 200:
+        print(f"[LLM-STREAM][ERROR] Non-200: {resp.text[:400]}")
+        raise RuntimeError(f"OpenAI chat error: {resp.text}")
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data: "):
+            continue
+        payload = line[6:]
+        if payload.strip() == "[DONE]":
+            break
+        try:
+            chunk = json.loads(payload)
+            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            text = delta.get("content", "")
+            if text:
+                yield text
+        except Exception:
+            pass
+    print("[LLM-STREAM] Stream complete")
 
 
 # ---------------------------------------------------------------------
@@ -840,7 +979,7 @@ def _describe_ticket_image_reference(image_ref: str, source_label: str, project:
     return f"[Image Content from {source_label}]\n{description}"
 
 
-def _render_ado_html_with_inline_images(html: str, section_label: str, project: Optional[str] = None) -> str:
+def _render_ado_html_with_inline_images(html: str, section_label: str, project: Optional[str] = None, skip_image_analysis: bool = False) -> str:
     raw_html = str(html or "")
     if not raw_html.strip():
         return ""
@@ -854,13 +993,16 @@ def _render_ado_html_with_inline_images(html: str, section_label: str, project: 
             parts.append(text_segment)
 
         image_index += 1
-        parts.append(
-            _describe_ticket_image_reference(
-                match.group(1),
-                source_label=f"{section_label} image {image_index}",
-                project=project,
+        if skip_image_analysis:
+            parts.append(f"[Image {image_index} in {section_label}]")
+        else:
+            parts.append(
+                _describe_ticket_image_reference(
+                    match.group(1),
+                    source_label=f"{section_label} image {image_index}",
+                    project=project,
+                )
             )
-        )
         cursor = match.end()
 
     tail_text = _strip_html(raw_html[cursor:]).strip()
@@ -876,6 +1018,7 @@ def _build_ticket_attachment_context(
     work_item_id: int,
     attachments: List[dict],
     project: Optional[str] = None,
+    skip_image_analysis: bool = False,
 ) -> str:
     if not attachments:
         return ""
@@ -914,9 +1057,10 @@ def _build_ticket_attachment_context(
             "type": str(downloaded.get("content_type") or "application/octet-stream"),
             "data": base64.b64encode(downloaded["data"]).decode("utf-8"),
         }
+        img_func = None if skip_image_analysis else _describe_image_via_vision
         extracted_text = process_uploaded_file(
             upload_payload,
-            describe_image_func=_describe_image_via_vision,
+            describe_image_func=img_func,
         ).strip()
         if extracted_text:
             header_lines.append(extracted_text)
@@ -949,22 +1093,25 @@ def _describe_image_via_vision(image_url: str) -> str:
                         {
                             "type": "text",
                             "text": (
-                                "You are a detailed technical image analyzer. Provide a comprehensive description of this image. Include:\n"
+                                "You are a detailed technical image analyzer. Provide an exhaustive description of this image. Include:\n"
                                 "1. What type of document/UI/diagram is this (screenshot, chart, diagram, form, etc.)\n"
-                                "2. Main content and purpose\n"
-                                "3. Any visible text, labels, headers, field names, buttons, or menu items\n"
-                                "4. Technical details: configuration settings, error messages, status indicators\n"
-                                "5. Any tables, data, metrics, or numerical values shown\n"
-                                "6. UI elements: panels, sections, checkboxes, dropdowns, input fields\n"
-                                "7. Anything that would help someone understand what's happening in this image.\n\n"
-                                "Be thorough and specific. Do not refuse to analyze. Focus on technical relevance."
+                                "2. Main content, purpose, and overall layout\n"
+                                "3. ALL visible text — every label, header, field name, button, menu item, tooltip, breadcrumb, tab name, and status message. Transcribe them exactly as shown.\n"
+                                "4. Technical details: configuration settings, error messages, status indicators, selected values, toggled options\n"
+                                "5. ALL tables, data grids, metrics, numerical values — reproduce table content row by row\n"
+                                "6. UI elements: panels, sections, checkboxes (checked/unchecked), dropdowns (selected value), input fields (current value), radio buttons, toggles\n"
+                                "7. Navigation context: which page/screen/tab is active, breadcrumb path, sidebar selections\n"
+                                "8. Any highlighted, selected, or focused elements\n"
+                                "9. Color-coded indicators: red/green/yellow status, error highlights, warnings\n\n"
+                                "Be exhaustive. Extract EVERY piece of visible information. Do not summarize — list everything you see. "
+                                "Do not refuse to analyze. Focus on technical relevance."
                             ),
                         },
-                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "image_url", "image_url": {"url": image_url, "detail": "high"}},
                     ],
                 }
             ],
-            "max_tokens": 1000,
+            "max_tokens": 2000,
         }
         resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=60)
         if resp.status_code == 200:
@@ -1578,19 +1725,31 @@ def _process_image_file(file_name: str, file_b64: str, file_type: Optional[str] 
         else:
             data_uri = f"data:{mime_type};base64,{normalized_b64}"
 
-        extracted = _extract_structured_text_from_image(data_uri, source_label=file_name)
-        fallback_desc = ""
-        if describe_func and _is_low_signal_image_context(extracted):
-            fallback_desc = (describe_func(data_uri) or "").strip()
+        # Run both OCR extraction and visual description in parallel for complete coverage
+        _ocr_result = [""]
+        _visual_result = [""]
+
+        def _run_ocr():
+            _ocr_result[0] = _extract_structured_text_from_image(data_uri, source_label=file_name)
+
+        def _run_visual():
+            if describe_func:
+                _visual_result[0] = (describe_func(data_uri) or "").strip()
+
+        with ThreadPoolExecutor(max_workers=2) as img_pool:
+            img_pool.submit(_run_ocr)
+            img_pool.submit(_run_visual)
+            img_pool.shutdown(wait=True)
+
+        extracted = _ocr_result[0]
+        visual_desc = _visual_result[0]
 
         merged_parts: List[str] = []
-        if extracted:
+        if extracted and extracted.strip():
             merged_parts.append(extracted.strip())
-        if fallback_desc:
-            extracted_lc = (extracted or "").strip().lower()
-            fallback_lc = fallback_desc.lower()
-            if fallback_lc and fallback_lc not in extracted_lc:
-                merged_parts.append("[VISUAL_FALLBACK]\n" + fallback_desc)
+        if visual_desc:
+            # Always include visual description — it captures layout/context OCR may miss
+            merged_parts.append("[VISUAL_DESCRIPTION]\n" + visual_desc)
 
         image_context = "\n\n".join(part for part in merged_parts if part).strip()
         if not image_context:
@@ -2581,7 +2740,7 @@ def ado_parse_id_from_url(url: str) -> Optional[int]:
     except Exception:
         return None
 
-def ado_fetch_ticket_text(work_item_id: int) -> str:
+def ado_fetch_ticket_text(work_item_id: int, skip_image_analysis: bool = False) -> str:
     """Fetch full ticket context as chronological plain text, including attachments."""
     ticket = ado_fetch_ticket_full(work_item_id)
     fields = ticket.get("fields", {})
@@ -2599,6 +2758,7 @@ def ado_fetch_ticket_text(work_item_id: int) -> str:
         raw_desc,
         section_label=f"ticket {work_item_id} description",
         project=project_name,
+        skip_image_analysis=skip_image_analysis,
     ).strip() or "Not provided."
 
     discussion_blocks: List[str] = []
@@ -2610,6 +2770,7 @@ def ado_fetch_ticket_text(work_item_id: int) -> str:
             comment.get("raw_html") or comment.get("text") or "",
             section_label=f"ticket {work_item_id} discussion comment {index}",
             project=project_name,
+            skip_image_analysis=skip_image_analysis,
         ).strip() or "[Empty discussion entry]"
         header = f"[{created_date}] {author}"
         discussion_blocks.append(f"{header}\n{body}")
@@ -2619,6 +2780,7 @@ def ado_fetch_ticket_text(work_item_id: int) -> str:
         work_item_id,
         attachments,
         project=project_name,
+        skip_image_analysis=skip_image_analysis,
     ).strip()
 
     sections = [
@@ -2901,261 +3063,6 @@ def ingest_wiki_files(
 
 
 # ---------------------------------------------------------------------
-# Compare-and-ingest helper (git clone wiki and ingest missing)
-# ---------------------------------------------------------------------
-
-def _git_clone_wiki(tmp_root: Optional[str] = None) -> str:
-    if not (ADO_ORG and ADO_PROJECT and ADO_PAT):
-        raise RuntimeError("ADO env not configured (ADO_ORG, ADO_PROJECT, ADO_PAT)")
-    
-    # Clone the source repository (not wiki) to access "AI Knowledge Files"
-    repo_name = os.getenv("ADO_REPO_NAME", "Support")
-    remote = f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}/_git/{repo_name}"
-    b64 = base64.b64encode(f":{ADO_PAT}".encode("utf-8")).decode("utf-8")
-
-    base_dir = tempfile.mkdtemp(prefix="wiki_rag_git_", dir=tmp_root)
-    dest = os.path.join(base_dir, "repo")
-    print(f"[GIT] Cloning repository '{repo_name}' into {dest}")
-    cmd = [
-        "git",
-        "-c",
-        f"http.extraHeader=Authorization: Basic {b64}",
-        "clone",
-        "--depth",
-        "1",
-        remote,
-        dest,
-    ]
-    try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        print(f"[GIT][ERROR] clone failed: {e.stderr.decode('utf-8', errors='ignore')[:400]}")
-        shutil.rmtree(base_dir, ignore_errors=True)
-        raise RuntimeError("git clone failed")
-    return dest
-
-
-def _describe_local_image_via_vision(file_path: str) -> Optional[str]:
-    """
-    Use OpenAI vision to describe a local image file (supports .png, .jpg, .jpeg, .gif, .webp).
-    Converts file to base64 data URI and sends to vision API.
-    Returns a text description of the image, or None if processing fails.
-    """
-    if not HAS_PIL:
-        print(f"[VISION] PIL not installed; skipping image analysis for {file_path}")
-        return None
-    
-    try:
-        # Determine mime type
-        ext = os.path.splitext(file_path)[1].lower()
-        mime_map = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".gif": "image/gif",
-            ".webp": "image/webp",
-        }
-        mime_type = mime_map.get(ext)
-        if not mime_type:
-            print(f"[VISION] Unsupported image format: {ext}")
-            return None
-        
-        # Read and encode to base64
-        with open(file_path, "rb") as f:
-            image_data = base64.b64encode(f.read()).decode("utf-8")
-        
-        data_uri = f"data:{mime_type};base64,{image_data}"
-        
-        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-        body = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Briefly describe what you see in this image. Focus on any technical content, errors, UI elements, code, diagrams, or relevant details."},
-                        {"type": "image_url", "image_url": {"url": data_uri}},
-                    ],
-                }
-            ],
-            "max_tokens": 200,
-        }
-        print(f"[VISION] Processing image file: {file_path}")
-        resp = requests.post(f"{OPENAI_URL}/chat/completions", json=body, headers=headers, timeout=30)
-        if resp.status_code == 200:
-            data = resp.json()
-            description = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            print(f"[VISION] Image description ({os.path.basename(file_path)}): {description[:150]}...")
-            structured = _extract_structured_text_from_image(data_uri, source_label=os.path.basename(file_path))
-            return structured or description
-        else:
-            print(f"[VISION][WARN] Vision call failed for {file_path}: {resp.status_code}")
-            return None
-    except Exception as e:
-        print(f"[VISION][WARN] Failed to describe image {file_path}: {e}")
-        return None
-
-
-def compare_and_ingest_internal() -> Tuple[int, int]:
-    """Clone the Azure DevOps repo and ingest files from AI Knowledge Files directory."""
-    print("[COMPARE_INGEST] Starting compare-and-ingest from Azure DevOps repo")
-
-    # If ADO not configured, fallback to local filesystem ingest
-    if not (ADO_ORG and ADO_PROJECT and ADO_PAT):
-        print("[COMPARE_INGEST][WARN] ADO not configured, falling back to local files")
-        added = ingest_wiki_files(only_missing=True)
-        return added, collection.count()
-
-    repo_dir = None
-    try:
-        repo_dir = _git_clone_wiki()
-        print(f"[GIT] Clone completed: {repo_dir}")
-        
-        # Navigate to AI Knowledge Files directory
-        ai_knowledge_path = os.path.join(repo_dir, "AI Knowledge Files")
-        
-        if not os.path.exists(ai_knowledge_path):
-            print(f"[COMPARE_INGEST][ERROR] AI Knowledge Files directory not found at {ai_knowledge_path}")
-            return 0, collection.count()
-        
-        print(f"[COMPARE_INGEST] Found AI Knowledge Files at {ai_knowledge_path}")
-        
-        # Get files from the two target directories (both markdown and images)
-        target_dirs = ["new_files_for_ai_knowledge", "TA9-WIKI"]
-        md_files: List[str] = []
-        image_files: List[str] = []
-        image_extensions = (".png", ".jpg", ".jpeg", ".gif", ".webp")
-        
-        for target_dir in target_dirs:
-            dir_path = os.path.join(ai_knowledge_path, target_dir)
-            if os.path.exists(dir_path):
-                print(f"[COMPARE_INGEST] Scanning {target_dir} directory...")
-                for p in pathlib.Path(dir_path).rglob("*"):
-                    if p.is_file():
-                        rel = os.path.relpath(str(p), ai_knowledge_path)
-                        if p.suffix.lower() == ".md":
-                            md_files.append(rel)
-                        elif p.suffix.lower() in image_extensions:
-                            image_files.append(rel)
-            else:
-                print(f"[COMPARE_INGEST][WARN] Directory {target_dir} not found")
-        
-        print(f"[GIT] Found {len(md_files)} markdown files and {len(image_files)} image files in AI Knowledge Files")
-
-        all_files = md_files + image_files
-        if not all_files:
-            return 0, collection.count()
-
-        existing_sources = set(get_ingested_sources())
-        to_ingest = [f for f in all_files if f not in existing_sources]
-        print(f"[COMPARE_INGEST] Files to ingest (missing) = {len(to_ingest)}")
-
-        if not to_ingest:
-            return 0, collection.count()
-
-        added_chunks = 0
-        skipped_empty: List[str] = []
-        skipped_no_chunks: List[str] = []
-        skipped_errors: List[str] = []
-        
-        for idx, rel in enumerate(to_ingest, start=1):
-            abs_path = os.path.join(ai_knowledge_path, rel)
-            is_image = rel.lower().endswith(image_extensions)
-            print(f"[COMPARE_INGEST] [{idx}/{len(to_ingest)}] Ingesting {'image' if is_image else 'markdown'} file: {rel}")
-            
-            text = None
-            if is_image:
-                # Process image file using vision API
-                text = _describe_local_image_via_vision(abs_path)
-                if not text:
-                    print(f"[COMPARE_INGEST] Failed to extract content from image {rel}")
-                    skipped_errors.append(rel)
-                    continue
-                # Prepend file name to image description for context
-                text = f"[Image: {os.path.basename(rel)}]\n\n{text}"
-            else:
-                # Process markdown file
-                try:
-                    with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
-                        text = f.read()
-                except Exception as e:
-                    print(f"[COMPARE_INGEST][ERROR] Failed to read {rel}: {e}")
-                    skipped_errors.append(rel)
-                    continue
-
-            if not text.strip():
-                print(f"[COMPARE_INGEST] Empty file {rel} → skipping")
-                skipped_empty.append(rel)
-                continue
-
-            chunks = chunk_text(text)
-            if not chunks:
-                print(f"[COMPARE_INGEST] 0 chunks for {rel} → skipping")
-                skipped_no_chunks.append(rel)
-                continue
-
-            ids: List[str] = []
-            docs: List[str] = []
-            metas: List[dict] = []
-            embeds: List[List[float]] = []
-            for i, ch in enumerate(chunks):
-                try:
-                    emb = embed_text(ch)
-                except Exception as e:
-                    print(f"[COMPARE_INGEST][ERROR] Embedding failed for {rel} chunk={i}: {e}")
-                    continue
-                ids.append(str(uuid.uuid4()))
-                docs.append(ch)
-                metas.append({"source": rel, "chunk": i, "file_type": "image" if is_image else "markdown"})
-                embeds.append(emb)
-
-            if not ids:
-                print(f"[COMPARE_INGEST][WARN] No successful chunks for {rel} → skipping add()")
-                continue
-
-            try:
-                collection.add(ids=ids, documents=docs, metadatas=metas, embeddings=embeds)
-                added_chunks += len(ids)
-            except Exception as e:
-                print(f"[COMPARE_INGEST][ERROR] Failed to add chunks for {rel}: {e}")
-                skipped_errors.append(rel)
-
-        total = collection.count()
-        
-        # Print summary
-        print(f"[COMPARE_INGEST] ===== SUMMARY =====")
-        print(f"[COMPARE_INGEST] Markdown files in AI Knowledge Files: {len(md_files)}")
-        print(f"[COMPARE_INGEST] Image files in AI Knowledge Files: {len(image_files)}")
-        print(f"[COMPARE_INGEST] Total files in AI Knowledge Files: {len(all_files)}")
-        print(f"[COMPARE_INGEST] Already ingested: {len(existing_sources)}")
-        print(f"[COMPARE_INGEST] Missing files found: {len(to_ingest)}")
-        print(f"[COMPARE_INGEST] Successfully ingested: {added_chunks} chunks")
-        print(f"[COMPARE_INGEST] Skipped (empty files): {len(skipped_empty)}")
-        print(f"[COMPARE_INGEST] Skipped (no chunks): {len(skipped_no_chunks)}")
-        print(f"[COMPARE_INGEST] Skipped (errors): {len(skipped_errors)}")
-        print(f"[COMPARE_INGEST] Total chunks in DB: {total}")
-        
-        if skipped_empty:
-            print(f"[COMPARE_INGEST] Empty files list ({len(skipped_empty)} files):")
-            for f in skipped_empty[:10]:  # Show first 10
-                print(f"[COMPARE_INGEST]   - {f}")
-            if len(skipped_empty) > 10:
-                print(f"[COMPARE_INGEST]   ... and {len(skipped_empty) - 10} more")
-        
-        print(f"[COMPARE_INGEST] ==================")
-        print(f"[COMPARE_INGEST] DONE: api worked properly (added_chunks={added_chunks}, total_chunks={total})")
-        
-        return added_chunks, total
-    finally:
-        if repo_dir and os.path.isdir(repo_dir):
-            try:
-                shutil.rmtree(os.path.dirname(repo_dir), ignore_errors=True)
-                print("[GIT] Cleaned up temp clone directory")
-            except Exception:
-                pass
-
-
-# ---------------------------------------------------------------------
 # RAG “brain” – augmentation + reranking
 # ---------------------------------------------------------------------
 
@@ -3422,7 +3329,7 @@ def _validate_ta9_knowledge_content(content_text: str) -> Tuple[bool, str]:
 
 
 def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
-    """Generate a small set of semantically-equivalent queries for multi-retrieval."""
+    """Generate a small set of query variants for multi-retrieval (no LLM calls)."""
     variants = []
     base = question.strip()
     if base:
@@ -3431,57 +3338,14 @@ def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
     if normalized and normalized not in variants:
         variants.append(normalized)
 
-    q_low = (question or "").lower()
-    procedural_intent = _question_has_procedural_intent(question)
-    entity_fact_intent = _question_has_entity_fact_intent(question)
-    broad_coverage_intent = _question_requests_broad_coverage(question)
-    if any(term in q_low for term in ["camera", "cameras", "layer", "layers", "situational awareness", "incident", "map"]):
-        map_ops_boost = (
-            "situational awareness map layers camera request surrounding cameras "
-            "view actions map toolbar layers panel"
-        )
-        variants.append(f"{base}\n\n{map_ops_boost}" if base else map_ops_boost)
+    # Extract keyword-only variant for broader recall
+    keywords = _extract_query_keywords(base)
+    if keywords:
+        keyword_query = " ".join(keywords)
+        if keyword_query and keyword_query not in variants:
+            variants.append(keyword_query)
 
-    if procedural_intent:
-        procedural_boost = "step by step instructions procedure configure setup admin tools system configuration"
-        variants.append(f"{base}\n\n{procedural_boost}" if base else procedural_boost)
-
-        procedural_subtasks = _extract_procedural_subtasks(question, max_subtasks=3)
-        for action, object_phrase in procedural_subtasks[:2]:
-            subtask_variant = f"how to {action} {object_phrase} step by step"
-            if subtask_variant not in variants:
-                variants.append(subtask_variant)
-
-    if entity_fact_intent:
-        entity_boost = (
-            "company name product names naming policy naming convention "
-            "referred to as alias aliases main platform known as"
-        )
-        variants.append(f"{base}\n\n{entity_boost}" if base else entity_boost)
-
-    if broad_coverage_intent:
-        breadth_boost = (
-            "alternative ways other methods different approaches additional options "
-            "another way supported methods available options compare distinct procedures"
-        )
-        variants.append(f"{base}\n\n{breadth_boost}" if base else breadth_boost)
-
-    # Avoid broad TA9 expansion for already-specific procedural questions because it dilutes retrieval.
-    if ta9_mode and not procedural_intent and not entity_fact_intent and not broad_coverage_intent and len(_tokenize_normalized(question)) <= 6:
-        ta9_boost = (
-            "TA9 / IntSight platform features, capabilities, modules, "
-            "system overview, dashboards, admin studio, data model"
-        )
-        variants.append(f"{base}\n\n{ta9_boost}" if base else ta9_boost)
-    deduped_variants: List[str] = []
-    seen = set()
-    for variant in variants:
-        key = re.sub(r"\s+", " ", str(variant or "").strip().lower())
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        deduped_variants.append(variant)
-    return deduped_variants[:5]
+    return variants[:3]
 
 def augment_question(question: str) -> str:
     """
@@ -3585,260 +3449,6 @@ def _question_has_entity_fact_intent(question: str) -> bool:
     return term_hits >= 2
 
 
-def _question_explicitly_requests_database_solution(question: str) -> bool:
-    q = (question or "").lower().strip()
-    if not q:
-        return False
-
-    explicit_patterns = [
-        r"\b(database|db)\b",
-        r"\b(sql|sql server|mssql|mysql|mariadb|postgres(?:ql)?|sqlite)\b",
-        r"\bbackend table(?:-level)?\b",
-        r"\btable[- ]level\b",
-        r"\bdirect(?:ly)? in (?:the )?database\b",
-        r"\bthrough (?:the )?database\b",
-        r"\bvia sql\b",
-        r"\bdataschema1\b",
-        r"\bdataschemafields1\b",
-        r"\bdataconnectionsmanager\b",
-        r"\bindexing_audit\b",
-    ]
-    if any(re.search(pattern, q) for pattern in explicit_patterns):
-        return True
-
-    table_terms = bool(re.search(r"\b(table|tables|column|columns|schema)\b", q))
-    db_terms = bool(re.search(r"\b(database|db|sql|backend)\b", q))
-    return table_terms and db_terms
-
-
-def _question_explicitly_requests_admin_studio_solution(question: str) -> bool:
-    q = (question or "").lower().strip()
-    if not q:
-        return False
-
-    explicit_patterns = [
-        r"\badmin studio\b",
-        r"\bui\b",
-        r"\buser interface\b",
-        r"\bthrough (?:the )?ui\b",
-        r"\bfrom (?:the )?ui\b",
-        r"\bthrough admin studio\b",
-        r"\bfrom admin studio\b",
-        r"\busing admin studio\b",
-    ]
-    return any(re.search(pattern, q) for pattern in explicit_patterns)
-
-
-def _preferred_solution_channel(question: str) -> Optional[str]:
-    if _question_explicitly_requests_database_solution(question):
-        return "database"
-    if _question_explicitly_requests_admin_studio_solution(question):
-        return "admin_studio"
-    if _question_has_procedural_intent(question) and (_is_ta9_question(question) or _has_ta9_context(question)):
-        return "admin_studio"
-    return None
-
-
-def _source_solution_channel_scores(title: str = "", source: str = "", text: str = "") -> Tuple[float, float]:
-    combined = "\n".join(part for part in [title, source, text] if part).lower()
-    if not combined.strip():
-        return 0.0, 0.0
-
-    admin_score = 0.0
-    database_score = 0.0
-
-    admin_markers = [
-        ("admin studio", 4.0),
-        ("ui-based", 2.8),
-        ("user interface", 2.5),
-        ("navigate", 1.1),
-        ("click", 1.1),
-        ("open", 0.6),
-        ("select", 0.6),
-        ("button", 1.0),
-        ("tab", 0.9),
-        ("page", 0.8),
-        ("screen", 0.9),
-        ("dropdown", 1.0),
-        ("checkbox", 1.0),
-        ("save", 0.4),
-    ]
-    database_markers = [
-        ("dataschema1", 4.0),
-        ("dataschemafields1", 4.0),
-        ("dataconnectionsmanager", 3.5),
-        ("indexing_audit", 3.5),
-        ("database", 3.0),
-        (" sql ", 2.2),
-        ("sql server", 3.0),
-        ("mssql", 3.0),
-        ("mysql", 3.0),
-        ("mariadb", 3.0),
-        ("postgres", 3.0),
-        ("sqlite", 3.0),
-        ("dbtablename", 1.8),
-        ("connectionid", 1.8),
-        ("isindextofederatedsearch", 1.9),
-        ("fieldrole", 1.4),
-        ("isid", 1.2),
-        ("isqueryable", 1.2),
-        ("isvalid", 1.2),
-        ("backend table", 2.2),
-    ]
-
-    for marker, weight in admin_markers:
-        if marker in combined:
-            admin_score += weight
-    for marker, weight in database_markers:
-        if marker in combined:
-            database_score += weight
-
-    ui_like_hits = len(re.findall(r"\b(click|select|open|navigate|button|tab|screen|ui|admin studio|dropdown|checkbox|page|section)\b", combined))
-    if ui_like_hits >= 2:
-        admin_score += min(3.0, ui_like_hits * 0.45)
-
-    if re.search(r"(?mi)^\s*(select|update|insert\s+into|delete\s+from)\b", combined):
-        database_score += 3.0
-    if re.search(r"\bfrom\s+[a-z0-9_.]+\b", combined):
-        database_score += 1.2
-
-    return admin_score, database_score
-
-
-def _classify_source_solution_channel(title: str = "", source: str = "", text: str = "") -> str:
-    admin_score, database_score = _source_solution_channel_scores(title=title, source=source, text=text)
-    if admin_score >= 3.0 and admin_score >= database_score + 1.0:
-        return "admin_studio"
-    if database_score >= 3.0 and database_score >= admin_score + 1.0:
-        return "database"
-    if admin_score >= 3.0 and database_score >= 3.0:
-        return "mixed"
-    return "unknown"
-
-
-def _source_solution_preference_adjustment(question: str, title: str = "", source: str = "", text: str = "") -> float:
-    preferred_channel = _preferred_solution_channel(question)
-    if not preferred_channel:
-        return 0.0
-
-    admin_score, database_score = _source_solution_channel_scores(title=title, source=source, text=text)
-    channel = _classify_source_solution_channel(title=title, source=source, text=text)
-    if preferred_channel == "admin_studio":
-        if channel == "admin_studio":
-            return 5.5
-        if channel == "database":
-            return -6.5
-        if admin_score > database_score and admin_score >= 2.0:
-            return 2.0
-        if database_score > admin_score and database_score >= 2.0:
-            return -2.5
-        return 0.0
-
-    if channel == "database":
-        return 5.5
-    if channel == "admin_studio":
-        return -6.5
-    if database_score > admin_score and database_score >= 2.0:
-        return 2.0
-    if admin_score > database_score and admin_score >= 2.0:
-        return -2.5
-    return 0.0
-
-
-def _broad_coverage_signal_score(question: str, text: str) -> float:
-    if not _question_requests_broad_coverage(question) or not text:
-        return 0.0
-
-    t = (text or "").lower()
-    score = 0.0
-    weighted_phrases = [
-        ("alternative", 1.8),
-        ("alternatively", 1.8),
-        ("another way", 2.0),
-        ("other way", 2.0),
-        ("different way", 2.0),
-        ("another method", 2.0),
-        ("other method", 2.0),
-        ("different method", 2.0),
-        ("another option", 1.7),
-        ("other option", 1.7),
-        ("additional option", 1.7),
-        ("additional way", 1.7),
-        ("additional method", 1.7),
-        ("supported method", 1.4),
-        ("supported option", 1.4),
-        ("available method", 1.4),
-        ("available option", 1.4),
-        ("can also be", 1.3),
-        ("can be created from", 1.5),
-        ("can be created via", 1.5),
-        ("can be configured from", 1.5),
-        ("can be done via", 1.5),
-    ]
-    for phrase, weight in weighted_phrases:
-        if phrase in t:
-            score += weight
-
-    if re.search(r"(?m)^\s*(?:[-*]|\d+\.)\s+.+", t):
-        score += 0.9
-
-    method_terms = sum(1 for term in ["way", "ways", "option", "options", "method", "methods", "approach", "approaches"] if term in t)
-    if method_terms >= 2:
-        score += min(1.6, method_terms * 0.35)
-
-    return min(score, 6.0)
-
-
-def _entity_fact_signal_score(question: str, text: str) -> float:
-    if not _question_has_entity_fact_intent(question) or not text:
-        return 0.0
-
-    q = (question or "").lower()
-    t = (text or "").lower()
-    score = 0.0
-
-    shared_pairs = [
-        ("company", 1.2),
-        ("product", 1.2),
-        ("products", 1.2),
-        ("name", 0.8),
-        ("names", 0.8),
-        ("naming", 1.0),
-        ("called", 0.9),
-        ("referred to as", 1.0),
-        ("alias", 0.9),
-        ("main platform", 1.1),
-    ]
-    for token, weight in shared_pairs:
-        if token in q and token in t:
-            score += weight
-
-    if ("company" in t or "company name" in t) and ("product" in t or "product name" in t or "product names" in t):
-        score += 1.8
-
-    high_signal_phrases = [
-        "company name",
-        "product name",
-        "product names",
-        "naming policy",
-        "naming convention",
-        "should be referred to as",
-        "should not be used as part of the product name",
-        "main platform name",
-    ]
-    for phrase in high_signal_phrases:
-        if phrase in t:
-            score += 1.4
-
-    if re.search(r"(?m)^\s*[-*]\s+.+", t) and ("product" in q or "how many" in q or "which" in q):
-        score += 0.8
-
-    if re.search(r"\b(known as|also known as|referred to as|called)\b", t):
-        score += 1.0
-
-    return min(score, 8.0)
-
-
 _LEXICAL_STOPWORDS = {
     "the", "is", "are", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with", "by",
     "from", "as", "at", "be", "this", "that", "these", "those", "it", "its", "if", "then",
@@ -3915,491 +3525,6 @@ def _normalize_compact_text(text: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
-def _extract_action_object_targets(question: str, max_targets: int = 3) -> List[Tuple[str, str]]:
-    if not question:
-        return []
-
-    normalized_question = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9_\-\s]", " ", str(question or "").lower())).strip()
-    if not normalized_question:
-        return []
-
-    action_patterns = [
-        ("set up", "set up"),
-        ("setup", "setup"),
-        ("configure", "configure"),
-        ("create", "create"),
-        ("add", "add"),
-        ("edit", "edit"),
-        ("update", "update"),
-        ("delete", "delete"),
-        ("remove", "remove"),
-        ("install", "install"),
-        ("enable", "enable"),
-        ("disable", "disable"),
-        ("fix", "fix"),
-        ("resolve", "resolve"),
-    ]
-    filler_terms = {
-        "a", "an", "the", "new", "another", "other", "more", "additional", "existing",
-        "selected", "target", "current", "available", "supported", "different",
-    }
-    clause_boundary_pattern = re.compile(
-        r"\b(?:when|if|after|before|because|while|unless|except|where|which|that)\b"
-    )
-    trailing_procedural_noise_pattern = re.compile(
-        r"\b(?:step(?:\s+by\s+step)?|step-by-step|instructions?|procedure|procedures|guide|guidance)\b.*$"
-    )
-    preserved_joiners = {"and", "or", "from", "using", "with", "by", "via", "through", "into", "in", "on", "for", "to"}
-
-    targets: List[Tuple[str, str]] = []
-    seen = set()
-    for raw_action, canonical_action in action_patterns:
-        for match in re.finditer(rf"\b{re.escape(raw_action)}\b", normalized_question):
-            tail = normalized_question[match.end():].strip()
-            if not tail:
-                continue
-            tail = clause_boundary_pattern.split(tail, maxsplit=1)[0].strip()
-            tail = trailing_procedural_noise_pattern.sub("", tail).strip(" ,-_")
-            raw_tokens = re.findall(r"[a-z0-9_\-]+", tail)
-            object_tokens: List[str] = []
-            for raw_token in raw_tokens:
-                if raw_token in filler_terms:
-                    continue
-                if raw_token in preserved_joiners:
-                    if object_tokens and object_tokens[-1] not in preserved_joiners:
-                        object_tokens.append(raw_token)
-                    continue
-
-                token = _normalize_term(raw_token)
-                if len(token) <= 2 or token in _LEXICAL_STOPWORDS:
-                    continue
-                object_tokens.append(token)
-                if len([item for item in object_tokens if item not in preserved_joiners]) >= 10:
-                    break
-            if not object_tokens:
-                continue
-            while object_tokens and object_tokens[-1] in preserved_joiners:
-                object_tokens.pop()
-            while object_tokens and object_tokens[0] in preserved_joiners:
-                object_tokens.pop(0)
-            object_phrase = " ".join(object_tokens)
-            key = (canonical_action, object_phrase)
-            if key in seen:
-                continue
-            seen.add(key)
-            targets.append(key)
-            if len(targets) >= max_targets:
-                return targets
-    return targets
-
-
-def _split_coordinated_object_phrase(object_phrase: str) -> List[str]:
-    candidate = re.sub(r"\s+", " ", str(object_phrase or "").strip().lower())
-    if not candidate:
-        return []
-
-    qualifier_match = re.search(r"\b(from|using|with|via|through|in|on|for|into)\b.+$", candidate)
-    qualifier = ""
-    base_phrase = candidate
-    if qualifier_match:
-        qualifier = qualifier_match.group(0).strip()
-        base_phrase = candidate[:qualifier_match.start()].strip()
-
-    if not re.search(r"\b(and|or)\b", base_phrase):
-        return [candidate]
-
-    parts = [part.strip(" ,-_") for part in re.split(r"\b(?:and|or)\b", base_phrase) if part.strip(" ,-_")]
-    expanded: List[str] = []
-    seen = set()
-    for part in parts:
-        normalized_part = re.sub(r"\s+", " ", part).strip()
-        if not normalized_part:
-            continue
-        combined = f"{normalized_part} {qualifier}".strip() if qualifier else normalized_part
-        combined = re.sub(r"\s+", " ", combined).strip()
-        if combined and combined not in seen:
-            seen.add(combined)
-            expanded.append(combined)
-
-    return expanded or [candidate]
-
-
-def _extract_procedural_subtasks(question: str, max_subtasks: int = 6) -> List[Tuple[str, str]]:
-    subtasks: List[Tuple[str, str]] = []
-    seen = set()
-    for action, object_phrase in _extract_action_object_targets(question, max_targets=max_subtasks):
-        split_objects = _split_coordinated_object_phrase(object_phrase)
-        for object_part in split_objects:
-            key = (action, object_part)
-            if key in seen:
-                continue
-            seen.add(key)
-            subtasks.append(key)
-            if len(subtasks) >= max_subtasks:
-                return subtasks
-    return subtasks
-
-
-def _split_text_into_relevance_segments(text: str, max_segments: int = 120) -> List[str]:
-    if not text:
-        return []
-    segments = [
-        segment.strip()
-        for segment in re.split(r"[\n\r]+|(?<=[\.;:!?])\s+", str(text or ""))
-        if segment and segment.strip()
-    ]
-    return segments[:max_segments]
-
-
-def _is_generic_procedural_scaffolding_segment(segment: str) -> bool:
-    normalized = re.sub(r"\s+", " ", str(segment or "").strip().lower())
-    if not normalized:
-        return False
-
-    generic_patterns = [
-        r"\bfollow these step by step instructions\b",
-        r"\bby following these steps\b",
-        r"\byou can successfully\b",
-        r"\bthe following steps\b",
-        r"\bhere are the steps\b",
-        r"\bthese steps\b",
-    ]
-    return any(re.search(pattern, normalized) for pattern in generic_patterns)
-
-
-def _subtask_distinguishing_terms(subtasks: List[Tuple[str, str]]) -> Dict[Tuple[str, str], set]:
-    generic_tokens = {
-        "data",
-        "model",
-        "models",
-        "source",
-        "sources",
-        "table",
-        "tables",
-        "field",
-        "fields",
-        "step",
-        "steps",
-    }
-    token_counts: Counter = Counter()
-    token_sets: Dict[Tuple[str, str], set] = {}
-
-    for subtask in subtasks:
-        _, object_phrase = subtask
-        tokens = {token for token in _tokenize_normalized(object_phrase) if token not in generic_tokens}
-        token_sets[subtask] = tokens
-        token_counts.update(tokens)
-
-    distinguishing: Dict[Tuple[str, str], set] = {}
-    for subtask, tokens in token_sets.items():
-        unique_tokens = {token for token in tokens if token_counts[token] == 1}
-        distinguishing[subtask] = unique_tokens or tokens
-
-    return distinguishing
-
-
-def _segment_mentions_multiple_procedural_subtasks(
-    segment: str,
-    distinguishing_terms: Dict[Tuple[str, str], set],
-) -> bool:
-    normalized_tokens = set(_tokenize_normalized(segment))
-    if not normalized_tokens:
-        return False
-
-    matched_subtasks = 0
-    for terms in distinguishing_terms.values():
-        if terms and (terms & normalized_tokens):
-            matched_subtasks += 1
-            if matched_subtasks >= 2:
-                return True
-    return False
-
-
-def _segment_supports_subtask(
-    action: str,
-    object_phrase: str,
-    segment: str,
-    strict: bool = False,
-    distinguishing_terms: Optional[Dict[Tuple[str, str], set]] = None,
-) -> bool:
-    normalized_segment = re.sub(r"\s+", " ", str(segment or "").strip())
-    if not normalized_segment:
-        return False
-
-    subtask_text = f"{action} {object_phrase}".strip()
-    specificity = _procedural_task_specificity_score(subtask_text, normalized_segment)
-    alignment = _procedural_alignment_score(subtask_text, normalized_segment)
-    overlap = _lexical_overlap_ratio(object_phrase, normalized_segment)
-    local_overlap = _best_local_overlap_ratio(object_phrase, normalized_segment)
-    exact_object = re.search(
-        r"\b" + r"\s+".join(re.escape(part) for part in object_phrase.split()) + r"\b",
-        normalized_segment.lower(),
-    ) is not None
-
-    strong_signal = (
-        specificity >= 3.2
-        or (alignment >= 2.2 and max(overlap, local_overlap) >= 0.48)
-        or (exact_object and specificity >= 1.8)
-    )
-    if not strict:
-        return strong_signal or local_overlap >= 0.62
-
-    if _is_generic_procedural_scaffolding_segment(normalized_segment):
-        return False
-    if distinguishing_terms and _segment_mentions_multiple_procedural_subtasks(normalized_segment, distinguishing_terms):
-        return specificity >= 4.2 or (alignment >= 3.0 and exact_object)
-    return strong_signal
-
-
-def _subtask_coverage_details(question: str, text: str, strict: bool = False) -> Dict[str, Any]:
-    subtasks = _extract_procedural_subtasks(question, max_subtasks=6)
-    if not subtasks or not text:
-        return {
-            "subtask_total": len(subtasks),
-            "covered_subtasks": [],
-            "coverage_count": 0,
-            "coverage_ratio": 0.0,
-        }
-
-    combined_text = str(text or "")
-    segments = _split_text_into_relevance_segments(combined_text)
-    distinguishing_terms = _subtask_distinguishing_terms(subtasks) if strict else None
-    covered: List[Tuple[str, str]] = []
-    for action, object_phrase in subtasks:
-        if any(
-            _segment_supports_subtask(
-                action,
-                object_phrase,
-                segment,
-                strict=strict,
-                distinguishing_terms=distinguishing_terms,
-            )
-            for segment in segments
-        ):
-            covered.append((action, object_phrase))
-            continue
-
-        if strict:
-            continue
-
-        score = _procedural_task_specificity_score(f"{action} {object_phrase}", combined_text)
-        overlap = _lexical_overlap_ratio(object_phrase, combined_text)
-        local_overlap = _best_local_overlap_ratio(object_phrase, combined_text)
-        exact_object = re.search(
-            r"\b" + r"\s+".join(re.escape(part) for part in object_phrase.split()) + r"\b",
-            combined_text.lower(),
-        ) is not None
-        if score >= 2.0 or (exact_object and max(overlap, local_overlap) >= 0.28) or local_overlap >= 0.46:
-            covered.append((action, object_phrase))
-
-    coverage_ratio = (len(covered) / max(1, len(subtasks))) if subtasks else 0.0
-    return {
-        "subtask_total": len(subtasks),
-        "covered_subtasks": covered,
-        "coverage_count": len(covered),
-        "coverage_ratio": round(coverage_ratio, 4),
-    }
-
-
-def _subtask_coverage_score(question: str, text: str) -> float:
-    details = _subtask_coverage_details(question, text)
-    subtask_total = int(details.get("subtask_total") or 0)
-    coverage_count = int(details.get("coverage_count") or 0)
-    coverage_ratio = float(details.get("coverage_ratio") or 0.0)
-    if subtask_total <= 1:
-        return 0.0
-    return min(6.0, (coverage_count * 1.8) + (coverage_ratio * 2.6))
-
-
-def _object_phrase_overlap_ratio(left: str, right: str) -> float:
-    left_tokens = set(_tokenize_normalized(left))
-    right_tokens = set(_tokenize_normalized(right))
-    if not left_tokens or not right_tokens:
-        return 0.0
-    return len(left_tokens & right_tokens) / max(1, len(left_tokens))
-
-
-def _best_local_overlap_ratio(question: str, text: str, max_segments: int = 80) -> float:
-    if not question or not text:
-        return 0.0
-
-    segments = [
-        segment.strip()
-        for segment in re.split(r"[\n\r]+|(?<=[\.;:!?])\s+", str(text or ""))
-        if segment and segment.strip()
-    ]
-    best = 0.0
-    for segment in segments[:max_segments]:
-        overlap = _lexical_overlap_ratio(question, segment)
-        if overlap > best:
-            best = overlap
-            if best >= 0.95:
-                break
-    return best
-
-
-def _procedural_alignment_score(question: str, text: str) -> float:
-    if not _question_has_procedural_intent(question) or not text:
-        return 0.0
-
-    targets = _extract_action_object_targets(question)
-    if not targets:
-        return 0.0
-
-    compact_text = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9_\-\s]", " ", str(text or "").lower())).strip()
-    if not compact_text:
-        return 0.0
-
-    filler_group = r"(?:a|an|the|new|another|other|more|additional|existing|selected|target|current)"
-    nominal_forms = {
-        "create": ["create", "creates", "created", "creating", "creation"],
-        "add": ["add", "adds", "added", "adding", "addition"],
-        "configure": ["configure", "configures", "configured", "configuring", "configuration"],
-        "setup": ["setup", "set up", "setting up"],
-        "set up": ["setup", "set up", "setting up"],
-        "edit": ["edit", "edits", "edited", "editing"],
-        "update": ["update", "updates", "updated", "updating"],
-        "delete": ["delete", "deletes", "deleted", "deleting", "deletion"],
-        "remove": ["remove", "removes", "removed", "removing", "removal"],
-        "install": ["install", "installs", "installed", "installing", "installation"],
-        "enable": ["enable", "enables", "enabled", "enabling", "enablement"],
-        "disable": ["disable", "disables", "disabled", "disabling"],
-        "fix": ["fix", "fixes", "fixed", "fixing", "resolution"],
-        "resolve": ["resolve", "resolves", "resolved", "resolving", "resolution"],
-    }
-
-    score = 0.0
-    for action, object_phrase in targets:
-        object_pattern = r"\b" + r"\s+".join(re.escape(part) for part in object_phrase.split()) + r"\b"
-        action_forms = nominal_forms.get(action, [action])
-
-        direct_patterns = [
-            rf"\b{re.escape(action_form)}\b(?:\s+{filler_group}){{0,3}}\s+{object_pattern}"
-            for action_form in action_forms
-        ]
-        nominal_patterns = [
-            rf"{object_pattern}(?:\s+{filler_group}){{0,2}}\s+\b{re.escape(action_form)}\b"
-            for action_form in action_forms
-        ]
-
-        has_direct_alignment = any(re.search(pattern, compact_text) for pattern in direct_patterns)
-        has_nominal_alignment = any(re.search(pattern, compact_text) for pattern in nominal_patterns)
-        object_present = re.search(object_pattern, compact_text) is not None
-
-        if has_direct_alignment:
-            score += 3.2
-            continue
-        if has_nominal_alignment:
-            score += 1.6
-            continue
-        if object_present:
-            score -= 1.4
-
-    return max(-4.0, min(score, 6.0))
-
-
-def _procedural_task_specificity_score(question: str, text: str) -> float:
-    if not _question_has_procedural_intent(question) or not text:
-        return 0.0
-
-    question_targets = _extract_action_object_targets(question, max_targets=5)
-    if not question_targets:
-        return 0.0
-
-    candidate_text = str(text or "")
-    compact_text = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9_\-\s]", " ", candidate_text.lower())).strip()
-    if not compact_text:
-        return 0.0
-
-    candidate_targets = _extract_action_object_targets(candidate_text, max_targets=8)
-    text_tokens = set(_tokenize_normalized(compact_text))
-    score = 0.0
-
-    for action, object_phrase in question_targets:
-        object_tokens = set(_tokenize_normalized(object_phrase))
-        if not object_tokens:
-            continue
-
-        same_action_targets = [candidate_object for candidate_action, candidate_object in candidate_targets if candidate_action == action]
-        best_overlap = 0.0
-        for candidate_object in same_action_targets:
-            best_overlap = max(best_overlap, _object_phrase_overlap_ratio(object_phrase, candidate_object))
-
-        object_coverage = len(object_tokens & text_tokens) / max(1, len(object_tokens))
-        exact_object_pattern = r"\b" + r"\s+".join(re.escape(part) for part in object_phrase.split()) + r"\b"
-        exact_object_match = re.search(exact_object_pattern, compact_text) is not None
-
-        if exact_object_match and best_overlap >= 0.6:
-            score += 4.5
-            continue
-        if best_overlap >= 0.8:
-            score += 3.8
-            continue
-        if best_overlap >= 0.5:
-            score += 1.8
-            continue
-        if object_coverage >= 0.8:
-            score += 1.2
-            continue
-
-        if same_action_targets:
-            score -= 4.2
-            continue
-
-        if len(object_tokens) >= 2 and object_coverage < 0.4:
-            score -= 1.8
-
-    return max(-8.0, min(score, 8.0))
-
-
-def _filter_low_context_source_candidates(question: str, candidates: List[dict], max_sources: int = 6) -> List[dict]:
-    if not candidates:
-        return []
-
-    question_is_procedural = _question_has_procedural_intent(question)
-    has_action_targets = bool(_extract_action_object_targets(question))
-    top_score = max(0.01, float(candidates[0].get("score") or 0.01))
-    top_task_specificity = max(float(candidate.get("task_specificity") or 0.0) for candidate in candidates)
-    filtered: List[dict] = []
-
-    for idx, candidate in enumerate(candidates):
-        if idx == 0:
-            filtered.append(candidate)
-            continue
-
-        score = float(candidate.get("score") or 0.0)
-        overlap_ratio = float(candidate.get("overlap_ratio") or 0.0)
-        title_overlap = float(candidate.get("title_overlap") or 0.0)
-        local_overlap_ratio = float(candidate.get("local_overlap_ratio") or 0.0)
-        phrase_hits = int(candidate.get("phrase_hits") or 0)
-        procedural_alignment = float(candidate.get("procedural_alignment") or 0.0)
-        task_specificity = float(candidate.get("task_specificity") or 0.0)
-
-        should_keep = True
-        if question_is_procedural and has_action_targets:
-            if procedural_alignment <= -0.5 and phrase_hits == 0 and local_overlap_ratio < 0.34 and task_specificity < 0.6:
-                should_keep = False
-            if should_keep and top_task_specificity >= 2.5:
-                if task_specificity < 0.6 and phrase_hits == 0 and title_overlap < 0.18 and local_overlap_ratio < 0.3:
-                    should_keep = False
-            if should_keep:
-                if phrase_hits == 0 and task_specificity < 0.2 and title_overlap < 0.08 and overlap_ratio < 0.12 and local_overlap_ratio < 0.18:
-                    should_keep = False
-        if should_keep and question_is_procedural:
-            if score < (top_score * 0.45) and max(overlap_ratio, title_overlap, local_overlap_ratio) < 0.26 and phrase_hits == 0:
-                should_keep = False
-        elif should_keep:
-            if score < (top_score * 0.35) and max(overlap_ratio, title_overlap, local_overlap_ratio) < 0.16 and phrase_hits == 0:
-                should_keep = False
-
-        if should_keep:
-            filtered.append(candidate)
-        if len(filtered) >= max_sources:
-            break
-
-    return filtered[:max_sources]
-
-
 def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
     """
     Simple, general-purpose lexical score.
@@ -4453,10 +3578,6 @@ def lexical_boost_score(question: str, doc: str, meta: dict) -> float:
     if heading_hits > 0:
         score += min(2.0, heading_hits * 0.8)
 
-    score += _entity_fact_signal_score(question, f"{source}\n{d}")
-    score += _procedural_task_specificity_score(question, f"{source}\n{d}") * 0.45
-    score += _source_solution_preference_adjustment(question, source=source, text=d) * 0.4
-    
     # Source name match
     for tok in q_tokens:
         if tok in source:
@@ -4520,8 +3641,6 @@ def _smart_deduplicate_and_diversify(
         source = meta.get("source", "unknown") if meta else "unknown"
         source_key = source  # Use full source as key
         max_allowed = max_chunks_per_source
-        if _is_priority_document(source, meta):
-            max_allowed = max_chunks_per_source * 3
         
         # Check if we've already included max chunks from this source
         if source_key in source_chunk_count and source_chunk_count[source_key] >= max_allowed:
@@ -4563,8 +3682,8 @@ def _smart_deduplicate_and_diversify(
     
     dedup_docs = [item["doc"] for item in selected_items]
     dedup_metas = [item["meta"] for item in selected_items]
-    dedup_distances = [item["dist"] for item in selected_items if item["dist"] is not None]
-    dedup_ids = [item["id"] for item in selected_items if item["id"] is not None]
+    dedup_distances = [item["dist"] for item in selected_items]
+    dedup_ids = [item["id"] for item in selected_items]
     
     print(f"[DEDUP] After deduplication: {len(dedup_docs)} docs (removed {len(docs) - len(dedup_docs)} duplicates/chunks)")
     return dedup_docs, dedup_metas, dedup_distances, dedup_ids
@@ -4720,7 +3839,7 @@ def _build_fallback_query_variants(question: str) -> List[str]:
         if keyword_query and keyword_query not in variants:
             variants.append(keyword_query)
 
-    return variants[:6]
+    return variants[:3]
 
 
 def _context_confidence_profile(
@@ -4762,49 +3881,6 @@ def _context_confidence_profile(
         "max_overlap": round(max_overlap, 4),
         "is_short": is_short,
     }
-
-
-def _ground_answer_against_context(question: str, context_text: str, draft_answer: str) -> str:
-    """
-    Universal anti-hallucination guard.
-    Rewrites the draft so final output only contains claims supported by provided context.
-    """
-    if not draft_answer:
-        return ""
-    if not OPENAI_API_KEY:
-        return draft_answer
-
-    if not context_text or not context_text.strip():
-        return (
-            "I couldn’t find enough verified information in the current knowledge base context to answer this reliably. "
-            "Please share more specific details or add the relevant documentation so I can answer precisely."
-        )
-
-    grounding_prompt = (
-        "You are a strict grounding and factuality verifier for a RAG assistant.\n\n"
-        "TASK:\n"
-        "Rewrite the draft answer so EVERY factual claim is directly supported by the provided context.\n"
-        "If a claim is not supported, remove it.\n"
-        "If critical details are missing, explicitly say they are not present in the available knowledge context.\n"
-        "If the available context is about adjacent or different topics, do not summarize those topics as if they answer the question.\n"
-        "When no directly relevant procedure or detail is present, say that no directly relevant document was found in the current knowledge context.\n"
-        "Do not invent commands, paths, settings, UI labels, API names, or product behavior.\n"
-        "Do not use outside knowledge.\n"
-        "Keep the response helpful and concise.\n"
-        "Ask at most one focused follow-up question if needed.\n\n"
-        f"QUESTION:\n{question}\n\n"
-        f"CONTEXT:\n{context_text}\n\n"
-        f"DRAFT ANSWER:\n{draft_answer}\n\n"
-        "RETURN ONLY THE FINAL REWRITTEN ANSWER."
-    )
-
-    try:
-        grounded = call_llm(grounding_prompt, temperature=0.0)
-        grounded = (grounded or "").strip()
-        return grounded if grounded else draft_answer
-    except Exception as e:
-        print(f"[API][CHAT][WARN] Grounding verification failed: {e}")
-        return draft_answer
 
 
 def _normalize_history_messages(raw_messages: Optional[List[Dict[str, Any]]]) -> List[Dict[str, str]]:
@@ -5175,155 +4251,6 @@ def _store_conversation_turn(
         }
     except Exception as exc:
         print(f"[API][CHAT][WARN] Failed to persist conversation context/state: {exc}")
-
-
-def _question_requires_specifics(question: str) -> bool:
-    """Detect questions that require explicit, concrete details instead of generic guidance."""
-    if not question:
-        return False
-    q = question.lower()
-    patterns = [
-        r"\bwhich\b",
-        r"\bwhat exact\b",
-        r"\bexactly\b",
-        r"\blist\b",
-        r"\bshow\b",
-        r"\bcolumn(s)?\b",
-        r"\bfield(s)?\b",
-        r"\bheader(s)?\b",
-        r"\bparameter(s)?\b",
-        r"\bproperty|properties\b",
-        r"\bstep(s)?\b",
-        r"\bcommand(s)?\b",
-        r"\bpath(s)?\b",
-        r"\bname(s)?\b",
-        r"\bhow many\b",
-        r"\bcount\b",
-    ]
-    return any(re.search(p, q) for p in patterns)
-
-
-def _enforce_specific_grounded_answer(question: str, context_text: str, answer: str) -> str:
-    """
-    If the question asks for concrete details, force the answer to be explicit and context-grounded.
-    """
-    if not answer or not OPENAI_API_KEY:
-        return answer
-    if not _question_requires_specifics(question):
-        return answer
-
-    prompt = (
-        "You are a strict response quality checker for a RAG assistant.\n\n"
-        "Goal: ensure the final answer is concrete, specific, and grounded in context.\n"
-        "Rules:\n"
-        "1) Keep only details supported by CONTEXT.\n"
-        "2) If user asks for explicit lists (columns/fields/steps/commands/etc), provide explicit bullet list.\n"
-        "2.1) If the context explicitly lists items and the user asks how many, count only those explicit items and state the count plus the item names.\n"
-        "2.2) If the question asks for multiple requested actions, objects, or subtasks, address every requested part that is supported by CONTEXT.\n"
-        "2.3) Never answer only one requested part while ignoring the others. If CONTEXT covers only some parts, explicitly state which parts are covered and which are missing.\n"
-        "3) If exact details are missing in CONTEXT, explicitly say which exact details are missing.\n"
-        "4) Do not output vague placeholders like 'necessary columns' when specifics are available.\n"
-        "5) Never invent values, names, paths, or commands.\n\n"
-        f"QUESTION:\n{question}\n\n"
-        f"CONTEXT:\n{context_text}\n\n"
-        f"CURRENT ANSWER:\n{answer}\n\n"
-        "Return ONLY the improved final answer."
-    )
-    try:
-        improved = call_llm(prompt, temperature=0.0)
-        improved = (improved or "").strip()
-        return improved if improved else answer
-    except Exception as e:
-        print(f"[API][CHAT][WARN] Specificity enforcement failed: {e}")
-        return answer
-
-
-def _format_subtask_label(action: str, object_phrase: str) -> str:
-    return re.sub(r"\s+", " ", f"{action} {object_phrase}").strip()
-
-
-def _llm_ensure_answer_completeness(question: str, context_text: str, answer: str) -> str:
-    """
-    Single LLM pass that checks whether the answer covers ALL parts of the question
-    that are supported by the retrieved context. If not, it rewrites the answer to
-    include the missing parts. This replaces complex heuristic subtask parsing with
-    natural language understanding.
-    """
-    if not answer or not OPENAI_API_KEY or not context_text:
-        return answer
-
-    prompt = (
-        "You are a completeness checker for a grounded RAG assistant.\n\n"
-        "TASK: Check whether the CURRENT ANSWER fully covers every part of the QUESTION "
-        "that is supported by the CONTEXT. If it does, return the answer unchanged. "
-        "If any part of the question is answered by the CONTEXT but missing from the CURRENT ANSWER, "
-        "rewrite the answer to include ALL covered parts with their full details.\n\n"
-        "RULES:\n"
-        "1) If the question asks about multiple actions or objects (e.g., 'create entities AND relations'), "
-        "each one must have its own dedicated section with full step-by-step details from CONTEXT.\n"
-        "2) A passing mention or a single sentence about a topic does NOT count as coverage. "
-        "If CONTEXT has a full procedure section (with steps, fields, SQL, config), include it fully.\n"
-        "3) Keep ONLY details supported by CONTEXT. Do not invent.\n"
-        "4) If CONTEXT does not support some requested part, explicitly say that part is missing.\n"
-        "5) Preserve all correct details already in the CURRENT ANSWER.\n"
-        "6) Return ONLY the final complete answer.\n\n"
-        f"QUESTION:\n{question}\n\n"
-        f"CONTEXT:\n{context_text}\n\n"
-        f"CURRENT ANSWER:\n{answer}\n"
-    )
-    try:
-        improved = call_llm(prompt, temperature=0.0)
-        improved = (improved or "").strip()
-        if improved and len(improved) >= len(answer) * 0.5:
-            return improved
-        return answer
-    except Exception as e:
-        print(f"[API][CHAT][WARN] Completeness check failed: {e}")
-        return answer
-
-
-def _llm_verify_answer_relevance(question: str, context_text: str, answer: str) -> str:
-    """
-    Final LLM gate: verify the answer actually addresses the specific question.
-    If the retrieved documents are about adjacent/related topics but do NOT contain
-    information that directly answers the question, replace the answer with an honest
-    'not found' message instead of fabricating steps from loosely related content.
-    """
-    if not answer or not OPENAI_API_KEY or not context_text:
-        return answer
-
-    prompt = (
-        "You are a strict relevance judge for a RAG assistant.\n\n"
-        "TASK: Decide whether the ANSWER below genuinely answers the specific QUESTION asked, "
-        "using information that is directly present in CONTEXT.\n\n"
-        "CRITERIA FOR REJECTION:\n"
-        "- The answer describes a DIFFERENT procedure or topic than what was asked, even if it is related.\n"
-        "- The answer assembles vaguely related fragments into fabricated steps that are not explicitly described in CONTEXT.\n"
-        "- The CONTEXT contains information about a related but different concept, and the answer pretends it answers the question.\n"
-        "- Key terms from the question do not appear in substantive procedural detail in CONTEXT.\n\n"
-        "CRITERIA FOR ACCEPTANCE:\n"
-        "- The CONTEXT contains a direct explanation, procedure, or factual answer to the specific question.\n"
-        "- The answer accurately reflects what CONTEXT says about the specific topic asked.\n\n"
-        "OUTPUT:\n"
-        "- If the answer is RELEVANT and accurate: return it UNCHANGED.\n"
-        "- If the answer is NOT genuinely answering the question: return a helpful message that says:\n"
-        "  1) The current knowledge base does not contain a direct answer to this specific question.\n"
-        "  2) Briefly mention what related topics WERE found (1-2 sentences max).\n"
-        "  3) Suggest the user add the relevant documentation or rephrase their question.\n\n"
-        f"QUESTION:\n{question}\n\n"
-        f"CONTEXT:\n{context_text[:6000]}\n\n"
-        f"ANSWER:\n{answer}\n\n"
-        "Return ONLY the final answer text."
-    )
-    try:
-        result = call_llm(prompt, temperature=0.0)
-        result = (result or "").strip()
-        if result:
-            return result
-        return answer
-    except Exception as e:
-        print(f"[API][CHAT][WARN] Relevance verification failed: {e}")
-        return answer
 
 
 def _looks_like_noncode_fenced_block(language: str, content: str) -> bool:
@@ -5750,16 +4677,20 @@ def _fit_prompt_to_model_budget(
     combined_context: str,
     foundational_instruction: str = "",
     ta9_instruction: str = "",
-) -> Tuple[str, str]:
-    prompt = _build_system_prompt(
+) -> Tuple[str, str, str]:
+    """Return (system_message, user_message, trimmed_context)."""
+    def _total_tokens(sys_msg: str, usr_msg: str) -> int:
+        return _estimate_text_tokens(sys_msg) + _estimate_text_tokens(usr_msg)
+
+    system_msg, user_msg = _build_system_prompt(
         question=question,
         combined_context=combined_context,
         foundational_instruction=foundational_instruction,
         ta9_instruction=ta9_instruction,
     )
-    prompt_tokens = _estimate_text_tokens(prompt)
+    prompt_tokens = _total_tokens(system_msg, user_msg)
     if prompt_tokens <= LLM_MAX_INPUT_TOKENS:
-        return prompt, combined_context
+        return system_msg, user_msg, combined_context
 
     context_tokens = _estimate_text_tokens(combined_context)
     overflow_tokens = prompt_tokens - LLM_MAX_INPUT_TOKENS
@@ -5769,14 +4700,14 @@ def _fit_prompt_to_model_budget(
         target_context_tokens,
         "combined context for final LLM input",
     )
-    prompt = _build_system_prompt(
+    system_msg, user_msg = _build_system_prompt(
         question=question,
         combined_context=trimmed_context,
         foundational_instruction=foundational_instruction,
         ta9_instruction=ta9_instruction,
     )
 
-    second_pass_tokens = _estimate_text_tokens(prompt)
+    second_pass_tokens = _total_tokens(system_msg, user_msg)
     if second_pass_tokens > LLM_MAX_INPUT_TOKENS:
         second_overflow = second_pass_tokens - LLM_MAX_INPUT_TOKENS
         second_budget = max(2000, target_context_tokens - second_overflow - 1024)
@@ -5785,14 +4716,14 @@ def _fit_prompt_to_model_budget(
             second_budget,
             "combined context for final LLM input",
         )
-        prompt = _build_system_prompt(
+        system_msg, user_msg = _build_system_prompt(
             question=question,
             combined_context=trimmed_context,
             foundational_instruction=foundational_instruction,
             ta9_instruction=ta9_instruction,
         )
 
-    final_prompt_tokens = _estimate_text_tokens(prompt)
+    final_prompt_tokens = _total_tokens(system_msg, user_msg)
     if final_prompt_tokens > LLM_MAX_INPUT_TOKENS:
         print(
             f"[API][CHAT][WARN] Prompt is still larger than the model budget after trimming: "
@@ -5802,7 +4733,7 @@ def _fit_prompt_to_model_budget(
         print(
             f"[API][CHAT] Prompt fitted to model budget: tokens={final_prompt_tokens} budget={LLM_MAX_INPUT_TOKENS}"
         )
-    return prompt, trimmed_context
+    return system_msg, user_msg, trimmed_context
 
 
 def _estimate_rows_token_count(rows: List[dict]) -> int:
@@ -6114,52 +5045,6 @@ def _resolve_collection_name_from_meta(meta: Optional[dict]) -> str:
     return COLLECTION_NAME
 
 
-def _count_procedural_markers(text: str) -> int:
-    candidate = str(text or "")
-    if not candidate:
-        return 0
-
-    markers = 0
-    if re.search(r"(?mi)^\s*step\s*\d+", candidate):
-        markers += 3
-    if re.search(r"(?mi)^\s*\d+\.\s+", candidate):
-        markers += 2
-    if re.search(r"(?i)\b(step-by-step|procedure|instructions?|configure|configuration|setup|set up)\b", candidate):
-        markers += 1
-    return markers
-
-
-def _count_exact_phrase_hits(question: str, text: str) -> int:
-    if not question or not text:
-        return 0
-    lowered_text = str(text or "").lower()
-    hits = 0
-    for phrase in _extract_key_phrases(question, max_phrases=8):
-        if phrase and phrase in lowered_text:
-            hits += 1
-    normalized_question = _normalize_compact_text(question)
-    normalized_text = _normalize_compact_text(text)
-    if normalized_question and normalized_text and normalized_question in normalized_text:
-        hits += 3
-    return hits
-
-
-def _is_priority_document(source: str, meta: Optional[dict] = None) -> bool:
-    """Check if a document is a priority document that should be boosted in search."""
-    if meta and str(meta.get("priority", "")).strip().lower() == "user_upload":
-        return True
-    return str(source or "").lower().startswith("user:content:")
-
-
-def _is_generic_source_title(title: str, source: str = "") -> bool:
-    candidate = f"{title} {source}".lower()
-    generic_markers = [
-        "user guide", "user-guide", "manual", "overview", "general", "introduction",
-        "getting started", "guide", "documentation",
-    ]
-    return any(marker in candidate for marker in generic_markers)
-
-
 def _build_source_context_candidates(
     question: str,
     docs: List[str],
@@ -6168,9 +5053,11 @@ def _build_source_context_candidates(
     ids: Optional[List[str]] = None,
     max_sources: int = 6,
 ) -> List[dict]:
+    """Group retrieved chunks by source document and rank sources by relevance."""
     if not docs:
         return []
 
+    # --- Phase 1: group chunks by (collection, source) ---
     grouped: Dict[Tuple[str, str], dict] = {}
     for idx, (doc, meta) in enumerate(zip(docs, metas)):
         safe_meta = meta or {}
@@ -6195,6 +5082,8 @@ def _build_source_context_candidates(
                 "chunk_signal_scores": [],
                 "seed_meta": safe_meta,
                 "matched_chunk_ids": [],
+                "matched_chunk_indices": [],
+                "primary_matched_chunk_index": None,
             },
         )
         entry["chunk_signal_scores"].append(chunk_score + overlap_score + position_bonus + distance_bonus)
@@ -6202,135 +5091,84 @@ def _build_source_context_candidates(
             entry["best_distance"] = distance
         if ids is not None and idx < len(ids) and ids[idx] is not None:
             entry["matched_chunk_ids"].append(ids[idx])
+        chunk_idx = safe_meta.get("chunk")
+        if chunk_idx is not None:
+            normalized_chunk_idx = int(chunk_idx)
+            entry["matched_chunk_indices"].append(normalized_chunk_idx)
+            if entry["primary_matched_chunk_index"] is None:
+                entry["primary_matched_chunk_index"] = normalized_chunk_idx
 
     if not grouped:
         return []
 
-    question_is_procedural = _question_has_procedural_intent(question)
-    entity_fact_intent = _question_has_entity_fact_intent(question)
-    broad_coverage_intent = _question_requests_broad_coverage(question)
+    # --- Phase 2: preliminary rank by chunk signals, keep top candidates ---
     prelim_ranked = sorted(
         grouped.values(),
         key=lambda item: (
             -sum(sorted(item["chunk_signal_scores"], reverse=True)[:3]),
             (item["best_distance"] if item["best_distance"] is not None else 999.0),
         ),
-    )[: max(max_sources * 2, 8)]
+    )[: max_sources + 2]
 
-    source_candidates: List[dict] = []
-    for entry in prelim_ranked:
+    # --- Phase 3: load full content in parallel and compute source-level score ---
+    def _load_source_rows(entry):
         try:
             rows = _get_sorted_document_rows(entry["collection_name"], entry["source"], include_embeddings=False)
         except Exception as exc:
-            print(
-                f"[SOURCE_RERANK][WARN] Failed to load source={entry['source']} "
-                f"collection={entry['collection_name']}: {exc}"
-            )
-            continue
+            print(f"[SOURCE_RERANK][WARN] Failed to load source={entry['source']}: {exc}")
+            return entry, None
+        return entry, rows
 
+    with ThreadPoolExecutor(max_workers=min(len(prelim_ranked), 6)) as pool:
+        loaded = list(pool.map(_load_source_rows, prelim_ranked))
+
+    source_candidates: List[dict] = []
+    for entry, rows in loaded:
         if not rows:
             continue
 
         full_content = _merge_chunk_texts([row["content"] for row in rows])
-        excerpt_limit = 3200 if broad_coverage_intent else (2600 if question_is_procedural else 1800)
-        if _is_priority_document(entry["source"], entry.get("seed_meta")):
-            excerpt_limit = max(excerpt_limit, 4000)
-        excerpt = _merge_chunk_texts([row["content"] for row in rows], max_chars=excerpt_limit)
-        seed_meta = rows[0]["metadata"] or entry["seed_meta"]
+        # For scoring, use only matched chunks (not full doc) so large docs aren't diluted
+        matched_ids_set = set(entry.get("matched_chunk_ids") or [])
+        matched_rows = [r for r in rows if r["id"] in matched_ids_set] if matched_ids_set else rows[:5]
+        matched_text = _merge_chunk_texts([r["content"] for r in matched_rows], max_chars=12000)
+        excerpt = _merge_chunk_texts([r["content"] for r in matched_rows], max_chars=8000) if matched_rows else _merge_chunk_texts([row["content"] for row in rows], max_chars=8000)
+        title = _build_document_title(entry["source"], rows[0]["content"] if rows else "")
+
         top_chunk_signals = sorted(entry.get("chunk_signal_scores") or [0.0], reverse=True)[:3]
         chunk_signal_strength = sum(top_chunk_signals)
-        if entity_fact_intent:
-            chunk_signal_strength = min(chunk_signal_strength, 7.5)
-        overlap_ratio = _lexical_overlap_ratio(question, full_content)
-        local_overlap_ratio = _best_local_overlap_ratio(question, full_content)
-        lexical_score = lexical_boost_score(question, full_content, seed_meta)
-        title = _build_document_title(entry["source"], rows[0]["content"] if rows else "")
-        entity_fact_bonus = _entity_fact_signal_score(question, f"{title}\n{full_content}")
-        broad_coverage_bonus = _broad_coverage_signal_score(question, f"{title}\n{full_content}")
-        procedural_alignment = _procedural_alignment_score(question, f"{title}\n{full_content}")
-        procedural_markers = _count_procedural_markers(full_content)
-        procedural_bonus = min(4.0, procedural_markers * 0.8) if question_is_procedural else 0.0
+        # Use matched chunks for overlap — full_content dilutes relevance on large docs
+        overlap_ratio = _lexical_overlap_ratio(question, matched_text)
         title_overlap = _lexical_overlap_ratio(question, title)
         source_overlap = _lexical_overlap_ratio(question, entry["source"])
-        phrase_hits = _count_exact_phrase_hits(question, f"{title}\n{full_content}")
-        coverage_details = _subtask_coverage_details(question, f"{title}\n{full_content}")
-        subtask_coverage_bonus = _subtask_coverage_score(question, f"{title}\n{full_content}")
-        is_priority = _is_priority_document(entry["source"], entry.get("seed_meta"))
-        chunk_count_penalty = min(6.0, math.log(max(1, len(rows)), 2) * 0.9) if len(rows) > 8 else 0.0
-        if is_priority:
-            chunk_count_penalty = min(chunk_count_penalty, 1.0)
-        if entity_fact_intent and len(rows) > 4:
-            chunk_count_penalty += min(3.5, math.log(max(1, len(rows)), 2) * 0.9)
-            if is_priority:
-                chunk_count_penalty = min(chunk_count_penalty, 1.5)
-        generic_penalty = 4.5 if question_is_procedural and _is_generic_source_title(title, entry["source"]) and not is_priority else 0.0
-        priority_boost = 6.0 if is_priority else 0.0
-        compact_fact_bonus = 1.5 if entity_fact_intent and len(rows) <= 3 and entity_fact_bonus > 0 else 0.0
-        task_specificity = _procedural_task_specificity_score(question, f"{title}\n{full_content}")
-        solution_channel = _classify_source_solution_channel(title=title, source=entry["source"], text=full_content)
-        solution_channel_bias = _source_solution_preference_adjustment(
-            question,
-            title=title,
-            source=entry["source"],
-            text=full_content,
-        )
+        lexical_score = lexical_boost_score(question, matched_text, rows[0].get("metadata") or entry["seed_meta"])
+
+        # Mild penalty for very large docs — capped at 2.0 so big docs aren't unfairly suppressed
+        chunk_count_penalty = min(2.0, math.log(max(1, len(rows)), 2) * 0.3) if len(rows) > 20 else 0.0
+
         source_score = (
             chunk_signal_strength
             + lexical_score
-            + entity_fact_bonus
-            + broad_coverage_bonus
-            + compact_fact_bonus
             + (overlap_ratio * 8.0)
-            + (local_overlap_ratio * 6.5)
             + (title_overlap * 5.0)
             + (source_overlap * 4.0)
-            + procedural_bonus
-            + procedural_alignment
-            + task_specificity
-            + (phrase_hits * 1.5)
-            + subtask_coverage_bonus
-            + solution_channel_bias
-            + priority_boost
             - chunk_count_penalty
-            - generic_penalty
         )
 
-        source_candidates.append(
-            {
-                "collection_name": entry["collection_name"],
-                "source": entry["source"],
-                "title": title,
-                "full_content": full_content,
-                "excerpt": excerpt,
-                "chunk_count": len(rows),
-                "best_distance": entry["best_distance"],
-                "score": round(source_score, 4),
-                "source_overlap": round(source_overlap, 4),
-                "overlap_ratio": round(overlap_ratio, 4),
-                "local_overlap_ratio": round(local_overlap_ratio, 4),
-                "title_overlap": round(title_overlap, 4),
-                "phrase_hits": phrase_hits,
-                "covered_subtasks": list(coverage_details.get("covered_subtasks") or []),
-                "subtask_total": int(coverage_details.get("subtask_total") or 0),
-                "subtask_coverage_count": int(coverage_details.get("coverage_count") or 0),
-                "subtask_coverage_ratio": float(coverage_details.get("coverage_ratio") or 0.0),
-                "subtask_coverage_bonus": round(subtask_coverage_bonus, 4),
-                "procedural_markers": procedural_markers,
-                "procedural_alignment": round(procedural_alignment, 4),
-                "task_specificity": round(task_specificity, 4),
-                "lexical_score": round(lexical_score, 4),
-                "entity_fact_bonus": round(entity_fact_bonus, 4),
-                "broad_coverage_bonus": round(broad_coverage_bonus, 4),
-                "chunk_signal_strength": round(chunk_signal_strength, 4),
-                "chunk_count_penalty": round(chunk_count_penalty, 4),
-                "generic_penalty": generic_penalty,
-                "priority_boost": priority_boost,
-                "is_priority": is_priority,
-                "solution_channel": solution_channel,
-                "solution_channel_bias": round(solution_channel_bias, 4),
-                "matched_chunk_ids": entry["matched_chunk_ids"],
-            }
-        )
+        source_candidates.append({
+            "collection_name": entry["collection_name"],
+            "source": entry["source"],
+            "title": title,
+            "full_content": full_content,
+            "matched_text": matched_text,
+            "excerpt": excerpt,
+            "chunk_count": len(rows),
+            "best_distance": entry["best_distance"],
+            "score": round(source_score, 4),
+            "matched_chunk_ids": entry["matched_chunk_ids"],
+            "matched_chunk_indices": sorted(set(entry.get("matched_chunk_indices") or [])),
+            "primary_matched_chunk_index": entry.get("primary_matched_chunk_index"),
+        })
 
     source_candidates.sort(
         key=lambda item: (
@@ -6347,311 +5185,7 @@ def _build_source_context_candidates(
             f"collection={candidate['collection_name']} source={candidate['source']} chunks={candidate['chunk_count']}"
         )
 
-    return _filter_low_context_source_candidates(question, source_candidates, max_sources=max_sources)
-
-
-def _build_global_lexical_source_candidates(question: str, max_sources: int = 6) -> List[dict]:
-    if not question:
-        return []
-
-    question_is_procedural = _question_has_procedural_intent(question)
-    entity_fact_intent = _question_has_entity_fact_intent(question)
-    broad_coverage_intent = _question_requests_broad_coverage(question)
-    collected: List[dict] = []
-    for collection_name in sorted((COLLECTION_NAME, MEMORY_COLLECTION_NAME)):
-        try:
-            target_collection = _get_vector_collection(collection_name)
-            raw = target_collection.get(include=["documents", "metadatas"])
-        except Exception as exc:
-            print(f"[LEXICAL_RESCUE][WARN] Failed to load collection={collection_name}: {exc}")
-            continue
-
-        docs = list(raw.get("documents", []) or [])
-        metas = list(raw.get("metadatas", []) or [])
-        grouped: Dict[str, List[dict]] = {}
-        for doc_text, meta in zip(docs, metas):
-            safe_meta = meta or {}
-            source = str(safe_meta.get("source") or "").strip()
-            if not source or not doc_text:
-                continue
-            grouped.setdefault(source, []).append(
-                {
-                    "content": doc_text,
-                    "chunk": int(safe_meta.get("chunk", 0) or 0),
-                    "metadata": safe_meta,
-                }
-            )
-
-        for source, rows in grouped.items():
-            sorted_rows = sorted(rows, key=lambda item: item["chunk"])
-            excerpt = _merge_chunk_texts([row["content"] for row in sorted_rows], max_chars=3200)
-            if not excerpt:
-                continue
-            title = _build_document_title(source, sorted_rows[0]["content"] if sorted_rows else "")
-            title_overlap = _lexical_overlap_ratio(question, title)
-            excerpt_overlap = _lexical_overlap_ratio(question, excerpt)
-            local_overlap_ratio = _best_local_overlap_ratio(question, excerpt)
-            source_overlap = _lexical_overlap_ratio(question, source)
-            lexical_score = lexical_boost_score(question, f"{title}\n{excerpt}", sorted_rows[0]["metadata"])
-            entity_fact_bonus = _entity_fact_signal_score(question, f"{title}\n{excerpt}")
-            broad_coverage_bonus = _broad_coverage_signal_score(question, f"{title}\n{excerpt}")
-            procedural_alignment = _procedural_alignment_score(question, f"{title}\n{excerpt}")
-            phrase_hits = _count_exact_phrase_hits(question, f"{title}\n{excerpt}")
-            procedural_markers = _count_procedural_markers(excerpt)
-            procedural_bonus = min(4.0, procedural_markers * 0.8) if question_is_procedural else 0.0
-            coverage_details = _subtask_coverage_details(question, f"{title}\n{excerpt}")
-            subtask_coverage_bonus = _subtask_coverage_score(question, f"{title}\n{excerpt}")
-            chunk_count_penalty = min(6.0, math.log(max(1, len(sorted_rows)), 2) * 0.9) if len(sorted_rows) > 8 else 0.0
-            if entity_fact_intent and len(sorted_rows) > 4:
-                chunk_count_penalty += min(3.5, math.log(max(1, len(sorted_rows)), 2) * 0.9)
-            generic_penalty = 4.5 if question_is_procedural and _is_generic_source_title(title, source) else 0.0
-            compact_fact_bonus = 1.5 if entity_fact_intent and len(sorted_rows) <= 3 and entity_fact_bonus > 0 else 0.0
-            task_specificity = _procedural_task_specificity_score(question, f"{title}\n{excerpt}")
-            solution_channel = _classify_source_solution_channel(title=title, source=source, text=excerpt)
-            solution_channel_bias = _source_solution_preference_adjustment(
-                question,
-                title=title,
-                source=source,
-                text=excerpt,
-            )
-            score = (
-                lexical_score
-                + entity_fact_bonus
-                + broad_coverage_bonus
-                + compact_fact_bonus
-                + (title_overlap * 7.0)
-                + (excerpt_overlap * 8.5)
-                + (local_overlap_ratio * 6.0)
-                + (source_overlap * 4.0)
-                + (phrase_hits * 1.3)
-                + procedural_bonus
-                + procedural_alignment
-                + task_specificity
-                + subtask_coverage_bonus
-                + solution_channel_bias
-                - chunk_count_penalty
-                - generic_penalty
-            )
-            if score <= 0:
-                continue
-
-            collected.append(
-                {
-                    "collection_name": collection_name,
-                    "source": source,
-                    "title": title,
-                    "excerpt": excerpt,
-                    "full_content": excerpt,
-                    "chunk_count": len(sorted_rows),
-                    "best_distance": None,
-                    "score": round(score, 4),
-                    "source_overlap": round(source_overlap, 4),
-                    "overlap_ratio": round(excerpt_overlap, 4),
-                    "local_overlap_ratio": round(local_overlap_ratio, 4),
-                    "title_overlap": round(title_overlap, 4),
-                    "phrase_hits": phrase_hits,
-                    "covered_subtasks": list(coverage_details.get("covered_subtasks") or []),
-                    "subtask_total": int(coverage_details.get("subtask_total") or 0),
-                    "subtask_coverage_count": int(coverage_details.get("coverage_count") or 0),
-                    "subtask_coverage_ratio": float(coverage_details.get("coverage_ratio") or 0.0),
-                    "subtask_coverage_bonus": round(subtask_coverage_bonus, 4),
-                    "procedural_markers": procedural_markers,
-                    "procedural_alignment": round(procedural_alignment, 4),
-                    "task_specificity": round(task_specificity, 4),
-                    "lexical_score": round(lexical_score, 4),
-                    "entity_fact_bonus": round(entity_fact_bonus, 4),
-                    "broad_coverage_bonus": round(broad_coverage_bonus, 4),
-                    "chunk_count_penalty": round(chunk_count_penalty, 4),
-                    "generic_penalty": generic_penalty,
-                    "solution_channel": solution_channel,
-                    "solution_channel_bias": round(solution_channel_bias, 4),
-                    "matched_chunk_ids": [],
-                    "origin": "lexical_rescue",
-                }
-            )
-
-    collected.sort(key=lambda item: (-item["score"], item["title"].lower()))
-    print("[LEXICAL_RESCUE] Top source candidates:")
-    for candidate in collected[:10]:
-        print(
-            f"[LEXICAL_RESCUE] score={candidate['score']:.2f} collection={candidate['collection_name']} "
-            f"source={candidate['source']} chunks={candidate['chunk_count']}"
-        )
-    return _filter_low_context_source_candidates(question, collected, max_sources=max_sources)
-
-
-def _merge_source_candidate_lists(*candidate_lists: List[dict], max_sources: int = 6) -> List[dict]:
-    merged: Dict[Tuple[str, str], dict] = {}
-    for candidate_list in candidate_lists:
-        for candidate in candidate_list or []:
-            key = (candidate.get("collection_name"), candidate.get("source"))
-            if not key[0] or not key[1]:
-                continue
-            existing = merged.get(key)
-            if existing is None:
-                merged[key] = dict(candidate)
-                continue
-
-            existing["score"] = round(float(existing.get("score") or 0.0) + float(candidate.get("score") or 0.0), 4)
-            if existing.get("best_distance") is None and candidate.get("best_distance") is not None:
-                existing["best_distance"] = candidate.get("best_distance")
-            elif existing.get("best_distance") is not None and candidate.get("best_distance") is not None:
-                existing["best_distance"] = min(float(existing.get("best_distance")), float(candidate.get("best_distance")))
-
-            if len(str(candidate.get("full_content") or "")) > len(str(existing.get("full_content") or "")):
-                existing["full_content"] = candidate.get("full_content")
-            if len(str(candidate.get("excerpt") or "")) > len(str(existing.get("excerpt") or "")):
-                existing["excerpt"] = candidate.get("excerpt")
-
-            for field_name in ("overlap_ratio", "local_overlap_ratio", "title_overlap", "source_overlap", "procedural_alignment"):
-                existing[field_name] = max(float(existing.get(field_name) or 0.0), float(candidate.get(field_name) or 0.0))
-            existing["phrase_hits"] = max(int(existing.get("phrase_hits") or 0), int(candidate.get("phrase_hits") or 0))
-            existing["procedural_markers"] = max(int(existing.get("procedural_markers") or 0), int(candidate.get("procedural_markers") or 0))
-            existing["task_specificity"] = max(float(existing.get("task_specificity") or 0.0), float(candidate.get("task_specificity") or 0.0))
-            existing["subtask_total"] = max(int(existing.get("subtask_total") or 0), int(candidate.get("subtask_total") or 0))
-            existing["subtask_coverage_count"] = max(
-                int(existing.get("subtask_coverage_count") or 0),
-                int(candidate.get("subtask_coverage_count") or 0),
-            )
-            existing["subtask_coverage_ratio"] = max(
-                float(existing.get("subtask_coverage_ratio") or 0.0),
-                float(candidate.get("subtask_coverage_ratio") or 0.0),
-            )
-            existing["subtask_coverage_bonus"] = max(
-                float(existing.get("subtask_coverage_bonus") or 0.0),
-                float(candidate.get("subtask_coverage_bonus") or 0.0),
-            )
-            merged_subtasks = list(existing.get("covered_subtasks") or [])
-            for subtask in list(candidate.get("covered_subtasks") or []):
-                if subtask not in merged_subtasks:
-                    merged_subtasks.append(subtask)
-            existing["covered_subtasks"] = merged_subtasks
-
-            existing_ids = list(existing.get("matched_chunk_ids") or [])
-            for chunk_id in list(candidate.get("matched_chunk_ids") or []):
-                if chunk_id not in existing_ids:
-                    existing_ids.append(chunk_id)
-            existing["matched_chunk_ids"] = existing_ids
-
-            origins = set(filter(None, [existing.get("origin"), candidate.get("origin")]))
-            existing["origin"] = ",".join(sorted(origins)) if origins else existing.get("origin")
-
-    ranked = sorted(
-        merged.values(),
-        key=lambda item: (
-            -float(item.get("score") or 0.0),
-            (item.get("best_distance") if item.get("best_distance") is not None else 999.0),
-            str(item.get("title") or "").lower(),
-        ),
-    )
-    return ranked[:max_sources]
-
-
-def _llm_select_source_candidates(question: str, candidates: List[dict], max_sources: int = 4) -> List[dict]:
-    if not OPENAI_API_KEY or len(candidates) <= 1:
-        return candidates[:max_sources]
-
-    shortlist = candidates[: min(6, len(candidates))]
-    broad_coverage_intent = _question_requests_broad_coverage(question)
-    preferred_channel = _preferred_solution_channel(question)
-    requested_subtasks = _extract_procedural_subtasks(question, max_subtasks=6)
-    candidate_lines: List[str] = []
-    for idx, candidate in enumerate(shortlist, start=1):
-        covered_subtask_labels = [
-            _format_subtask_label(action, object_phrase)
-            for action, object_phrase in list(candidate.get("covered_subtasks") or [])
-        ]
-        candidate_lines.append(
-            f"Candidate {idx}:\n"
-            f"Collection: {candidate.get('collection_name')}\n"
-            f"Title: {candidate.get('title')}\n"
-            f"Source: {candidate.get('source')}\n"
-            f"Inferred channel: {candidate.get('solution_channel') or _classify_source_solution_channel(title=str(candidate.get('title') or ''), source=str(candidate.get('source') or ''), text=str(candidate.get('excerpt') or ''))}\n"
-            f"Task specificity: {candidate.get('task_specificity')}\n"
-            f"Covered subtasks: {', '.join(covered_subtask_labels) if covered_subtask_labels else 'none detected'}\n"
-            f"Chunks: {candidate.get('chunk_count')}\n"
-            f"Heuristic score: {candidate.get('score')}\n"
-            f"Excerpt:\n{str(candidate.get('excerpt') or '')[:2200]}"
-        )
-
-    candidates_block = "\n\n".join(candidate_lines)
-
-    selector_prompt = (
-        "You are a retrieval ranking specialist for a RAG system.\n"
-        "Pick the document candidates that best answer the user question.\n"
-        "Prefer candidates that directly contain the exact procedure, exact configuration steps, exact field names, or exact command/config examples asked for.\n"
-        "Exact task match is more important than source style preference. Never replace the asked task with an adjacent task that shares some words.\n"
-        "For naming, company/product identity, alias, or count/list questions, prefer candidates that explicitly define or enumerate those facts, even if they are shorter than broad manuals.\n"
-        "Reject adjacent-task candidates that share vocabulary with the question but answer a different action, object, target, or scope.\n"
-        "If two candidates are about related topics, prefer the one whose concrete task intent most closely matches the user question.\n"
-        "De-prioritize broad overview or generic admin guides when a narrower exact guide exists.\n"
-    )
-    if preferred_channel == "admin_studio":
-        selector_prompt += (
-            "For TA9/IntSight procedural guidance, prefer Admin Studio or UI-based candidates by default. "
-            "Choose database/SQL/table-level candidates only if the user explicitly requested database guidance.\n"
-        )
-    elif preferred_channel == "database":
-        selector_prompt += (
-            "The user explicitly requested database or SQL guidance. Prefer database/table-level candidates over Admin Studio/UI candidates.\n"
-        )
-    if broad_coverage_intent:
-        selector_prompt += (
-            "When the user asks for more ways, alternatives, other options, supported methods, or broader coverage, "
-            "keep multiple distinct candidates that cover different valid approaches. Do not collapse to a single "
-            "candidate unless the rest are duplicates.\n"
-        )
-    if len(requested_subtasks) > 1:
-        selector_prompt += (
-            "This is a compound procedural question with multiple requested subtasks. "
-            "Keep the combination of candidates that jointly covers all requested subtasks whenever the candidates support them. "
-            "Do not prefer a single broad or aggregated document if it only clearly covers one subtask while another candidate covers a missing subtask directly.\n"
-            "De-prioritize huge aggregated user-knowledge dumps when narrower task-specific procedure documents exist.\n"
-        )
-    selector_prompt += (
-        "Return strict JSON with this shape only: {\"ordered_candidates\":[1,2],\"reason\":\"short reason\"}.\n\n"
-        f"Question:\n{question}\n\n"
-        + (
-            "Requested subtasks:\n- "
-            + "\n- ".join(_format_subtask_label(action, object_phrase) for action, object_phrase in requested_subtasks)
-            + "\n\n"
-            if requested_subtasks
-            else ""
-        )
-        +
-        f"Candidates:\n\n{candidates_block}\n"
-    )
-
-    try:
-        verdict_text = call_llm(selector_prompt, temperature=0.0, model=OPENAI_RERANK_MODEL)
-        try:
-            parsed = json.loads(verdict_text)
-        except json.JSONDecodeError:
-            json_match = re.search(r"\{[\s\S]*\}", verdict_text)
-            if not json_match:
-                raise
-            parsed = json.loads(json_match.group(0))
-        ordered = parsed.get("ordered_candidates") or []
-        ranked: List[dict] = []
-        seen = set()
-        for raw_idx in ordered:
-            try:
-                candidate_index = int(raw_idx) - 1
-            except Exception:
-                continue
-            if 0 <= candidate_index < len(shortlist) and candidate_index not in seen:
-                ranked.append(shortlist[candidate_index])
-                seen.add(candidate_index)
-            if len(ranked) >= max_sources:
-                break
-        if ranked:
-            ranked.extend([item for idx, item in enumerate(shortlist) if idx not in seen])
-            print(f"[LLM_RERANK] Applied LLM source ordering reason={parsed.get('reason', '')}")
-            return ranked[:max_sources]
-    except Exception as exc:
-        print(f"[LLM_RERANK][WARN] Failed to rerank source candidates: {exc}")
-
-    return shortlist[:max_sources]
+    return source_candidates[:max_sources]
 
 
 # ---------------------------------------------------------------------
@@ -6670,6 +5204,8 @@ class ChatRequest(BaseModel):
     is_followup: Optional[bool] = False
     # File uploads with content
     files: Optional[List[Dict[str, str]]] = None  # List of {name, type, data} where data is base64
+    # Enable SSE streaming for the LLM response
+    stream: Optional[bool] = False
 
 
 class KnowledgeAddRequest(BaseModel):
@@ -6686,12 +5222,7 @@ class KnowledgeCancelRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     sources: List[str]
-
-
-class IngestResponse(BaseModel):
-    added_chunks: int
-    total_chunks: int
-    message: Optional[str] = None
+    source_details: Optional[List[dict]] = None
 
 
 class VectorDbDocumentUpdateRequest(BaseModel):
@@ -6703,6 +5234,13 @@ class VectorDbDocumentUpdateRequest(BaseModel):
 class VectorDbDocumentDeleteRequest(BaseModel):
     collection_name: str
     source: str
+
+
+class VectorDbChunkUpdateRequest(BaseModel):
+    collection_name: str
+    source: str
+    chunk_index: int
+    content: str
 
 
 class SystemPromptUpdateRequest(BaseModel):
@@ -6852,6 +5390,98 @@ def vector_db_chunk_embedding(collection_name: str, chunk_id: str):
     }
 
 
+@app.get("/vector-db/chunk")
+def vector_db_get_chunk(collection_name: str, source: str, chunk_index: int):
+    """Return the text of a single chunk by collection, source, and chunk index."""
+    target_collection = _get_vector_collection(collection_name)
+    raw = target_collection.get(
+        where={"source": source},
+        include=["documents", "metadatas"],
+    )
+    ids = list(raw.get("ids", []) or [])
+    docs = list(raw.get("documents", []) or [])
+    metas = list(raw.get("metadatas", []) or [])
+
+    for idx, (doc_id, doc_text, meta) in enumerate(zip(ids, docs, metas)):
+        safe_meta = meta or {}
+        if int(safe_meta.get("chunk", -1)) == chunk_index:
+            return {
+                "id": doc_id,
+                "chunk_index": chunk_index,
+                "content": doc_text or "",
+                "collection_name": collection_name,
+                "source": source,
+            }
+
+    raise HTTPException(status_code=404, detail=f"Chunk {chunk_index} not found")
+
+
+@app.put("/vector-db/chunk")
+def vector_db_update_chunk(req: VectorDbChunkUpdateRequest):
+    """Update a single chunk: replace its text and re-embed it in place."""
+    new_content = (req.content or "").strip()
+    if not new_content:
+        raise HTTPException(status_code=400, detail="Chunk content cannot be empty")
+
+    target_collection = _get_vector_collection(req.collection_name)
+    raw = target_collection.get(
+        where={"source": req.source},
+        include=["documents", "metadatas"],
+    )
+    ids = list(raw.get("ids", []) or [])
+    metas = list(raw.get("metadatas", []) or [])
+
+    old_id = None
+    old_meta = None
+    for idx, (doc_id, meta) in enumerate(zip(ids, metas)):
+        safe_meta = meta or {}
+        if int(safe_meta.get("chunk", -1)) == req.chunk_index:
+            old_id = doc_id
+            old_meta = dict(safe_meta)
+            break
+
+    if old_id is None:
+        raise HTTPException(status_code=404, detail=f"Chunk {req.chunk_index} not found")
+
+    new_embedding = embed_text(new_content)
+    new_id = str(uuid.uuid4())
+    new_meta = dict(old_meta)
+    new_meta["edited_at"] = datetime.utcnow().isoformat() + "Z"
+    if new_content.startswith(TABLE_ROW_START_TAG):
+        new_meta["chunk_type"] = "table_row"
+        new_meta.update(extract_table_row_metadata(new_content))
+    else:
+        new_meta["chunk_type"] = "text"
+
+    try:
+        target_collection.add(
+            ids=[new_id],
+            documents=[new_content],
+            metadatas=[new_meta],
+            embeddings=[new_embedding],
+        )
+        target_collection.delete(ids=[old_id])
+        invalidate_collection_cache(req.collection_name)
+    except Exception as exc:
+        try:
+            target_collection.delete(ids=[new_id])
+        except Exception:
+            pass
+        print(f"[API][VECTOR_DB][ERROR] chunk update failed: {exc}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to update chunk: {exc}")
+
+    _invalidate_cached_vector_document_payload(req.collection_name, req.source)
+
+    return {
+        "message": "Chunk updated and re-embedded successfully.",
+        "id": new_id,
+        "chunk_index": req.chunk_index,
+        "source": req.source,
+        "collection_name": req.collection_name,
+    }
+
+
 @app.put("/vector-db/document")
 def vector_db_update_document(req: VectorDbDocumentUpdateRequest):
     target_collection = _get_vector_collection(req.collection_name)
@@ -6875,6 +5505,7 @@ def vector_db_update_document(req: VectorDbDocumentUpdateRequest):
             embeddings=new_embeddings,
         )
         target_collection.delete(ids=existing_ids)
+        invalidate_collection_cache(req.collection_name)
     except Exception as exc:
         try:
             target_collection.delete(ids=new_ids)
@@ -6911,6 +5542,7 @@ def vector_db_delete_document(req: VectorDbDocumentDeleteRequest):
 
     try:
         target_collection.delete(ids=existing_ids)
+        invalidate_collection_cache(req.collection_name)
     except Exception as exc:
         print(f"[API][VECTOR_DB][ERROR] delete failed: {exc}")
         traceback.print_exc()
@@ -7190,6 +5822,7 @@ def _knowledge_add_process(req: KnowledgeAddRequest, request_id: Optional[str]) 
         return {"approved": False, "message": "Failed to embed any chunks"}
 
     memory_collection.add(ids=ids, documents=docs, metadatas=metas, embeddings=embeds)
+    invalidate_collection_cache(MEMORY_COLLECTION_NAME)
     _ingest_log(f"knowledge_add complete chunks_added={len(ids)}", request_id, force=True)
     return {
         "approved": True,
@@ -7458,64 +6091,12 @@ def inspect_vectors(source_pattern: str = "ado:learn:", limit: int = 10):
 
 
 # ---------------------------------------------------------------------
-# Compare and Ingest Endpoint
-# ---------------------------------------------------------------------
-
-@app.post("/compare_and_ingest", response_model=IngestResponse)
-def compare_and_ingest(async_run: bool = False, background_tasks: BackgroundTasks = None):
-    """
-    Compare wiki files to the vector DB and ingest only missing ones.
-    Safe to call manually (curl) or via the scheduler.
-    """
-    # Optional background mode to avoid long-running request timeouts
-    if async_run:
-        print("[API][COMPARE_INGEST] async_run=True → scheduling background task")
-
-        def _bg_job():
-            try:
-                a, t = compare_and_ingest_internal()
-                print(f"[API][COMPARE_INGEST][ASYNC] DONE: api worked properly (added_chunks={a}, total_chunks={t})")
-            except Exception as e:
-                print(f"[API][COMPARE_INGEST][ASYNC][ERROR] {e}")
-                traceback.print_exc()
-
-        if background_tasks is not None:
-            background_tasks.add_task(_bg_job)
-        else:
-            # Fallback if BackgroundTasks not provided
-            asyncio.create_task(asyncio.to_thread(_bg_job))
-        # We can't know counts yet; return immediate acknowledgement
-        try:
-            current_total = collection.count()
-        except Exception:
-            current_total = 0
-        print("[API][COMPARE_INGEST] async ok: api worked! background task scheduled; responding immediately")
-        return IngestResponse(
-            added_chunks=0,
-            total_chunks=current_total,
-            message="api worked! compare_and_ingest started in background; check logs for progress",
-        )
-
-    try:
-        added, total = compare_and_ingest_internal()
-        if added == 0:
-            msg = "No new files to ingest. All wiki files are already in the vector database."
-        else:
-            msg = f"Successfully ingested {added} new chunks from wiki files."
-        print(f"[API][COMPARE_INGEST] success: api worked properly (added_chunks={added}, total_chunks={total})")
-        return IngestResponse(added_chunks=added, total_chunks=total, message=msg)
-    except Exception as exc:
-        print(f"[API][COMPARE_INGEST][ERROR] {exc}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-# ---------------------------------------------------------------------
 # Chat Endpoint
 # ---------------------------------------------------------------------
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat")
 def chat(req: ChatRequest):
+    _chat_t0 = time.time()
     print(f"[API][CHAT] /chat called question='{req.question[:200]}' top_k={req.top_k} force_reingest={req.force_reingest} files={len(req.files) if req.files else 0}")
     question = (req.question or "").strip()
     resolved_question = question
@@ -7529,11 +6110,66 @@ def chat(req: ChatRequest):
         conversation_store[conversation_key] = dq
     stored_history = list(conversation_store.get(conversation_key, deque()))
     conversation_state = dict(conversation_state_store.get(conversation_key) or {})
-    history_resolution = _resolve_question_with_history(
-        question,
-        stored_history,
-        explicit_is_followup=bool(req.is_followup),
-    )
+
+    # --- Run history resolution, file processing, and ticket fetching in parallel ---
+    _parallel_history_result = [None]
+    _parallel_file_context = [""]
+    _parallel_ticket_text = [None]
+    _parallel_ticket_id = [None]
+    _parallel_ticket_key = [None]
+
+    def _run_history_resolution():
+        _parallel_history_result[0] = _resolve_question_with_history(
+            question,
+            stored_history,
+            explicit_is_followup=bool(req.is_followup),
+        )
+
+    def _run_file_processing():
+        if req.files:
+            _rag_log_step(2, total_rag_steps, "Processing user-uploaded files", f"count={len(req.files)}")
+            try:
+                ctx = build_file_context(req.files, describe_image_func=_describe_image_via_vision)
+                if ctx:
+                    print(f"[API][CHAT] Extracted file context: {len(ctx)} characters")
+                    _parallel_file_context[0] = ctx
+            except Exception as e:
+                print(f"[API][CHAT][WARN] File processing failed: {e}")
+        else:
+            _rag_log_step(2, total_rag_steps, "Processing user-uploaded files", "no files were attached")
+
+    def _run_ticket_fetch():
+        if req.ticket_url:
+            _rag_log_step(3, total_rag_steps, "Loading selected ticket context", req.ticket_url)
+            _parallel_ticket_key[0] = (req.ticket_url or "").strip() or None
+            tid = ado_parse_id_from_url(req.ticket_url)
+            if tid is not None:
+                _parallel_ticket_id[0] = tid
+                _parallel_ticket_key[0] = str(tid)
+                print(f"[API][CHAT] Fetching Azure DevOps ticket id={tid}")
+                try:
+                    _parallel_ticket_text[0] = ado_fetch_ticket_text(int(tid), skip_image_analysis=True)
+                except Exception as e:
+                    print(f"[API][CHAT][WARN] failed to fetch ticket: {e}")
+        else:
+            _rag_log_step(3, total_rag_steps, "Loading selected ticket context", "no ticket selected")
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [
+            executor.submit(_run_history_resolution),
+            executor.submit(_run_file_processing),
+            executor.submit(_run_ticket_fetch),
+        ]
+        for f in futures:
+            f.result()  # wait for all to complete
+
+    print(f"[API][CHAT][TIMING] Parallel phase took {time.time() - _chat_t0:.2f}s")
+    history_resolution = _parallel_history_result[0] or {}
+    file_context = _parallel_file_context[0]
+    selected_ticket_id = _parallel_ticket_id[0]
+    selected_ticket_text = _parallel_ticket_text[0]
+    ticket_key = _parallel_ticket_key[0]
+
     use_history_context = bool(history_resolution.get("use_history"))
     resolved_question = str(history_resolution.get("resolved_question") or question).strip() or question
     history_context = _format_history_for_prompt(stored_history, max_messages=8) if use_history_context else ""
@@ -7549,39 +6185,6 @@ def chat(req: ChatRequest):
     retrieval_question = resolved_question if use_history_context else question
     if retrieval_question != question:
         print(f"[API][CHAT] Resolved follow-up question for retrieval: '{retrieval_question[:240]}'")
-
-    # Process uploaded files early to include their content in context
-    file_context = ""
-    if req.files:
-        _rag_log_step(2, total_rag_steps, "Processing user-uploaded files", f"count={len(req.files)}")
-        try:
-            file_context = build_file_context(req.files, describe_image_func=_describe_image_via_vision)
-            if file_context:
-                print(f"[API][CHAT] Extracted file context: {len(file_context)} characters")
-        except Exception as e:
-            print(f"[API][CHAT][WARN] File processing failed: {e}")
-            file_context = ""
-    else:
-        _rag_log_step(2, total_rag_steps, "Processing user-uploaded files", "no files were attached")
-
-    # Parse ticket selection early so we can allow an empty initial message to trigger the first structured reply
-    selected_ticket_id: Optional[int] = None
-    selected_ticket_text: Optional[str] = None
-    ticket_key: Optional[str] = None
-    if req.ticket_url:
-        _rag_log_step(3, total_rag_steps, "Loading selected ticket context", req.ticket_url)
-        ticket_key = (req.ticket_url or "").strip() or None
-        selected_ticket_id = ado_parse_id_from_url(req.ticket_url)
-        if selected_ticket_id is not None:
-            ticket_key = str(selected_ticket_id)
-            print(f"[API][CHAT] Fetching Azure DevOps ticket id={selected_ticket_id}")
-            try:
-                selected_ticket_text = ado_fetch_ticket_text(int(selected_ticket_id))
-            except Exception as e:
-                print(f"[API][CHAT][WARN] failed to fetch ticket: {e}")
-                selected_ticket_text = None
-    else:
-        _rag_log_step(3, total_rag_steps, "Loading selected ticket context", "no ticket selected")
 
     has_ticket = bool(ticket_key)
 
@@ -7640,13 +6243,14 @@ def chat(req: ChatRequest):
             f"Resolved question for retrieval:\n{retrieval_question}"
         )
         query_variants = [history_seed] + query_variants
-        query_variants = query_variants[:4]
+        query_variants = query_variants[:3]
     ticket_context_hint = None
     if selected_ticket_text:
         # Keep a short hint to enrich similarity search without overwhelming the question
         ticket_context_hint = (selected_ticket_text[:800] or "").strip()
 
     primary_emb = None
+    ticket_aware_emb = None
     agg_ids: List[str] = []
     agg_distances: List[float] = []
     agg_docs: List[str] = []
@@ -7654,9 +6258,21 @@ def chat(req: ChatRequest):
 
     try:
         _rag_log_step(5, total_rag_steps, "Running vector retrieval", f"query_variants={len(query_variants)}")
-        for idx, qv in enumerate(query_variants):
-            augmented_qv = augment_question(qv)
-            q_emb = embed_text(augmented_qv)
+        # Batch-embed all query variants (+ ticket-aware query if applicable) in a single API call
+        augmented_variants = [augment_question(qv) for qv in query_variants]
+        _ticket_aware_idx = None
+        if ticket_context_hint:
+            similar_query = retrieval_question + "\n\nRelated ticket context:\n" + ticket_context_hint
+            if history_context:
+                similar_query += "\n\nRecent conversation:\n" + history_context
+            _ticket_aware_idx = len(augmented_variants)
+            augmented_variants.append(similar_query)
+        all_variant_embeddings = embed_texts_batch(augmented_variants)
+        if _ticket_aware_idx is not None:
+            ticket_aware_emb = all_variant_embeddings[_ticket_aware_idx]
+            all_variant_embeddings = all_variant_embeddings[:_ticket_aware_idx]
+
+        for idx, q_emb in enumerate(all_variant_embeddings):
             if idx == 0:
                 primary_emb = q_emb
                 # Log a short preview of the query embedding used for vector search
@@ -7679,7 +6295,7 @@ def chat(req: ChatRequest):
                 results = col.query(
                     query_embeddings=[q_emb],
                     n_results=per_query_k,
-                    include=["distances", "documents", "metadatas", "embeddings"],
+                    include=["distances", "documents", "metadatas"],
                 )
 
                 ids = results.get("ids", [[]])[0]
@@ -7690,8 +6306,7 @@ def chat(req: ChatRequest):
                 normalized_metas = []
                 for meta in metas or []:
                     meta = meta or {}
-                    if "collection" not in meta:
-                        meta = {**meta, "collection": col_label}
+                    meta = {**meta, "collection": col_label}
                     normalized_metas.append(meta)
 
                 agg_ids.extend(ids or [])
@@ -7708,62 +6323,10 @@ def chat(req: ChatRequest):
     docs = agg_docs
     metas = agg_metas
 
-    # Dedicated priority-document search: ensure the best-matching chunks from
-    # priority documents (e.g. User Guide) are always in the candidate pool.
-    if primary_emb:
-        try:
-            _priority_sources = set()
-            for _m in metas:
-                if _m and _is_priority_document(str(_m.get("source", "")), _m):
-                    _priority_sources.add(str(_m.get("source", "")))
-            # Also scan a small sample to discover priority sources not yet in results
-            _sample = collection.get(limit=200, include=["metadatas"])
-            for _m in (_sample.get("metadatas") or []):
-                if _m and _is_priority_document(str(_m.get("source", "")), _m):
-                    _priority_sources.add(str(_m.get("source", "")))
-
-            existing_ids = set(ids)
-            for _ps in _priority_sources:
-                if not _ps:
-                    continue
-                for _col, _cl in ((collection, "wiki"), (memory_collection, "user_knowledge")):
-                    try:
-                        pr = _col.query(
-                            query_embeddings=[primary_emb],
-                            n_results=30,
-                            where={"source": _ps},
-                            include=["distances", "documents", "metadatas"],
-                        )
-                        pr_ids = pr.get("ids", [[]])[0]
-                        pr_dists = pr.get("distances", [[]])[0]
-                        pr_docs = pr.get("documents", [[]])[0]
-                        pr_metas = pr.get("metadatas", [[]])[0]
-                        added = 0
-                        for _i, _id in enumerate(pr_ids or []):
-                            if _id not in existing_ids:
-                                ids.append(_id)
-                                distances.append(pr_dists[_i])
-                                docs.append(pr_docs[_i])
-                                _pm = pr_metas[_i] or {}
-                                if "collection" not in _pm:
-                                    _pm = {**_pm, "collection": _cl}
-                                metas.append(_pm)
-                                existing_ids.add(_id)
-                                added += 1
-                        if added:
-                            print(f"[API][CHAT] Priority search: added {added} chunks from {_ps} via {_cl}")
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"[API][CHAT][WARN] Priority document search failed: {e}")
-
     # Secondary search: ticket-aware similarity without overriding the question
-    if ticket_context_hint:
+    if ticket_aware_emb is not None:
         try:
-            similar_query = retrieval_question + "\n\nRelated ticket context:\n" + ticket_context_hint
-            if history_context:
-                similar_query += "\n\nRecent conversation:\n" + history_context
-            sim_emb = embed_text(similar_query)
+            sim_emb = ticket_aware_emb
             for col, col_label in ((memory_collection, "user_knowledge"), (collection, "wiki")):
                 sim_results = col.query(
                     query_embeddings=[sim_emb],
@@ -7778,8 +6341,7 @@ def chat(req: ChatRequest):
                 normalized_metas = []
                 for meta in sim_metas or []:
                     meta = meta or {}
-                    if "collection" not in meta:
-                        meta = {**meta, "collection": col_label}
+                    meta = {**meta, "collection": col_label}
                     normalized_metas.append(meta)
 
                 if sim_docs:
@@ -7816,14 +6378,17 @@ def chat(req: ChatRequest):
         )
         mem_docs = mem.get("documents", [[]])[0]
         mem_metas = mem.get("metadatas", [[]])[0]
+        mem_distances = mem.get("distances", [[]])[0]
+        mem_ids = mem.get("ids", [[]])[0]
         if mem_docs:
             print(f"[API][CHAT] Collected {len(mem_docs)} memory docs for context candidates")
-            for d, m in zip(mem_docs, mem_metas):
+            for i, (d, m) in enumerate(zip(mem_docs, mem_metas)):
                 meta = m or {"source": "memory", "chunk": 0}
-                if "collection" not in meta:
-                    meta = {**meta, "collection": "user_knowledge"}
+                meta = {**meta, "collection": "user_knowledge"}
                 docs.append(d)
                 metas.append(meta)
+                distances.append(mem_distances[i] if i < len(mem_distances) else None)
+                ids.append(mem_ids[i] if i < len(mem_ids) else None)
     except Exception as e:
         print(f"[API][CHAT][WARN] memory query failed: {e}")
 
@@ -7836,10 +6401,9 @@ def chat(req: ChatRequest):
             f"confidence={initial_profile['confidence']} variants={len(fallback_variants)}"
         )
         try:
-            for variant in fallback_variants:
-                if not variant.strip():
-                    continue
-                fv_emb = embed_text(variant)
+            valid_variants = [v for v in fallback_variants if v.strip()]
+            fallback_embeddings = embed_texts_batch(valid_variants) if valid_variants else []
+            for fv_emb in fallback_embeddings:
                 for col, col_label in ((memory_collection, "user_knowledge"), (collection, "wiki")):
                     fv_results = col.query(
                         query_embeddings=[fv_emb],
@@ -7854,8 +6418,7 @@ def chat(req: ChatRequest):
                     normalized_metas = []
                     for meta in fv_metas or []:
                         meta = meta or {}
-                        if "collection" not in meta:
-                            meta = {**meta, "collection": col_label}
+                        meta = {**meta, "collection": col_label}
                         normalized_metas.append(meta)
 
                     if fv_docs:
@@ -7889,6 +6452,7 @@ def chat(req: ChatRequest):
         return ChatResponse(answer=answer, sources=[])
 
     docs, metas, distances, ids = rerank_results(retrieval_question, docs, metas, distances=distances, ids=ids)
+    print(f"[API][CHAT][TIMING] Retrieval+rerank done at {time.time() - _chat_t0:.2f}s")
     _rag_log_step(6, total_rag_steps, "Ranking and consolidating sources", f"candidate_docs={len(docs)}")
     question_is_procedural = _question_has_procedural_intent(retrieval_question)
     entity_fact_intent = _question_has_entity_fact_intent(retrieval_question)
@@ -7909,112 +6473,22 @@ def chat(req: ChatRequest):
 
     context_blocks: List[str] = []
     source_strings: List[str] = []
+    source_detail_list: List[dict] = []
     source_candidates = _build_source_context_candidates(
         retrieval_question,
         docs,
         metas,
         distances=distances,
         ids=ids,
-        max_sources=6 if broad_coverage_intent else 5,
+        max_sources=5 if has_ticket else (10 if broad_coverage_intent else 8),
     )
 
-    # Source-level lexical rescue helps when the exact guide is present in the collection
-    # but was not ranked high enough by embeddings alone.
-    should_run_lexical_rescue = (
-        question_is_procedural
-        or final_profile["confidence"] < 0.68
-        or final_profile["max_overlap"] < 0.32
-    )
-    if should_run_lexical_rescue:
-        lexical_candidates = _build_global_lexical_source_candidates(
-            retrieval_question,
-            max_sources=7 if broad_coverage_intent else (6 if question_is_procedural else 4),
-        )
-        source_candidates = _merge_source_candidate_lists(
-            source_candidates,
-            lexical_candidates,
-            max_sources=7 if broad_coverage_intent else (6 if question_is_procedural else 5),
-        )
-        source_candidates = _filter_low_context_source_candidates(
-            question,
-            source_candidates,
-            max_sources=7 if broad_coverage_intent else (6 if question_is_procedural else 5),
-        )
-
-    should_run_llm_rerank = (
-        len(source_candidates) > 1
-        and (question_is_procedural or final_profile["confidence"] < 0.8)
-    )
-    if should_run_llm_rerank:
-        source_candidates = _llm_select_source_candidates(
-            retrieval_question,
-            source_candidates,
-            max_sources=6 if broad_coverage_intent else 5,
-        )
-        source_candidates = _filter_low_context_source_candidates(
-            question,
-            source_candidates,
-            max_sources=6 if broad_coverage_intent else 5,
-        )
-
-    # Let the LLM reranking decide source order; give every selected source full content
-    MAX_CONTEXT_SOURCES = 6 if broad_coverage_intent else 5
-    print(f"[API][CHAT] Building context with MAX_CONTEXT_SOURCES={MAX_CONTEXT_SOURCES}")
-
-    # Guaranteed priority-document context: always query the largest priority document
-    # (User Guide) and inject the most relevant chunks as a mandatory context block.
-    _priority_context_block = None
-    _priority_source_str = None
-    _priority_already_in_candidates = False
-    if primary_emb:
-        try:
-            # Find the largest priority document source in the Intsight collection
-            _pri_source_counts: Dict[str, int] = {}
-            _all_metas = collection.get(include=["metadatas"]).get("metadatas", [])
-            for _pm in _all_metas:
-                if _pm and _is_priority_document(str(_pm.get("source", "")), _pm):
-                    _src = str(_pm.get("source", ""))
-                    _pri_source_counts[_src] = _pri_source_counts.get(_src, 0) + 1
-
-            # Pick the largest priority doc (User Guide = 1655 chunks)
-            _target_source = max(_pri_source_counts, key=_pri_source_counts.get) if _pri_source_counts else None
-
-            if _target_source:
-                _priority_already_in_candidates = any(
-                    c.get("source") == _target_source for c in source_candidates
-                )
-                # Query best-matching chunks from the User Guide
-                pr = collection.query(
-                    query_embeddings=[primary_emb],
-                    n_results=50,
-                    where={"source": _target_source},
-                    include=["distances", "documents", "metadatas"],
-                )
-                pr_docs = pr.get("documents", [[]])[0]
-                pr_dists = pr.get("distances", [[]])[0]
-                if pr_docs:
-                    paired = sorted(zip(pr_dists, pr_docs), key=lambda x: x[0])
-                    best_chunks = [doc for _, doc in paired[:25]]
-                    best_dist = paired[0][0] if paired else None
-                    priority_content = _merge_chunk_texts(best_chunks, max_chars=16000)
-                    if priority_content.strip():
-                        chunk_count = _pri_source_counts[_target_source]
-                        _priority_source_str = (
-                            f"Intsight::{_target_source} "
-                            f"({chunk_count} chunks, best_dist={best_dist})"
-                        )
-                        _priority_context_block = (
-                            f"PRIORITY REFERENCE: {_priority_source_str}\n"
-                            f"Title: User Guide (Priority Document)\n"
-                            f"{priority_content}"
-                        )
-                        print(
-                            f"[API][CHAT] Priority doc injection: source={_target_source} "
-                            f"chunks_queried=50 used=25 chars={len(priority_content)} "
-                            f"best_dist={best_dist} already_in_candidates={_priority_already_in_candidates}"
-                        )
-        except Exception as e:
-            print(f"[API][CHAT][WARN] Priority context injection failed: {e}")
+    # More sources but cap content per source to stay within 15s response budget
+    if has_ticket:
+        MAX_CONTEXT_SOURCES = 5
+    else:
+        MAX_CONTEXT_SOURCES = 8
+    print(f"[API][CHAT] Building context with MAX_CONTEXT_SOURCES={MAX_CONTEXT_SOURCES} has_ticket={has_ticket}")
 
     if source_candidates:
         remaining_slots = MAX_CONTEXT_SOURCES - (1 if selected_ticket_text else 0)
@@ -8026,14 +6500,23 @@ def chat(req: ChatRequest):
                 f"({candidate['chunk_count']} chunks, best_dist={candidate['best_distance']})"
             )
             source_strings.append(src)
+            source_detail_list.append({
+                "collection_name": candidate["collection_name"],
+                "source": candidate["source"],
+                "chunk_count": candidate["chunk_count"],
+                "best_distance": candidate["best_distance"],
+                "matched_chunks": candidate.get("matched_chunk_indices") or [],
+                "primary_matched_chunk": candidate.get("primary_matched_chunk_index"),
+            })
             snippet = candidate["excerpt"][:200].replace("\n", " ")
-            # Give EVERY source its full content so the LLM can extract all relevant parts
-            # Priority documents get a larger context window
-            max_content_chars = 12000 if candidate.get("is_priority") else 8000
-            candidate_content = _merge_chunk_texts(
-                [str(candidate.get("full_content") or candidate.get("excerpt") or "")],
-                max_chars=max_content_chars,
-            )
+            # Cap content per source to keep total prompt small → fast LLM response
+            if has_ticket:
+                max_content_chars = 4000
+            else:
+                max_content_chars = 10000
+            # Use matched_text (full matched chunks) instead of excerpt for richer context
+            raw_content = str(candidate.get("matched_text") or candidate.get("excerpt") or candidate.get("full_content") or "")
+            candidate_content = raw_content[:max_content_chars] if len(raw_content) > max_content_chars else raw_content
             print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
             context_blocks.append(
                 f"=== {match_label}: {src} ===\n"
@@ -8054,26 +6537,12 @@ def chat(req: ChatRequest):
             print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
             context_blocks.append(f"Source: {src}\n{doc}")
 
-    # Inject priority document context block — always first, always present
-    if _priority_context_block:
-        # If the priority doc was already selected as a regular source, remove it
-        # to avoid duplication — the priority block has richer content
-        if _priority_already_in_candidates and _priority_source_str:
-            _pri_src_key = _priority_source_str.split("::")[1].split(" (")[0] if "::" in _priority_source_str else ""
-            context_blocks = [
-                b for b in context_blocks
-                if _pri_src_key not in b[:200]
-            ]
-            source_strings = [s for s in source_strings if _pri_src_key not in s]
-        context_blocks.insert(0, _priority_context_block)
-        if _priority_source_str:
-            source_strings.insert(0, _priority_source_str)
-
     if selected_ticket_text:
+        # Include full ticket content — _fit_prompt_to_model_budget will truncate if needed
         src = f"azure-devops:{selected_ticket_id} (selected ticket)"
         source_strings.append(src)
         snippet = selected_ticket_text[:200].replace("\n", " ")
-        print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...'")
+        print(f"[API][CHAT] Context source: {src} | snippet='{snippet}...' | ticket_chars={len(selected_ticket_text)}")
         context_blocks.append(f"Source: {src}\n{selected_ticket_text}")
 
     context_text = "\n\n---\n\n".join(context_blocks)
@@ -8214,21 +6683,61 @@ def chat(req: ChatRequest):
         f"context_chars={len(combined_context)} context_tokens={combined_context_tokens}",
     )
 
-    prompt, combined_context = _fit_prompt_to_model_budget(
+    system_msg, user_msg, combined_context = _fit_prompt_to_model_budget(
         question=question,
         combined_context=combined_context,
         foundational_instruction=foundational_instruction,
         ta9_instruction=ta9_instruction,
     )
+    prompt_chars = len(system_msg) + len(user_msg)
 
     try:
+        print(f"[API][CHAT][TIMING] Pre-LLM at {time.time() - _chat_t0:.2f}s | prompt_chars={prompt_chars}")
         _rag_log_step(
             8,
             total_rag_steps,
             "Generating grounded answer",
-            f"prompt_chars={len(prompt)} prompt_tokens={_estimate_text_tokens(prompt)}",
+            f"prompt_chars={prompt_chars} prompt_tokens={_estimate_text_tokens(system_msg) + _estimate_text_tokens(user_msg)}",
         )
-        draft_answer = call_llm(prompt, temperature=0.2)
+
+        # --- Streaming path ---
+        if req.stream:
+            def _stream_generator():
+                # Send sources first
+                yield f"data: {json.dumps({'type': 'sources', 'sources': source_strings, 'source_details': source_detail_list})}\n\n"
+                # Stream LLM chunks
+                full_answer_parts = []
+                try:
+                    for chunk_text_part in call_llm_stream(user_msg, temperature=0.2, max_tokens=1000, system_message=system_msg):
+                        full_answer_parts.append(chunk_text_part)
+                        yield f"data: {json.dumps({'type': 'chunk', 'content': chunk_text_part})}\n\n"
+                except Exception as stream_exc:
+                    yield f"data: {json.dumps({'type': 'error', 'content': str(stream_exc)})}\n\n"
+                    return
+                # Signal done
+                full_answer = "".join(full_answer_parts)
+                answer = _normalize_noncode_fenced_blocks(full_answer)
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                # Post-processing (conversation store, teach) in background
+                _store_conversation_turn(
+                    conversation_key,
+                    question,
+                    answer,
+                    sources=source_strings,
+                    selected_ticket_id=selected_ticket_id,
+                    selected_ticket_url=req.ticket_url,
+                    used_selected_ticket=bool(selected_ticket_text),
+                    used_file_context=bool(file_context),
+                )
+                print(f"[API][CHAT] Stream complete len={len(answer)} | total_time={time.time() - _chat_t0:.2f}s")
+            return StreamingResponse(
+                _stream_generator(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        # --- Non-streaming path ---
+        draft_answer = call_llm(user_msg, temperature=0.2, max_tokens=1000, system_message=system_msg)
         # NOTE: Removed 4 post-processing LLM calls that were degrading answers:
         # _ground_answer_against_context — was stripping valid content and saying "not found"
         # _enforce_specific_grounded_answer — redundant with system prompt rules
@@ -8278,8 +6787,8 @@ def chat(req: ChatRequest):
         except Exception as e:
             print(f"[API][CHAT][WARN] Failed to store memory: {e}")
 
-    print(f"[API][CHAT] Returning answer len={len(answer)} with {len(source_strings)} sources")
-    return ChatResponse(answer=answer, sources=source_strings)
+    print(f"[API][CHAT] Returning answer len={len(answer)} with {len(source_strings)} sources | total_time={time.time() - _chat_t0:.2f}s")
+    return ChatResponse(answer=answer, sources=source_strings, source_details=source_detail_list)
 
 
 # ---------------------------------------------------------------------

@@ -87,6 +87,7 @@
     .logo {
       height: 50px;
       width: auto;
+      cursor: pointer;
     }
 
     .title {
@@ -2313,6 +2314,15 @@
       background: rgba(255, 255, 255, 0.88);
     }
 
+    .answer-source-item.chunk-editor-open {
+      border-color: #0c3d6b;
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
+      border-bottom: none;
+      background: #f0f6ff;
+      box-shadow: 0 -2px 8px rgba(12, 61, 107, 0.08);
+    }
+
     .answer-source-item.clickable {
       width: 100%;
       text-align: left;
@@ -2344,6 +2354,50 @@
       word-break: break-word;
     }
 
+    .answer-source-chunk-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      margin-top: 6px;
+      padding-top: 7px;
+      border-top: 1px solid #e3ecf5;
+    }
+
+    .answer-source-chunk-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: #5b6878;
+      margin-right: 2px;
+    }
+
+    .answer-source-chunk-btn {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #0c3d6b;
+      background: #e8f0fc;
+      border: 1px solid #c6d9f0;
+      border-radius: 14px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, transform 0.12s;
+      line-height: 18px;
+    }
+
+    .answer-source-chunk-btn:hover {
+      background: #d0e2f8;
+      border-color: #0c3d6b;
+      transform: translateY(-1px);
+    }
+
+    .answer-source-chunk-btn.active {
+      background: #0c3d6b;
+      color: #ffffff;
+      border-color: #0c3d6b;
+    }
+
     .sources ul {
       list-style: none;
       margin-top: 6px;
@@ -2353,6 +2407,109 @@
       gap: 4px;
       font-size: 13px;
       color: #42546a;
+    }
+
+    .inline-chunk-editor-wrap {
+      margin-top: 0;
+      border: 1px solid #0c3d6b;
+      border-top: none;
+      border-radius: 0 0 12px 12px;
+      background: #ffffff;
+      overflow: hidden;
+      box-shadow: 0 6px 20px rgba(12, 61, 107, 0.13);
+    }
+
+    .inline-chunk-editor-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 14px;
+      background: #e8f0fc;
+      border-bottom: 1px solid #d0e2f8;
+      gap: 10px;
+    }
+
+    .inline-chunk-editor-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #17314d;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .inline-chunk-editor-actions {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .inline-chunk-editor-btn {
+      padding: 5px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid #cbd5e0;
+      background: #ffffff;
+      color: #2d3748;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    .inline-chunk-editor-btn:hover {
+      background: #edf2f7;
+      border-color: #a0aec0;
+    }
+
+    .inline-chunk-editor-btn.primary {
+      background: #0c3d6b;
+      color: #ffffff;
+      border-color: #0c3d6b;
+    }
+
+    .inline-chunk-editor-btn.primary:hover {
+      background: #0a345c;
+    }
+
+    .inline-chunk-editor-btn:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+
+    .inline-chunk-editor-textarea {
+      width: 100%;
+      min-height: 340px;
+      max-height: 70vh;
+      padding: 16px;
+      border: none;
+      outline: none;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 13px;
+      line-height: 1.7;
+      color: #1f2d3d;
+      background: #ffffff;
+      box-sizing: border-box;
+    }
+
+    .inline-chunk-editor-status {
+      padding: 6px 14px;
+      font-size: 12px;
+      color: #5b6878;
+      background: #f7fafd;
+      border-top: 1px solid #e8eef5;
+    }
+
+    .inline-chunk-editor-status.saving {
+      color: #0c3d6b;
+    }
+
+    .inline-chunk-editor-status.saved {
+      color: #2e7d32;
+    }
+
+    .inline-chunk-editor-status.error {
+      color: #c62828;
     }
 
     .ask-form {
@@ -3226,6 +3383,24 @@
       box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.08);
       position: relative;
       z-index: 2;
+      color: transparent;
+      caret-color: #1f2d3d;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .vector-document-editor.editing.vector-large-document {
+      background: #ffffff;
+      color: #1f2d3d;
+      -webkit-text-fill-color: #1f2d3d;
+    }
+
+    .vector-document-editor.editing.vector-large-document::selection {
+      background: rgba(118, 199, 86, 0.35);
+      color: #1f2d3d;
+    }
+
+    .vector-document-editor.editing.vector-large-document::-moz-selection {
+      background: rgba(118, 199, 86, 0.35);
       color: #1f2d3d;
     }
 
@@ -3236,23 +3411,39 @@
       min-height: 0;
     }
 
-    .vector-chunk-nav {
+    .vector-large-edit-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 14px;
+      border: 1px solid #d8e3f3;
+      border-radius: 16px;
+      background: linear-gradient(180deg, #f7fbff 0%, #ffffff 100%);
+    }
+
+    .vector-large-edit-head {
       display: flex;
       align-items: center;
-      justify-content: center;
-      gap: 8px;
-      padding: 6px 12px;
+      justify-content: space-between;
+      gap: 12px;
       font-size: 13px;
-      color: #445566;
-      background: #f4f8fd;
-      border: 1px solid #d8e3f3;
-      border-bottom: none;
-      border-radius: 16px 16px 0 0;
+      color: #3d5066;
+      font-weight: 600;
     }
-    .vector-chunk-nav + .vector-editor-container .vector-document-editor {
-      border-top-left-radius: 0;
-      border-top-right-radius: 0;
+
+    .vector-large-edit-caption {
+      font-size: 12px;
+      color: #66768a;
+      font-weight: 500;
     }
+
+    .vector-large-chunk-editor {
+      min-height: 180px;
+      max-height: 260px;
+      flex: 0 0 auto;
+      background: #ffffff;
+    }
+
     .vector-chunk-btn {
       background: none;
       border: 1px solid #bcd0e8;
@@ -3281,7 +3472,7 @@
       padding: 18px;
       font-size: 15px;
       line-height: 1.8;
-      color: transparent;
+      color: #1f2d3d;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       overflow: auto;
       overflow-wrap: anywhere;
@@ -3587,7 +3778,7 @@
         <div class="title">AI Support Assistant</div>
       </div>
       <div class="header-right">
-        <button id="manage-vector-db-btn" type="button" class="ghost-btn header-action-btn">Manage DB and Prompt</button>
+        <button id="manage-vector-db-btn" type="button" class="ghost-btn header-action-btn">Manage DB and System Prompt</button>
       </div>
     </div>
 
@@ -3679,21 +3870,21 @@
 
     <div class="input-dock">
       <div class="knowledge-dock">
+        <div class="knowledge-menu-wrap">
+          <button id="knowledge-btn" type="button" class="knowledge-btn">Add new knowledge</button>
+          <div id="knowledge-menu" class="knowledge-menu hidden">
+            <button id="knowledge-upload-option" type="button">Upload a file</button>
+            <button id="knowledge-content-option" type="button">Free Text</button>
+          </div>
+        </div>
         <div class="prompt-menu-wrap">
-          <button id="predefined-prompts-btn" type="button" class="prompt-btn">Predefined Prompts</button>
+          <button id="predefined-prompts-btn" type="button" class="prompt-btn">Quick Prompts</button>
           <div id="predefined-prompts-menu" class="prompt-menu hidden">
             <button type="button" class="predefined-prompt-option" data-prompt="Solve this ticket step by step">Solve this ticket step by step</button>
             <button type="button" class="predefined-prompt-option" data-prompt="Summarize this ticket">Summarize this ticket</button>
             <button type="button" class="predefined-prompt-option" data-prompt="Explain those logs">Explain those logs</button>
             <button type="button" class="predefined-prompt-option" data-prompt="Explain the error in the picture">Explain the error in the picture</button>
             <button type="button" class="predefined-prompt-option" data-prompt="What does that file contain?">What does that file contain?</button>
-          </div>
-        </div>
-        <div class="knowledge-menu-wrap">
-          <button id="knowledge-btn" type="button" class="knowledge-btn">Add Knowledge</button>
-          <div id="knowledge-menu" class="knowledge-menu hidden">
-            <button id="knowledge-upload-option" type="button">Upload a file</button>
-            <button id="knowledge-content-option" type="button">Add Content</button>
           </div>
         </div>
       </div>
@@ -3846,10 +4037,10 @@
         <button id="knowledge-guide-close" type="button" class="knowledge-modal-close" aria-label="Close">×</button>
       </div>
       <div class="knowledge-guide-content">
-        <p>Add practical TA9 or IntSight support knowledge in English that your team can search later.</p>
+        <p>Add practical TA9 products new knowledge in English that your team can search later.</p>
         <ul>
-          <li>Make it TA9-specific: mention product context such as modules like Admin Studio, Federated Search, Data Model, entities/relations, dashboards, cases, indexing, permissions, or workflows.</li>
-          <li>Include concrete support details: step-by-step actions, settings, field names, configuration values, queries, endpoints, errors, troubleshooting notes, or runbook instructions.</li>
+          <li>Make it specific: mention product context such as modules like Admin Studio, Federated Search, Data Model, entities/relations, dashboards, cases, indexing, permissions, or workflows.</li>
+          <li>Include concrete details: step-by-step actions, settings, field names, configuration values, queries, endpoints, errors, troubleshooting notes, or runbook instructions.</li>
           <li>Keep it meaningful and not too short. Very short or generic text is rejected. Aim for at least one clear procedure or technical explanation.</li>
           <li>Avoid unrelated or generic content that is not connected to TA9 or IntSight usage, administration, troubleshooting, or operations.</li>
           <li>Current flow: write or paste the content you want to keep, then click <code>Add</code>.</li>
@@ -4044,13 +4235,20 @@
       isEditing: false,
       isSaving: false,
       saveState: 'idle',
-      saveMessage: ''
+      saveMessage: '',
+      pendingRestore: null,
+      largeEditWindow: null,
+      largeEditorActivated: false,
+      largeEditReplacements: {},
+      largeEditActiveChunkNumber: null
     };
     const vectorDocumentCache = new Map();
     const VECTOR_VIEWER_OVERSCAN_ROWS = 40;
     const VECTOR_CACHE_MAX_ENTRIES = 24;
     const VECTOR_LARGE_EDIT_THRESHOLD = 200000;
-    const VECTOR_LARGE_EDITOR_LOAD_STEP = 250000;
+    const VECTOR_LARGE_EDITOR_LOAD_STEP = 50000;
+    const VECTOR_LARGE_EDIT_WINDOW_SIZE = 60000;
+    const VECTOR_LARGE_EDIT_WINDOW_LEAD = 4000;
 
     function getChatConversationId() {
       try {
@@ -4466,8 +4664,14 @@
         if (prevBtn) prevBtn.disabled = !hasMatches;
         if (nextBtn) nextBtn.disabled = !hasMatches;
 
+        // Restore saved scroll position (e.g. returning from edit mode)
+        const pendingViewRestore = consumeVectorPendingRestore('view', detail.source);
+        if (pendingViewRestore && pendingViewRestore.scrollRatio > 0) {
+          viewport.scrollTop = pendingViewRestore.scrollRatio * (model.totalRows * lineHeight);
+        }
+
         const searchScrollKey = `${detail.source}::${model.searchKey}`;
-        if (model.searchKey && model.firstMatchLineIndex >= 0 && viewport._vectorScrollAppliedKey !== searchScrollKey) {
+        if (!pendingViewRestore && model.searchKey && model.firstMatchLineIndex >= 0 && viewport._vectorScrollAppliedKey !== searchScrollKey) {
           const targetRow = cumulativeRows[model.firstMatchLineIndex] || 0;
           viewport.scrollTop = Math.max(0, (targetRow * lineHeight) - (lineHeight * 2));
           viewport._vectorScrollAppliedKey = searchScrollKey;
@@ -4498,7 +4702,6 @@
           const sliceEnd = getVectorLineEnd(model, safeEndLine);
           const globalActivePos = model.matchPositions[model.activeMatchIdx];
           if (globalActivePos >= sliceStart && globalActivePos < sliceEnd) {
-            // Count matches before the slice start to get the offset
             let matchesBefore = 0;
             for (let i = 0; i < model.matchPositions.length; i++) {
               if (model.matchPositions[i] < sliceStart) matchesBefore++;
@@ -4510,7 +4713,7 @@
 
         wrapper.style.height = (model.totalRows * lineHeight) + 'px';
         contentEl.style.top = (cumulativeRows[startLine] * lineHeight) + 'px';
-        contentEl.innerHTML = renderVectorSearchHighlightedHtml(lines.join('\n'), activeSearchText, activeInSlice);
+        contentEl.innerHTML = renderChunkHighlightedHtml(lines.join('\n'), activeSearchText, activeInSlice, []);
       }
 
       function requestDraw() {
@@ -4697,6 +4900,48 @@
       return '';
     }
 
+    function normalizeVectorChunkIndices(values) {
+      if (!Array.isArray(values) || !values.length) {
+        return [];
+      }
+
+      const normalized = [];
+      const seen = new Set();
+      for (const value of values) {
+        const chunkNumber = Number(value);
+        if (!Number.isInteger(chunkNumber) || chunkNumber < 0 || seen.has(chunkNumber)) {
+          continue;
+        }
+        seen.add(chunkNumber);
+        normalized.push(chunkNumber);
+      }
+      return normalized;
+    }
+
+
+    function setVectorPendingRestore(mode, source, scrollRatio) {
+      if (!mode || !source) {
+        vectorState.pendingRestore = null;
+        return;
+      }
+
+      vectorState.pendingRestore = {
+        mode,
+        source,
+        scrollRatio: Number.isFinite(scrollRatio) ? Math.max(0, scrollRatio) : 0,
+      };
+    }
+
+    function consumeVectorPendingRestore(mode, source) {
+      const pending = vectorState.pendingRestore;
+      if (!pending || pending.mode !== mode || pending.source !== source) {
+        return null;
+      }
+
+      vectorState.pendingRestore = null;
+      return pending;
+    }
+
     function stripVectorFilePrefix(text, inputType) {
       const rawText = String(text || '');
       if (inputType !== 'file' || !rawText) {
@@ -4785,6 +5030,104 @@
       }
 
       result += escapeHtml(rawText.slice(lastIndex));
+      return result;
+    }
+
+    /**
+     * Render text with chunk boundary highlights overlaid.
+     * chunkRanges is an array of {start, end, chunkNum, isFirst} relative to the slice.
+     */
+    function renderChunkHighlightedHtml(text, searchText, activeMatchIndex, chunkRanges) {
+      if (!chunkRanges || !chunkRanges.length) {
+        return renderVectorSearchHighlightedHtml(text, searchText, activeMatchIndex);
+      }
+      // First render with search highlights
+      const baseHtml = renderVectorSearchHighlightedHtml(text, searchText, activeMatchIndex);
+      // Wrap chunk ranges using character offsets in the plain text
+      // We need to work on the plain text, then re-apply
+      const rawText = String(text || '');
+      // Sort ranges by start position
+      const sorted = chunkRanges.slice().sort((a, b) => a.start - b.start);
+
+      // Build a set of highlighted char positions
+      const charHighlight = new Uint8Array(rawText.length); // 0=none, 1=chunk, 2=first-chunk
+      for (const range of sorted) {
+        const s = Math.max(0, range.start);
+        const e = Math.min(rawText.length, range.end);
+        const val = range.isFirst ? 2 : 1;
+        for (let i = s; i < e; i++) {
+          charHighlight[i] = Math.max(charHighlight[i], val);
+        }
+      }
+
+      // Now render line by line with chunk highlight wrapping
+      // Process the text character by character, building spans
+      let result = '';
+      let lastIndex = 0;
+      let currentHighlight = 0; // 0=none, 1=chunk, 2=first-chunk
+      const highlightRegex = buildVectorSearchRegex(searchText);
+      let searchPositions = [];
+      if (highlightRegex) {
+        let m;
+        while ((m = highlightRegex.exec(rawText)) !== null) {
+          if (!m[0]) break;
+          searchPositions.push({ start: m.index, end: m.index + m[0].length });
+        }
+      }
+
+      // Merge character positions into runs of same highlight state
+      const runs = [];
+      let runStart = 0;
+      let runState = charHighlight[0] || 0;
+      for (let i = 1; i <= rawText.length; i++) {
+        const state = i < rawText.length ? (charHighlight[i] || 0) : -1;
+        if (state !== runState) {
+          runs.push({ start: runStart, end: i, hl: runState });
+          runStart = i;
+          runState = state;
+        }
+      }
+
+      // Render each run, applying both chunk highlight and search mark
+      let searchIdx = 0;
+      for (const run of runs) {
+        const runText = rawText.slice(run.start, run.end);
+        // Build inner HTML with search marks
+        let inner = '';
+        let pos = run.start;
+        // Find search matches within this run
+        while (searchIdx < searchPositions.length && searchPositions[searchIdx].end <= run.start) {
+          searchIdx++;
+        }
+        let si = searchIdx;
+        let localPos = 0;
+        while (si < searchPositions.length && searchPositions[si].start < run.end) {
+          const sp = searchPositions[si];
+          const mStart = Math.max(sp.start, run.start) - run.start;
+          const mEnd = Math.min(sp.end, run.end) - run.start;
+          if (mStart > localPos) {
+            inner += escapeHtml(runText.slice(localPos, mStart));
+          }
+          const isActive = (typeof activeMatchIndex === 'number' && si === activeMatchIndex);
+          const cls = isActive ? 'vector-search-mark active' : 'vector-search-mark';
+          const idAttr = isActive ? ' id="vector-search-active-mark"' : '';
+          inner += `<mark class="${cls}"${idAttr}>${escapeHtml(runText.slice(mStart, mEnd))}</mark>`;
+          localPos = mEnd;
+          si++;
+        }
+        if (localPos < runText.length) {
+          inner += escapeHtml(runText.slice(localPos));
+        }
+
+        if (run.hl === 2) {
+          result += `<span class="vector-chunk-highlight first-chunk">${inner}</span>`;
+        } else if (run.hl === 1) {
+          result += `<span class="vector-chunk-highlight">${inner}</span>`;
+        } else {
+          result += inner;
+        }
+      }
+
       return result;
     }
 
@@ -5073,7 +5416,21 @@
       return chunks;
     }
 
-    function scrollEditorToChar(editor, charPos) {
+    function scrollEditorToChar(editor, charPos, options = {}) {
+      var alignTop = !!options.alignTop;
+      var sourceText = editor && typeof editor.value === 'string' && editor.value.length
+        ? editor.value
+        : (vectorState.draftContent || '');
+      var totalChars = sourceText.length;
+      if (((editor && editor._editorNoBackdrop) && !(editor && editor._editorWindowedLarge)) || totalChars > VECTOR_LARGE_EDIT_THRESHOLD) {
+        var scrollRange = Math.max(0, editor.scrollHeight - editor.clientHeight);
+        var safeCharPos = Math.max(0, Math.min(totalChars, Number(charPos) || 0));
+        editor.scrollTop = scrollRange > 0 && totalChars > 0
+          ? Math.round((safeCharPos / totalChars) * scrollRange)
+          : 0;
+        return;
+      }
+
       var cs = getComputedStyle(editor);
       var padL = parseFloat(cs.paddingLeft) || 0;
       var padR = parseFloat(cs.paddingRight) || 0;
@@ -5101,14 +5458,107 @@
       var markerTop = marker.offsetTop;
       document.body.removeChild(mirror);
       // markerTop is relative to mirror (no padding), add textarea paddingTop
-      editor.scrollTop = Math.max(0, (padT + markerTop) - (editor.clientHeight / 2));
+      editor.scrollTop = alignTop
+        ? Math.max(0, padT + markerTop)
+        : Math.max(0, (padT + markerTop) - (editor.clientHeight / 2));
     }
 
     function syncEditorDraftContent(editor) {
       if (!editor) return vectorState.draftContent || '';
+      if (editor._editorWindowedLarge) {
+        const windowMeta = vectorState.largeEditWindow;
+        const fullDraft = String(vectorState.draftContent || '');
+        if (!windowMeta) {
+          return fullDraft;
+        }
+        const safeStart = Math.max(0, Math.min(fullDraft.length, Number(windowMeta.start) || 0));
+        const safeEnd = Math.max(safeStart, Math.min(fullDraft.length, Number(windowMeta.end) || safeStart));
+        vectorState.draftContent = fullDraft.slice(0, safeStart) + (editor.value || '') + fullDraft.slice(safeEnd);
+        vectorState.largeEditWindow = {
+          start: safeStart,
+          end: safeStart + (editor.value || '').length,
+        };
+        vectorState.hasDraftContent = true;
+        return vectorState.draftContent;
+      }
       vectorState.draftContent = editor.value || '';
       vectorState.hasDraftContent = true;
       return vectorState.draftContent;
+    }
+
+    function getLargeEditSourceText() {
+      return String(vectorState.draftContent || (vectorState.detail && vectorState.detail.full_content) || '');
+    }
+
+    function getLargeEditReplacementMap() {
+      return vectorState.largeEditReplacements && typeof vectorState.largeEditReplacements === 'object'
+        ? vectorState.largeEditReplacements
+        : {};
+    }
+
+    function getLargeEditBaseContent(detail) {
+      return stripVectorFilePrefix((detail && detail.full_content) || '', (detail && detail.input_type) || '');
+    }
+
+    function getLargeEditChunkValue(detail, entry) {
+      if (!detail || !entry) return '';
+      const replacement = getLargeEditReplacementMap()[String(entry.chunkNum)];
+      if (replacement && typeof replacement.value === 'string') {
+        return replacement.value;
+      }
+      const baseContent = getLargeEditBaseContent(detail);
+      return baseContent.slice(entry.start, entry.end);
+    }
+
+    function buildLargeEditSaveContent(detail) {
+      const baseContent = getLargeEditBaseContent(detail);
+      const replacements = Object.values(getLargeEditReplacementMap())
+        .filter((item) => item && Number.isFinite(item.start) && Number.isFinite(item.end) && typeof item.value === 'string')
+        .sort((left, right) => right.start - left.start);
+
+      if (!replacements.length) {
+        return baseContent;
+      }
+
+      let nextContent = baseContent;
+      for (const replacement of replacements) {
+        const safeStart = Math.max(0, Math.min(nextContent.length, Number(replacement.start) || 0));
+        const safeEnd = Math.max(safeStart, Math.min(nextContent.length, Number(replacement.end) || safeStart));
+        nextContent = nextContent.slice(0, safeStart) + replacement.value + nextContent.slice(safeEnd);
+      }
+      return nextContent;
+    }
+
+    function buildLargeEditWindowRange(fullText, targetOffset) {
+      const sourceText = String(fullText || '');
+      const totalLength = sourceText.length;
+      const safeTarget = Math.max(0, Math.min(totalLength, Number(targetOffset) || 0));
+      const maxStart = Math.max(0, totalLength - VECTOR_LARGE_EDIT_WINDOW_SIZE);
+      const start = Math.max(0, Math.min(maxStart, safeTarget - VECTOR_LARGE_EDIT_WINDOW_LEAD));
+      const end = Math.min(totalLength, start + VECTOR_LARGE_EDIT_WINDOW_SIZE);
+      return { start, end };
+    }
+
+    function setLargeEditorWindow(editor, targetOffset, options = {}) {
+      if (!editor) return;
+      const sourceText = getLargeEditSourceText();
+      const range = buildLargeEditWindowRange(sourceText, targetOffset);
+      const localTarget = Math.max(0, Math.min(range.end - range.start, (Number(targetOffset) || 0) - range.start));
+      vectorState.largeEditWindow = range;
+      editor.value = sourceText.slice(range.start, range.end);
+      editor.scrollTop = 0;
+      if (options.selectTarget) {
+        editor.focus();
+        editor.setSelectionRange(localTarget, localTarget);
+        requestAnimationFrame(() => {
+          scrollEditorToChar(editor, localTarget, { alignTop: !!options.alignTop });
+        });
+      }
+      return {
+        start: range.start,
+        end: range.end,
+        localTarget,
+      };
     }
 
     function getSearchMatchLengthAt(text, searchText, matchIndex) {
@@ -5152,10 +5602,22 @@
         return;
       }
       const fullText = String(text || '');
-      setTimeout(() => {
+
+      editor.value = '';
+      editor.dataset.loadingState = 'true';
+
+      const applyContent = () => {
         editor.value = fullText;
+        editor.dataset.loadingState = 'false';
         if (typeof onDone === 'function') onDone();
-      }, 0);
+      };
+
+      if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(applyContent, { timeout: 120 });
+        return;
+      }
+
+      setTimeout(applyContent, 0);
     }
 
     function setVectorSaveState(state, message) {
@@ -5164,7 +5626,7 @@
     }
 
     function getVectorSaveStatusMarkup() {
-      if (vectorState.saveState === 'idle' || !vectorState.saveMessage) return '';
+      if (vectorState.saveState === 'idle' || vectorState.saveState === 'loading' || !vectorState.saveMessage) return '';
       const classes = ['vector-doc-status'];
       if (vectorState.saveState === 'saving') classes.push('saving');
       if (vectorState.saveState === 'saved') classes.push('saved');
@@ -5182,6 +5644,14 @@
       const prevBtn = document.getElementById('vector-search-prev');
       const nextBtn = document.getElementById('vector-search-next');
       if (!searchNav) return;
+      if (editor && editor._editorWindowedLarge) {
+        searchNav.style.display = 'none';
+        if (searchLabel) searchLabel.textContent = 'Search disabled for large-file edit mode';
+        if (prevBtn) prevBtn.disabled = true;
+        if (nextBtn) nextBtn.disabled = true;
+        editor._editorMatches = null;
+        return;
+      }
       if (editor && editor._editorNoBackdrop) {
         const seededMatches = editor._editorMatches;
         const hasMatches = !!(seededMatches && Array.isArray(seededMatches.positions) && seededMatches.positions.length);
@@ -5255,45 +5725,27 @@
         if (backdrop) backdrop.innerHTML = '';
         return;
       }
-      const text = editor.value;
-      // Skip backdrop highlighting for extremely large docs (>2M chars) to avoid freeze
-      if (text.length > 2000000) {
+      if (editor._editorNoBackdrop) {
         backdrop.innerHTML = '';
+        backdrop.style.display = 'none';
         return;
       }
+      backdrop.style.display = 'block';
+      const text = editor.value;
       const activeSearch = String(vectorState.search || '').trim();
       const regex = buildVectorSearchRegex(activeSearch);
-      if (!regex || !text || !activeSearch) {
+      const effectiveSearch = editor._editorWindowedLarge ? '' : activeSearch;
+      if (!regex || !text || !effectiveSearch) {
         backdrop.innerHTML = escapeHtml(text) + '\n';
         return;
       }
-
-      // Render highlighted HTML with active mark — same as view mode
-      let result = '';
-      let lastIndex = 0;
-      let matchCount = 0;
-      const searchRegex = new RegExp(regex.source, 'gi');
-      let match = searchRegex.exec(text);
-      while (match) {
-        const matchText = match[0] || '';
-        if (!matchText) break;
-        result += escapeHtml(text.slice(lastIndex, match.index));
-        const isActive = (matchCount === activeIdx);
-        const cls = isActive ? 'vector-search-mark active' : 'vector-search-mark';
-        const idAttr = isActive ? ' id="vector-editor-active-mark"' : '';
-        result += '<mark class="' + cls + '"' + idAttr + '>' + escapeHtml(matchText) + '</mark>';
-        lastIndex = match.index + matchText.length;
-        matchCount++;
-        match = searchRegex.exec(text);
-      }
-      result += escapeHtml(text.slice(lastIndex));
-      // Trailing newline ensures backdrop height matches textarea
-      backdrop.innerHTML = result + '\n';
+      backdrop.innerHTML = renderChunkHighlightedHtml(text, effectiveSearch, activeIdx, []) + '\n';
     }
 
     function editorNavigateMatch(editor, delta) {
       if (!editor) return;
       if (editor.disabled) return;
+      if (editor._editorWindowedLarge) return;
       if (!editor._editorMatches) return;
       const em = editor._editorMatches;
       if (!em.positions.length) return;
@@ -5311,7 +5763,6 @@
         : rawHit.length;
       const selectionEnd = selectionStart + resolvedLength;
 
-      // Select the match in the textarea
       editor.focus();
       editor.setSelectionRange(selectionStart, selectionEnd);
 
@@ -5358,12 +5809,14 @@
 
       const detail = vectorState.detail;
       const isEditing = !!vectorState.isEditing;
+      const baseContentValue = stripVectorFilePrefix(detail.full_content || '', detail.input_type);
+      const isLargeEditDoc = isEditing && baseContentValue.length > VECTOR_LARGE_EDIT_THRESHOLD;
+      const isDeferredLargeEdit = isEditing && isLargeEditDoc && !vectorState.largeEditorActivated;
       const contentValue = isEditing
         ? (vectorState.hasDraftContent
           ? vectorState.draftContent
-          : stripVectorFilePrefix(detail.full_content || '', detail.input_type))
-        : stripVectorFilePrefix(detail.full_content || '', detail.input_type);
-      const isLargeEditDoc = isEditing && contentValue.length > VECTOR_LARGE_EDIT_THRESHOLD;
+          : baseContentValue)
+        : baseContentValue;
 
       vectorDetail.innerHTML = `
         <div class="vector-detail-header">
@@ -5397,7 +5850,9 @@
             </div>
           </div>
           ${getVectorSaveStatusMarkup()}
-          ${isEditing
+          ${isDeferredLargeEdit
+            ? '<pre id="vector-document-view" class="vector-document-view"></pre>'
+            : isEditing
             ? '<div class="vector-editor-container"><div id="vector-editor-backdrop" class="vector-editor-backdrop"></div><textarea id="vector-document-editor" class="vector-document-editor editing" placeholder="Loading document content..."></textarea></div>'
             : '<pre id="vector-document-view" class="vector-document-view"></pre>'}
         </div>
@@ -5411,10 +5866,11 @@
       if (editor) {
         const isLargeDoc = isLargeEditDoc;
         editor._editorNoBackdrop = isLargeDoc;
+        editor._editorWindowedLarge = isLargeDoc;
 
         const backdrop = document.getElementById('vector-editor-backdrop');
         if (isLargeDoc) {
-          if (backdrop) backdrop.remove();
+          editor.classList.add('vector-large-document');
           editor.style.background = '#ffffff';
           editor.wrap = 'off';
           editor.spellcheck = false;
@@ -5423,7 +5879,12 @@
           editor.setAttribute('autocomplete', 'off');
           editor.style.overflowWrap = 'normal';
           editor.style.wordBreak = 'normal';
+          if (backdrop) {
+            backdrop.style.display = 'none';
+          }
           seedLargeEditorMatches(editor, detail, contentValue, true);
+        } else if (backdrop) {
+          backdrop.style.display = 'block';
         }
 
         // Wire search nav buttons
@@ -5433,7 +5894,7 @@
         if (nextBtn) nextBtn.addEventListener('click', () => editorNavigateMatch(editor, 1));
 
         // Sync backdrop scroll with textarea scroll (small docs only)
-        if (!isLargeDoc && backdrop) {
+        if (backdrop) {
           editor.addEventListener('scroll', () => {
             backdrop.scrollTop = editor.scrollTop;
           });
@@ -5442,8 +5903,7 @@
         // Debounced search + backdrop update on input
         let editorSearchTimer = 0;
         editor.addEventListener('input', () => {
-          vectorState.draftContent = editor.value;
-          vectorState.hasDraftContent = true;
+          syncEditorDraftContent(editor);
           if (vectorState.saveState === 'saved' || vectorState.saveState === 'idle') {
             setVectorSaveState('dirty', 'Unsaved changes');
           }
@@ -5462,13 +5922,16 @@
           editor.placeholder = 'Preparing large document for editing\u2026';
           updateEditorSearchNav(editor);
           requestAnimationFrame(() => {
-            loadLargeEditorContent(editor, contentValue, () => {
-              editor.disabled = false;
-              editor.placeholder = '';
-              editor._editorMatchesDisabled = false;
-              setVectorSaveState('idle', '');
-              updateEditorSearchNav(editor);
-            });
+            const sourceText = vectorState.hasDraftContent ? vectorState.draftContent : contentValue;
+            vectorState.draftContent = String(sourceText || '');
+            vectorState.hasDraftContent = true;
+            const windowInfo = setLargeEditorWindow(editor, 0, { selectTarget: false });
+            editor.disabled = false;
+            editor.placeholder = '';
+            editor._editorMatchesDisabled = false;
+            setVectorSaveState('idle', '');
+            updateEditorSearchNav(editor);
+            editor.scrollTop = 0;
           });
         } else {
           editor.disabled = true;
@@ -5479,18 +5942,14 @@
             editor.disabled = false;
             editor.placeholder = '';
             vectorState.draftContent = editor.value;
+            vectorState.largeEditWindow = null;
+            editor.scrollTop = 0;
 
             setTimeout(() => {
               updateEditorSearchNav(editor);
               if (backdrop) {
                 updateEditorBackdrop(editor, -1);
               }
-
-              setTimeout(() => {
-                if (editor._editorMatches && editor._editorMatches.positions.length > 0) {
-                  editorNavigateMatch(editor, 0);
-                }
-              }, 0);
             }, 0);
           }, 0);
         }
@@ -5499,6 +5958,10 @@
       const editBtn = document.getElementById('vector-edit-document-btn');
       if (editBtn) {
         editBtn.addEventListener('click', async () => {
+          vectorState.pendingRestore = null;
+          vectorState.largeEditorActivated = true;
+          vectorState.largeEditReplacements = {};
+          vectorState.largeEditActiveChunkNumber = null;
           const loaded = await ensureVectorFullContentLoaded(detail.source);
           if (!loaded) {
             showKnowledgeToast('Failed to load full document for editing.', true);
@@ -5507,10 +5970,7 @@
           vectorState.isEditing = true;
           vectorState.draftContent = '';
           vectorState.hasDraftContent = false;
-          setVectorSaveState(
-            (vectorState.detail.full_content || '').length > VECTOR_LARGE_EDIT_THRESHOLD ? 'loading' : 'idle',
-            (vectorState.detail.full_content || '').length > VECTOR_LARGE_EDIT_THRESHOLD ? 'Preparing large document for editing...' : ''
-          );
+          setVectorSaveState('idle', '');
           renderVectorDetail();
         });
       }
@@ -5518,10 +5978,21 @@
       const cancelBtn = document.getElementById('vector-cancel-edit-btn');
       if (cancelBtn) {
         cancelBtn.addEventListener('click', () => {
+          // Save scroll position before switching back to read mode
+          const editorEl = document.getElementById('vector-document-editor');
+          if (editorEl && editorEl.scrollHeight > 0) {
+            setVectorPendingRestore('view', detail.source, editorEl.scrollTop / editorEl.scrollHeight);
+          } else {
+            setVectorPendingRestore('view', detail.source, 0);
+          }
           vectorState.isEditing = false;
           setVectorSaveState('idle', '');
           vectorState.draftContent = '';
           vectorState.hasDraftContent = false;
+          vectorState.largeEditWindow = null;
+          vectorState.largeEditorActivated = false;
+          vectorState.largeEditReplacements = {};
+          vectorState.largeEditActiveChunkNumber = null;
           renderVectorDetail();
         });
       }
@@ -5567,6 +6038,10 @@
         if (!vectorState.isEditing || !sameSource) {
           vectorState.draftContent = '';
           vectorState.hasDraftContent = false;
+          vectorState.largeEditWindow = null;
+          vectorState.largeEditorActivated = false;
+          vectorState.largeEditReplacements = {};
+          vectorState.largeEditActiveChunkNumber = null;
           vectorState.isEditing = false;
         }
         renderVectorDocumentList();
@@ -5620,6 +6095,8 @@
         if (!vectorState.isEditing || !sameSource) {
           vectorState.draftContent = '';
           vectorState.hasDraftContent = false;
+          vectorState.largeEditWindow = null;
+          vectorState.largeEditorActivated = false;
           vectorState.isEditing = false;
         }
 
@@ -5633,12 +6110,13 @@
     async function saveVectorDocument() {
       if (!vectorState.detail || !vectorState.selectedCollection) return;
       const editor = document.getElementById('vector-document-editor');
+      const baseContent = stripVectorFilePrefix(vectorState.detail.full_content || '', vectorState.detail.input_type);
       if (vectorState.hasDraftContent) {
         syncEditorDraftContent(editor);
       }
       const nextContent = vectorState.hasDraftContent
         ? (vectorState.draftContent || '')
-        : stripVectorFilePrefix(vectorState.detail.full_content || '', vectorState.detail.input_type);
+        : baseContent;
       if (!nextContent.trim()) {
         setVectorSaveState('error', 'Document content cannot be empty.');
         showKnowledgeToast('Document content cannot be empty.', true);
@@ -5672,6 +6150,10 @@
         };
         vectorState.draftContent = '';
         vectorState.hasDraftContent = false;
+        vectorState.largeEditWindow = null;
+        vectorState.largeEditorActivated = false;
+        vectorState.largeEditReplacements = {};
+        vectorState.largeEditActiveChunkNumber = null;
         cacheVectorDetail(vectorState.detail);
         vectorState.isEditing = false;
         syncVectorSummaryFromDetail(vectorState.detail);
@@ -7414,50 +7896,172 @@
       return null;
     }
 
-    async function openAnswerSourceInVectorDb(rawSource) {
-      const resolved = await resolveAnswerSourceTarget(rawSource);
-      if (!resolved || !resolved.collectionName || !resolved.source) {
-        showKnowledgeToast('This source cannot be opened in Manage Vector DB.', true);
-        return;
+
+
+    async function openInlineChunkEditor(sourceItem, collectionName, source, chunkIndex) {
+      // Check if there's already an editor open on this source item
+      const existing = sourceItem.parentElement.querySelector('.inline-chunk-editor-wrap');
+      if (existing) {
+        // If the same chunk is clicked again, toggle it closed
+        const currentChunk = existing.getAttribute('data-chunk-index');
+        if (String(currentChunk) === String(chunkIndex)) {
+          existing.remove();
+          sourceItem.classList.remove('chunk-editor-open');
+          // Clear active chunk button
+          sourceItem.querySelectorAll('.answer-source-chunk-btn.active').forEach(b => b.classList.remove('active'));
+          return;
+        }
+        // Different chunk on same source — remove old and continue to open new
+        existing.remove();
       }
 
-      setAppMode('vector');
+      // Close all other open editors on the page
+      document.querySelectorAll('.inline-chunk-editor-wrap').forEach(el => el.remove());
+      document.querySelectorAll('.answer-source-item.chunk-editor-open').forEach(el => el.classList.remove('chunk-editor-open'));
+      document.querySelectorAll('.answer-source-chunk-btn.active').forEach(b => b.classList.remove('active'));
 
-      if (vectorSearchInput) {
-        vectorSearchInput.value = '';
-      }
+      sourceItem.classList.add('chunk-editor-open');
 
-      vectorState.selectedCollection = resolved.collectionName;
-      vectorState.selectedSource = null;
-      vectorState.detail = null;
-      vectorState.draftContent = '';
-      vectorState.isEditing = false;
-      vectorState.offset = 0;
-      vectorState.search = '';
-      vectorState.sort = 'updated_desc';
-
-      if (vectorSortSelect) {
-        vectorSortSelect.value = 'updated_desc';
-      }
-
-      renderVectorCollections();
-      renderVectorEmptyState('Loading document', 'Opening the selected source in Manage Vector DB...');
-      await loadVectorDocuments();
-      await loadVectorDocumentDetail(resolved.source, false, {
-        includeFullContent: true,
+      // Highlight the active chunk button
+      sourceItem.querySelectorAll('.answer-source-chunk-btn').forEach(b => {
+        if (b.textContent === 'Chunk ' + chunkIndex) {
+          b.classList.add('active');
+        }
       });
 
-      setTimeout(() => {
-        if (vectorDbPage) {
-          vectorDbPage.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      sourceItem.classList.add('chunk-editor-open');
+
+      const wrap = document.createElement('div');
+      wrap.className = 'inline-chunk-editor-wrap';
+      wrap.setAttribute('data-chunk-index', String(chunkIndex));
+      wrap.innerHTML =
+        '<div class="inline-chunk-editor-header">' +
+          '<span class="inline-chunk-editor-title">Loading chunk ' + chunkIndex + '...</span>' +
+          '<div class="inline-chunk-editor-actions">' +
+            '<button type="button" class="inline-chunk-editor-btn" data-action="close">Close</button>' +
+          '</div>' +
+        '</div>' +
+        '<div style="padding:14px;color:#5b6878;font-size:13px;">Loading chunk content...</div>';
+      sourceItem.parentElement.appendChild(wrap);
+
+      const closeBtn = wrap.querySelector('[data-action="close"]');
+      closeBtn.addEventListener('click', () => { wrap.remove(); sourceItem.classList.remove('chunk-editor-open'); sourceItem.querySelectorAll('.answer-source-chunk-btn.active').forEach(b => b.classList.remove('active')); });
+
+      try {
+        const params = new URLSearchParams({
+          collection_name: collectionName,
+          source: source,
+          chunk_index: String(chunkIndex),
+        });
+        const resp = await fetch('/adminchat/api/vector-db/chunk?' + params.toString());
+        if (!resp.ok) {
+          const errData = await resp.json().catch(() => ({}));
+          throw new Error(errData.detail || 'Failed to load chunk');
         }
-      }, 50);
+        const data = await resp.json();
+
+        wrap.innerHTML =
+          '<div class="inline-chunk-editor-header">' +
+            '<span class="inline-chunk-editor-title">Chunk ' + chunkIndex + ' \u2014 ' + escapeHtml(getAnswerSourceDisplay(collectionName + '::' + source).name) + '</span>' +
+            '<div class="inline-chunk-editor-actions">' +
+              '<button type="button" class="inline-chunk-editor-btn" data-action="close">Close</button>' +
+              '<button type="button" class="inline-chunk-editor-btn primary" data-action="save">Save &amp; Re-embed</button>' +
+            '</div>' +
+          '</div>' +
+          '<textarea class="inline-chunk-editor-textarea"></textarea>' +
+          '<div class="inline-chunk-editor-status" style="display:none;"></div>';
+
+        const textarea = wrap.querySelector('.inline-chunk-editor-textarea');
+        const statusEl = wrap.querySelector('.inline-chunk-editor-status');
+        const saveBtn = wrap.querySelector('[data-action="save"]');
+        const closeBtnNew = wrap.querySelector('[data-action="close"]');
+
+        textarea.value = data.content || '';
+
+        closeBtnNew.addEventListener('click', () => { wrap.remove(); sourceItem.classList.remove('chunk-editor-open'); sourceItem.querySelectorAll('.answer-source-chunk-btn.active').forEach(b => b.classList.remove('active')); });
+
+        saveBtn.addEventListener('click', async () => {
+          const newContent = textarea.value.trim();
+          if (!newContent) {
+            statusEl.style.display = 'block';
+            statusEl.className = 'inline-chunk-editor-status error';
+            statusEl.textContent = 'Chunk content cannot be empty.';
+            return;
+          }
+
+          saveBtn.disabled = true;
+          textarea.disabled = true;
+          statusEl.style.display = 'block';
+          statusEl.className = 'inline-chunk-editor-status saving';
+          statusEl.textContent = 'Saving and re-embedding...';
+
+          try {
+            const saveResp = await fetch('/adminchat/api/vector-db/chunk', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                collection_name: collectionName,
+                source: source,
+                chunk_index: chunkIndex,
+                content: newContent,
+              }),
+            });
+            const saveData = await saveResp.json();
+            if (!saveResp.ok) {
+              throw new Error(saveData.detail || 'Failed to save chunk');
+            }
+            statusEl.className = 'inline-chunk-editor-status saved';
+            statusEl.textContent = saveData.message || 'Saved successfully.';
+            saveBtn.disabled = false;
+            textarea.disabled = false;
+          } catch (saveErr) {
+            statusEl.className = 'inline-chunk-editor-status error';
+            statusEl.textContent = (saveErr && saveErr.message) || 'Save failed.';
+            saveBtn.disabled = false;
+            textarea.disabled = false;
+          }
+        });
+
+        // Scroll the editor into view
+        requestAnimationFrame(() => {
+          wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
+
+      } catch (err) {
+        wrap.innerHTML =
+          '<div class="inline-chunk-editor-header">' +
+            '<span class="inline-chunk-editor-title">Chunk ' + chunkIndex + '</span>' +
+            '<div class="inline-chunk-editor-actions">' +
+              '<button type="button" class="inline-chunk-editor-btn" data-action="close">Close</button>' +
+            '</div>' +
+          '</div>' +
+          '<div style="padding:14px;color:#c62828;font-size:13px;">' + escapeHtml((err && err.message) || 'Failed to load chunk.') + '</div>';
+        const closeBtnErr = wrap.querySelector('[data-action="close"]');
+        closeBtnErr.addEventListener('click', () => { wrap.remove(); sourceItem.classList.remove('chunk-editor-open'); sourceItem.querySelectorAll('.answer-source-chunk-btn.active').forEach(b => b.classList.remove('active')); });
+      }
     }
 
-    function appendAnswerSources(targetBox, sources) {
+    function appendAnswerSources(targetBox, sources, sourceDetails = []) {
       const normalizedSources = normalizeAnswerSources(sources);
       if (!normalizedSources.length) {
         return;
+      }
+
+      // Build a lookup: "CollectionName::source_id" -> matched_chunks array (ALL matched chunks)
+      const chunkLookup = {};
+      for (const sd of sourceDetails) {
+        if (sd && sd.collection_name && sd.source && Array.isArray(sd.matched_chunks)) {
+          const normalizedChunks = normalizeVectorChunkIndices(sd.matched_chunks);
+          const primaryChunk = Number(sd.primary_matched_chunk);
+          // Keep all matched chunks so the user can view each one.
+          // Put the primary chunk first if it exists and is in the list.
+          if (Number.isInteger(primaryChunk) && primaryChunk >= 0 && normalizedChunks.length > 0) {
+            const withoutPrimary = normalizedChunks.filter(c => c !== primaryChunk);
+            chunkLookup[sd.collection_name + '::' + sd.source] = [primaryChunk, ...withoutPrimary];
+          } else {
+            chunkLookup[sd.collection_name + '::' + sd.source] = normalizedChunks;
+          }
+        }
       }
 
       const wrapper = document.createElement('section');
@@ -7485,11 +8089,16 @@
         const parsedTarget = parseAnswerSourceTarget(rawSource);
         const canAttemptOpen = !!(parsedTarget && parsedTarget.source);
         const listItem = document.createElement('li');
-        const item = document.createElement(canAttemptOpen ? 'button' : 'div');
-        item.className = `answer-source-item${canAttemptOpen ? ' clickable' : ''}`;
-        if (canAttemptOpen) {
-          item.type = 'button';
+
+        // Determine matched chunks early so we know if the source itself should be clickable
+        let matchedChunks = [];
+        if (canAttemptOpen && parsedTarget.collectionName && parsedTarget.source) {
+          const key = parsedTarget.collectionName + '::' + parsedTarget.source;
+          matchedChunks = chunkLookup[key] || [];
         }
+        // Source items are always divs — only chunk buttons are clickable
+        const item = document.createElement('div');
+        item.className = 'answer-source-item';
 
         const details = getAnswerSourceDisplay(rawSource);
 
@@ -7497,21 +8106,51 @@
         name.className = 'answer-source-name';
         name.textContent = details.name;
         name.title = rawSource;
-
-        const path = document.createElement('div');
-        path.className = 'answer-source-path';
-        path.textContent = rawSource;
-        path.title = rawSource;
-
         item.appendChild(name);
-        item.appendChild(path);
+
+        // Only show path if it's meaningfully different from the display name
+        const pathLower = rawSource.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const nameLower = details.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (pathLower !== nameLower) {
+          const path = document.createElement('div');
+          path.className = 'answer-source-path';
+          path.textContent = rawSource;
+          path.title = rawSource;
+          item.appendChild(path);
+        }
         if (canAttemptOpen) {
-          item.addEventListener('click', () => {
-            openAnswerSourceInVectorDb(rawSource).catch((err) => {
-              console.error('Failed to open answer source in Vector DB:', err);
-              showKnowledgeToast('Failed to open the selected source.', true);
-            });
-          });
+          // Always show chunk bar with chunk buttons — consistent styling for all sources
+            const effectiveChunks = matchedChunks.length > 0 ? matchedChunks : [0];
+            const chunkBar = document.createElement('div');
+            chunkBar.className = 'answer-source-chunk-bar';
+            const label = document.createElement('span');
+            label.className = 'answer-source-chunk-label';
+            label.textContent = effectiveChunks.length + ' matched chunk' + (effectiveChunks.length !== 1 ? 's' : '') + ':';
+            chunkBar.appendChild(label);
+            for (const chunkIdx of effectiveChunks) {
+              const chunkBtn = document.createElement('button');
+              chunkBtn.type = 'button';
+              chunkBtn.className = 'answer-source-chunk-btn';
+              chunkBtn.textContent = 'Chunk ' + chunkIdx;
+              chunkBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (parsedTarget.collectionName) {
+                  openInlineChunkEditor(item, parsedTarget.collectionName, parsedTarget.source, chunkIdx);
+                } else {
+                  resolveAnswerSourceTarget(rawSource).then((resolved) => {
+                    if (resolved && resolved.collectionName && resolved.source) {
+                      openInlineChunkEditor(item, resolved.collectionName, resolved.source, chunkIdx);
+                    } else {
+                      showKnowledgeToast('Could not resolve source for editing.', true);
+                    }
+                  }).catch(() => {
+                    showKnowledgeToast('Failed to resolve source.', true);
+                  });
+                }
+              });
+              chunkBar.appendChild(chunkBtn);
+            }
+            item.appendChild(chunkBar);
         }
         listItem.appendChild(item);
         list.appendChild(listItem);
@@ -7522,7 +8161,7 @@
     }
 
     // Render markdown answer; structured replies show boxed answer + customer reply
-    function renderAnswer(markdown, targetBox, sources = []) {
+    function renderAnswer(markdown, targetBox, sources = [], sourceDetails = []) {
       try {
         const raw = markdown || '';
         const hasResponse = raw.includes('---ANSWER_START---');
@@ -7576,7 +8215,7 @@
         wrapTables(targetBox);
         enhanceCodeBlocks(targetBox);
         addSentenceBreaks(targetBox);
-        appendAnswerSources(targetBox, sources);
+        appendAnswerSources(targetBox, sources, sourceDetails);
       } catch (e) {
         console.error('[renderAnswer] Error:', e);
         targetBox.textContent = markdown || '(empty answer)';
@@ -8477,7 +9116,8 @@
           top_k: 5,
           conversation_id: getChatConversationId(),
           ticket_url: ticketSelect.value || null,
-          is_followup: !!(ticketSelect.value && ticketFirstQuestionAsked[ticketSelect.value])
+          is_followup: !!(ticketSelect.value && ticketFirstQuestionAsked[ticketSelect.value]),
+          stream: true
         };
         
         // Add attached files if any (copy array before clearing)
@@ -8509,11 +9149,63 @@
           return;
         }
 
-        const data = await resp.json();
+        // --- Stream SSE response ---
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let streamedAnswer = '';
+        let streamSources = [];
+        let streamSourceDetails = [];
+        let buffer = '';
+        let firstChunkReceived = false;
 
-        stopThinkingAnimation();
-        answerBox.classList.remove('thinking');
-        renderAnswer(data.answer || '', answerBox, data.sources || []);
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // keep incomplete line in buffer
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const evt = JSON.parse(line.slice(6));
+              if (evt.type === 'sources') {
+                streamSources = evt.sources || [];
+                streamSourceDetails = evt.source_details || [];
+              } else if (evt.type === 'chunk') {
+                if (!firstChunkReceived) {
+                  firstChunkReceived = true;
+                  stopThinkingAnimation();
+                  answerBox.classList.remove('thinking');
+                  answerBox.innerHTML = '';
+                }
+                streamedAnswer += evt.content;
+                // Render progressively with markdown styling while streaming
+                const streamDiv = document.createElement('div');
+                streamDiv.className = 'chatgpt-markdown';
+                streamDiv.innerHTML = renderMarkdownFragment(streamedAnswer);
+                answerBox.innerHTML = '';
+                answerBox.appendChild(streamDiv);
+                answerBox.scrollTop = answerBox.scrollHeight;
+              } else if (evt.type === 'error') {
+                stopThinkingAnimation();
+                answerBox.classList.remove('thinking');
+                answerBox.textContent = 'Error: ' + evt.content;
+                return;
+              } else if (evt.type === 'done') {
+                // Final render with full markdown + sources
+                renderAnswer(streamedAnswer, answerBox, streamSources, streamSourceDetails);
+              }
+            } catch (e) { /* skip malformed SSE lines */ }
+          }
+        }
+        // If stream ended without 'done' event, render what we have
+        if (streamedAnswer && !firstChunkReceived) {
+          stopThinkingAnimation();
+          answerBox.classList.remove('thinking');
+        }
+        if (streamedAnswer) {
+          renderAnswer(streamedAnswer, answerBox, streamSources, streamSourceDetails);
+        }
         
         // Mark that we've asked the first question for this ticket
         if (ticketSelect.value && !ticketFirstQuestionAsked[ticketSelect.value]) {
