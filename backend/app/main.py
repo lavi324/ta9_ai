@@ -794,7 +794,7 @@ def _ado_fetch_saved_query_wiql(project: str, query_path: str) -> str:
 
 
 def _ado_execute_wiql(project: str, wiql: str, label: str) -> List[int]:
-    url = f"{_ado_project_base(project)}/_apis/wit/wiql?api-version=7.1-preview.2"
+    url = f"{_ado_project_base(project)}/_apis/wit/wiql?api-version=7.1-preview.2&$top=20000"
     try:
         resp = requests.post(url, json={"query": wiql}, headers=_ado_headers(), timeout=60)
     except Exception as e:
@@ -2370,8 +2370,18 @@ def _ticket_search_terms(query: str) -> List[str]:
     if not normalized:
         return []
     stopwords = {
-        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "it",
-        "of", "on", "or", "that", "the", "this", "to", "was", "were", "with", "not",
+        "a", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from",
+        "had", "has", "have", "he", "her", "him", "his", "how", "if", "in",
+        "into", "is", "it", "its", "just", "like", "look", "me", "my", "no",
+        "nor", "not", "of", "on", "or", "our", "out", "own", "so", "some",
+        "than", "that", "the", "them", "then", "there", "these", "they",
+        "this", "to", "too", "up", "us", "very", "was", "we", "were", "what",
+        "when", "where", "which", "who", "whom", "why", "will", "with", "you",
+        "your", "also", "but", "can", "did", "does", "get", "got", "may",
+        "much", "must", "need", "see", "should", "such", "would", "could",
+        "about", "after", "all", "been", "before", "between", "both",
+        "each", "few", "more", "most", "other", "over", "same",
+        "through", "under", "until",
     }
     parts = [p for p in normalized.split(" ") if len(p) >= 2 and p not in stopwords]
     seen = set()
@@ -2381,6 +2391,12 @@ def _ticket_search_terms(query: str) -> List[str]:
             continue
         seen.add(part)
         terms.append(part)
+    # Cap at 15 most significant terms — since we combine them into a single
+    # Contains Words clause, more terms don't slow down the WIQL query.
+    # Prefer longer terms (more specific) when there are too many.
+    if len(terms) > 15:
+        terms.sort(key=lambda t: -len(t))
+        terms = terms[:15]
     return terms
 
 
@@ -2517,21 +2533,73 @@ def _ticket_keyword_match_score(query: str, title: str, description: str, discus
     return score, exact_hits, fuzzy_hits
 
 
-def _ado_inject_keyword_conditions(base_wiql: str, query: str) -> str:
-    """Inject keyword filtering into an existing WIQL using Contains Words on Title and Description."""
-    terms = _ticket_search_terms(query)
-    if not terms:
+def _ado_inject_keyword_conditions(base_wiql: str, query: str, use_or: bool = False) -> str:
+    """Inject keyword filtering into an existing WIQL.
+
+    Strategy: use individual `Contains Words` clauses per word, OR'd across
+    Title, Description, and ReproSteps.  Each word is a separate clause
+    because ADO `Contains Words 'w1 w2 w3'` fails when words include
+    possessives (e.g., "Client's" doesn't match "client").
+
+    We use up to 3 distinctive words, each requiring at least one field to
+    contain it.  The clauses are AND'd together so all 3 words must appear
+    somewhere.  Strict all-terms filtering happens in Python.
+    """
+    raw = re.sub(r"[^\w\s']", " ", str(query or "")).lower()
+    raw_words = [w.strip("' ") for w in raw.split()]
+    raw_words = [w for w in raw_words if len(w) >= 3]
+
+    # Handle apostrophes: "client's" → "client"
+    clean_words: List[str] = []
+    for w in raw_words:
+        if "'" in w:
+            base = w.split("'")[0]
+            if len(base) >= 3:
+                clean_words.append(base)
+        else:
+            clean_words.append(w)
+
+    seen: set = set()
+    unique_words: List[str] = []
+    for w in clean_words:
+        if w not in seen:
+            seen.add(w)
+            unique_words.append(w)
+
+    noise = {
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
+        "her", "was", "one", "our", "out", "has", "his", "how", "its", "may",
+        "new", "now", "old", "see", "way", "who", "did", "get", "got", "let",
+        "say", "she", "too", "use", "into", "that", "this", "with", "from",
+        "will", "won", "don", "isn", "does", "been", "have",
+        "just", "like", "also", "need", "were", "some", "them",
+        "than", "then", "what", "when", "where", "which", "would", "could",
+        "should", "about", "there", "these", "those",
+    }
+    content_words = [w for w in unique_words if w not in noise]
+    if not content_words:
+        content_words = unique_words[:3]
+    if not content_words:
         return base_wiql
 
-    # Build keyword condition: each term must appear in Title OR Description
-    term_conditions = []
-    for term in terms:
-        safe_term = term.replace("'", "''")
-        term_conditions.append(
-            f"([System.Title] Contains Words '{safe_term}' "
-            f"OR [System.Description] Contains Words '{safe_term}')"
-        )
-    keyword_clause = " AND ".join(term_conditions)
+    # Pick the single most distinctive (longest) word for the WIQL.
+    # Using more words causes ADO query timeouts on large projects because
+    # Contains Words on Description/ReproSteps is expensive.  One word
+    # is enough to get a manageable candidate set; strict all-terms
+    # filtering happens in Python (Phase 3).
+    distinctive = sorted(content_words, key=lambda t: -len(t))[:1]
+    print(f"[ADO][WIQL] clean_words={content_words} | distinctive={distinctive}")
+
+    fields = [
+        "[System.Title]",
+        "[System.Description]",
+        "[Microsoft.VSTS.TCM.ReproSteps]",
+    ]
+
+    # Single word across all fields with OR
+    safe_word = distinctive[0].replace("'", "''")
+    field_parts = " OR ".join(f"{f} Contains Words '{safe_word}'" for f in fields)
+    keyword_clause = f"({field_parts})"
 
     wiql_upper = base_wiql.upper()
     order_pos = wiql_upper.rfind("ORDER BY")
@@ -2539,9 +2607,9 @@ def _ado_inject_keyword_conditions(base_wiql: str, query: str) -> str:
     if order_pos > 0:
         before_order = base_wiql[:order_pos].rstrip()
         order_part = base_wiql[order_pos:]
-        return f"{before_order} AND ({keyword_clause}) {order_part}"
+        return f"{before_order} AND {keyword_clause} {order_part}"
     else:
-        return f"{base_wiql.rstrip()} AND ({keyword_clause})"
+        return f"{base_wiql.rstrip()} AND {keyword_clause}"
 
 
 def _ado_fetch_work_items_lightweight(ids: List[int]) -> List[dict]:
@@ -2571,8 +2639,48 @@ def _ado_fetch_work_items_lightweight(ids: List[int]) -> List[dict]:
     return results
 
 
+def _ado_fetch_comments_for_search(work_item_ids: List[int], max_workers: int = 10) -> Dict[int, str]:
+    """Fetch discussion comments for a batch of work items concurrently.
+
+    Returns a dict mapping work-item ID → plain-text discussion (HTML stripped).
+    """
+    if not work_item_ids:
+        return {}
+
+    hdrs = _ado_headers()
+
+    def _fetch_one(wid: int) -> Tuple[int, str]:
+        try:
+            url = (
+                f"{_ado_project_base(None)}/_apis/wit/workItems/{wid}"
+                f"/comments?api-version=7.1-preview.3"
+            )
+            resp = requests.get(url, headers=hdrs, timeout=15)
+            if resp.status_code == 200:
+                texts = [
+                    _strip_html(c.get("text", "") or "")
+                    for c in resp.json().get("comments", [])
+                ]
+                return wid, " ".join(t for t in texts if t)
+        except Exception as exc:
+            print(f"[ADO][SEARCH][WARN] Comment fetch for #{wid} failed: {exc}")
+        return wid, ""
+
+    results: Dict[int, str] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_fetch_one, wid): wid for wid in work_item_ids}
+        for future in futures:
+            wid, text = future.result()
+            results[wid] = text
+
+    print(f"[ADO][SEARCH] Fetched comments for {len(results)} work items "
+          f"({sum(1 for v in results.values() if v)} have discussion)")
+    return results
+
+
 def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 500) -> List[dict]:
-    """Search work items from configured keyword query targets by Title, Description, and Discussion."""
+    """Search work items by keywords.  Only tickets that contain ALL search
+    terms (in their normalized title + description) are returned."""
     normalized_query = _normalize_ticket_search_text(query)
     terms = _ticket_search_terms(query)
 
@@ -2585,7 +2693,9 @@ def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 
     safe_max_scan = max(1, min(int(max_scan or 500), 2000))
     safe_limit = max(1, min(int(limit or 100), 100))
 
-    # --- Phase 1: Collect ticket IDs using keyword-filtered WIQL -------------
+    # --- Phase 1: Broad WIQL to get candidate IDs ----------------------------
+    # The WIQL uses OR with a few distinctive terms to cast a wide net.
+    # Strict ALL-terms filtering happens in Python on normalized text (Phase 3).
     merged_ids: List[int] = []
     seen_ids: set = set()
 
@@ -2598,22 +2708,16 @@ def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 
     # Strategy A: Direct WIQL override with keyword injection
     if ADO_KEYWORD_WIQL:
         filtered_wiql = _ado_inject_keyword_conditions(ADO_KEYWORD_WIQL, query)
-        print(f"[ADO][SEARCH] Using keyword-filtered WIQL: {filtered_wiql[:200]}")
+        print(f"[ADO][SEARCH] Using keyword-filtered WIQL: {filtered_wiql[:400]}")
         try:
             project = (ADO_PROJECT or "").strip()
             ids = _ado_execute_wiql(project, filtered_wiql, "ADO_KEYWORD_WIQL_FILTERED")
             print(f"[ADO][SEARCH] Keyword-filtered WIQL returned {len(ids)} IDs")
             _add_ids(ids)
         except Exception as exc:
-            print(f"[ADO][SEARCH][WARN] Keyword-filtered WIQL failed, falling back to unfiltered: {exc}")
-            try:
-                ids = _ado_execute_wiql(project, ADO_KEYWORD_WIQL, "ADO_KEYWORD_WIQL")
-                print(f"[ADO][SEARCH] Unfiltered WIQL returned {len(ids)} IDs")
-                _add_ids(ids)
-            except Exception as exc2:
-                print(f"[ADO][SEARCH][ERROR] Unfiltered WIQL also failed: {exc2}")
+            print(f"[ADO][SEARCH][WARN] Keyword-filtered WIQL failed: {exc}")
 
-    # Strategy B: Saved query targets with keyword injection
+    # Strategy B: Saved query targets with keyword injection (fallback)
     if not merged_ids:
         query_targets = _ado_keyword_ticket_query_definitions()
         print(f"[ADO][SEARCH] query_targets={query_targets}")
@@ -2623,7 +2727,7 @@ def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 
             try:
                 wiql = _ado_fetch_saved_query_wiql(project, query_path)
                 filtered_wiql = _ado_inject_keyword_conditions(wiql, query)
-                print(f"[ADO][SEARCH] fetched & filtered WIQL: {filtered_wiql[:200]}")
+                print(f"[ADO][SEARCH] fetched & filtered WIQL: {filtered_wiql[:400]}")
                 ids = _ado_execute_wiql(project, filtered_wiql, f"{label}_filtered")
                 print(f"[ADO][SEARCH] got {len(ids)} IDs")
                 _add_ids(ids)
@@ -2631,24 +2735,7 @@ def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 
                 print(f"[ADO][SEARCH][ERROR] saved query '{label}' failed: {exc}")
                 continue
 
-    # Strategy C: Fallback – keyword-filtered project-wide WIQL
-    if not merged_ids and ADO_PROJECT:
-        print(f"[ADO][SEARCH] All query strategies failed. Falling back to keyword-filtered project-wide WIQL.")
-        project_name = (ADO_PROJECT or '').strip()
-        fallback_wiql = (
-            "SELECT [System.Id] FROM WorkItems "
-            f"WHERE [System.TeamProject] = '{project_name}' "
-            "ORDER BY [System.ChangedDate] DESC"
-        )
-        filtered_fallback = _ado_inject_keyword_conditions(fallback_wiql, query)
-        try:
-            ids = _ado_execute_wiql(project_name, filtered_fallback, "fallback-keyword-filtered")
-            print(f"[ADO][SEARCH] Fallback keyword-filtered WIQL returned {len(ids)} IDs")
-            _add_ids(ids)
-        except Exception as exc:
-            print(f"[ADO][SEARCH][ERROR] Fallback keyword-filtered WIQL failed: {exc}")
-
-    print(f"[ADO][SEARCH] Total merged IDs: {len(merged_ids)}")
+    print(f"[ADO][SEARCH] Total candidate IDs from WIQL: {len(merged_ids)}")
 
     if not merged_ids:
         print(f"[ADO][SEARCH] No ticket IDs found from any strategy.")
@@ -2663,7 +2750,9 @@ def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 
             fid = wi.get("id")
             flds = wi.get("fields", {})
             title = flds.get("System.Title", "")
-            description = flds.get("System.Description", "") or flds.get("Microsoft.VSTS.TCM.ReproSteps", "") or ""
+            desc_raw = flds.get("System.Description", "") or ""
+            repro_raw = flds.get("Microsoft.VSTS.TCM.ReproSteps", "") or ""
+            description = f"{desc_raw} {repro_raw}".strip()
             state = flds.get("System.State", "")
             tags = flds.get("System.Tags", "")
             project_name = flds.get("System.TeamProject", "")
@@ -2684,49 +2773,81 @@ def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 
     except Exception as exc:
         print(f"[ADO][SEARCH][ERROR] Work item batch fetch failed: {exc}")
 
-    print(f"[ADO][SEARCH] Scoring {len(candidates)} candidates against query '{query}'...")
+    # --- Phase 2.5: Two-pass filtering to avoid fetching comments for all candidates.
+    # Pass A: check title + description only (already fetched). Tickets where
+    # ALL terms match go straight to results. Tickets that are CLOSE (at least
+    # 60% of terms match) are "maybe" candidates that need discussion check.
+    print(f"[ADO][SEARCH] Pass A: title+description filter for {len(candidates)} candidates ({len(terms)} terms)...")
 
-    # --- Phase 3: Score candidates for ranking --------------------------------
-    # Since WIQL already pre-filtered by keywords, every candidate is a confirmed
-    # match. Scoring is used only for *ranking* (best matches first), not filtering.
-    # Candidates that score 0 locally still get a baseline score so they appear at
-    # the bottom rather than being dropped entirely.
-    BASELINE_SCORE = 0.1
-    ranked: List[dict] = []
+    matched: List[dict] = []
+    needs_discussion: List[dict] = []
+    min_term_ratio = 0.6  # at least 60% of terms must be in title+desc to warrant comment fetch
+
     for item in candidates:
         work_item_id = item.get("id")
         if not work_item_id:
             continue
         title = item.get("title", "") or ""
         description = item.get("_description", "") or ""
+        td_norm = _normalize_ticket_search_text(f"{title} {description}")
 
-        score, exact_hits, fuzzy_hits = _ticket_keyword_match_score(query, title, description, "")
-        # Never discard – WIQL already confirmed the match
-        effective_score = max(score, BASELINE_SCORE)
+        missing = [t for t in terms if t not in td_norm]
+        if not missing:
+            # All terms found in title+description — immediate match
+            title_norm = _normalize_ticket_search_text(title)
+            hits_in_title = sum(1 for t in terms if t in title_norm)
+            total_occurrences = sum(td_norm.count(t) for t in terms)
+            matched.append({**item, "_hits_in_title": hits_in_title, "_total_occurrences": total_occurrences})
+        elif terms and (len(terms) - len(missing)) / len(terms) >= min_term_ratio:
+            # Close match — needs discussion to fill in the missing terms
+            needs_discussion.append({**item, "_missing": missing, "_td_norm": td_norm})
 
-        ranked.append(
-            {
-                **item,
-                "_score": effective_score,
-                "_exact_hits": exact_hits,
-                "_fuzzy_hits": fuzzy_hits,
-            }
-        )
+    print(f"[ADO][SEARCH] Pass A done: {len(matched)} immediate matches, {len(needs_discussion)} need discussion check")
 
-    ranked.sort(
+    # Pass B: fetch discussion ONLY for close-match tickets
+    if needs_discussion:
+        discussion_ids = [item["id"] for item in needs_discussion]
+        print(f"[ADO][SEARCH] Pass B: fetching discussion for {len(discussion_ids)} close-match tickets...")
+        try:
+            discussion_map = _ado_fetch_comments_for_search(discussion_ids, max_workers=10)
+        except Exception as exc:
+            print(f"[ADO][SEARCH][WARN] Discussion fetch failed: {exc}")
+            discussion_map = {}
+
+        for item in needs_discussion:
+            work_item_id = item["id"]
+            discussion = discussion_map.get(work_item_id, "")
+            if not discussion:
+                continue
+            discussion_norm = _normalize_ticket_search_text(discussion)
+            # Check if the missing terms are in the discussion
+            still_missing = [t for t in item["_missing"] if t not in discussion_norm]
+            if still_missing:
+                continue
+            # All terms accounted for across title+desc+discussion
+            title = item.get("title", "") or ""
+            title_norm = _normalize_ticket_search_text(title)
+            combined_norm = f"{item['_td_norm']} {discussion_norm}"
+            hits_in_title = sum(1 for t in terms if t in title_norm)
+            total_occurrences = sum(combined_norm.count(t) for t in terms)
+            matched.append({
+                k: v for k, v in item.items() if not k.startswith("_")
+            } | {"_hits_in_title": hits_in_title, "_total_occurrences": total_occurrences})
+
+    # Sort: more title hits first, then more total occurrences, then newest
+    matched.sort(
         key=lambda x: (
-            -float(x.get("_score") or 0.0),
-            -int(x.get("_exact_hits") or 0),
-            -int(x.get("_fuzzy_hits") or 0),
+            -int(x.get("_hits_in_title") or 0),
+            -int(x.get("_total_occurrences") or 0),
             str(x.get("changedDate") or ""),
         )
     )
 
     results = [
         {k: v for k, v in item.items() if not k.startswith("_")}
-        for item in ranked[:safe_limit]
+        for item in matched[:safe_limit]
     ]
-    print(f"[ADO][SEARCH] Done. {len(ranked)} scored from {len(candidates)} candidates, returning top {len(results)}")
+    print(f"[ADO][SEARCH] Done. {len(matched)} tickets have ALL terms, returning top {len(results)}")
     return results
 
 def ado_parse_id_from_url(url: str) -> Optional[int]:
@@ -5557,69 +5678,6 @@ def vector_db_delete_document(req: VectorDbDocumentDeleteRequest):
     }
 
 
-@app.post("/internal/reinsert-backup")
-def reinsert_backup():
-    """Temporary endpoint: re-insert User Guide chunks from backup JSON using the app's own DB connection."""
-    import json as _json
-    backup_path = "/app/chroma_db/user_guide_backup.json"
-    if not os.path.exists(backup_path):
-        raise HTTPException(status_code=404, detail="Backup file not found")
-
-    with open(backup_path) as f:
-        data = _json.load(f)
-    ids = data["ids"]
-    docs = data["documents"]
-    metas = data["metadatas"]
-    total = len(ids)
-    print(f"[REINSERT] Loaded {total} chunks from backup")
-
-    # Check which chunks already exist
-    existing = set()
-    for i in range(0, total, 500):
-        batch_ids = ids[i:i+500]
-        try:
-            got = collection.get(ids=batch_ids)
-            existing.update(got["ids"])
-        except Exception:
-            pass
-    print(f"[REINSERT] {len(existing)} chunks already exist, skipping those")
-
-    # Filter remaining
-    todo_ids, todo_docs, todo_metas = [], [], []
-    for i in range(total):
-        if ids[i] not in existing:
-            todo_ids.append(ids[i])
-            todo_docs.append(docs[i])
-            todo_metas.append(metas[i])
-    remaining = len(todo_ids)
-    print(f"[REINSERT] Need to insert {remaining} chunks")
-    if remaining == 0:
-        return {"message": "All chunks already present", "total": total, "inserted": 0, "collection_count": collection.count()}
-
-    BATCH = 50
-    inserted = 0
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-    for i in range(0, remaining, BATCH):
-        b_ids = todo_ids[i:i+BATCH]
-        b_docs = todo_docs[i:i+BATCH]
-        b_metas = todo_metas[i:i+BATCH]
-
-        # Batch embed via OpenAI API
-        body = {"model": OPENAI_EMBEDDING_MODEL, "input": b_docs}
-        resp = requests.post(f"{OPENAI_URL}/embeddings", json=body, headers=headers, timeout=120)
-        if resp.status_code != 200:
-            return {"error": f"OpenAI embeddings failed at batch {i}: {resp.text[:300]}", "inserted_so_far": inserted}
-        embeddings = [item["embedding"] for item in sorted(resp.json()["data"], key=lambda x: x["index"])]
-
-        collection.add(ids=b_ids, documents=b_docs, metadatas=b_metas, embeddings=embeddings)
-        inserted += len(b_ids)
-        print(f"[REINSERT] Inserted {inserted}/{remaining} (collection count: {collection.count()})")
-
-    result = {"message": "Re-insertion complete", "total": total, "inserted": inserted, "collection_count": collection.count()}
-    print(f"[REINSERT] Done: {result}")
-    return result
-
-
 @app.get("/health")
 def health():
     print("[API][HEALTH] /health called")
@@ -6789,85 +6847,3 @@ def chat(req: ChatRequest):
 
     print(f"[API][CHAT] Returning answer len={len(answer)} with {len(source_strings)} sources | total_time={time.time() - _chat_t0:.2f}s")
     return ChatResponse(answer=answer, sources=source_strings, source_details=source_detail_list)
-
-
-# ---------------------------------------------------------------------
-# TEMPORARY: Re-insert User Guide chunks from backup
-# ---------------------------------------------------------------------
-@app.post("/admin/reinsert-all")
-def admin_reinsert_all():
-    """Re-insert all documents from backup JSONs into both collections."""
-    import json as _json
-
-    results = {}
-    backups = [
-        ("Intsight", os.path.join(CHROMA_DIR, "Intsight_full_backup.json"), collection),
-        ("New_Knowledge", os.path.join(CHROMA_DIR, "New_Knowledge_full_backup.json"), memory_collection),
-    ]
-
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-    BATCH = 50
-
-    for col_name, backup_path, col_obj in backups:
-        if not os.path.exists(backup_path):
-            print(f"[REINSERT][{col_name}] Backup file not found: {backup_path}")
-            results[col_name] = {"status": "skipped", "reason": "backup_not_found"}
-            continue
-
-        print(f"[REINSERT][{col_name}] Loading backup...")
-        with open(backup_path) as f:
-            data = _json.load(f)
-        ids = data["ids"]
-        docs = data["documents"]
-        metas = data["metadatas"]
-        total = len(ids)
-        print(f"[REINSERT][{col_name}] Loaded {total} chunks")
-
-        # Check which already exist
-        existing = set()
-        for i in range(0, total, 500):
-            try:
-                got = col_obj.get(ids=ids[i:i+500])
-                existing.update(got["ids"])
-            except Exception:
-                pass
-        print(f"[REINSERT][{col_name}] {len(existing)} already exist")
-
-        todo_ids, todo_docs, todo_metas = [], [], []
-        for i in range(total):
-            if ids[i] not in existing:
-                todo_ids.append(ids[i])
-                todo_docs.append(docs[i])
-                todo_metas.append(metas[i])
-
-        remaining = len(todo_ids)
-        if remaining == 0:
-            results[col_name] = {"status": "nothing_to_do", "already_exist": len(existing), "count": col_obj.count()}
-            print(f"[REINSERT][{col_name}] Nothing to insert")
-            continue
-
-        print(f"[REINSERT][{col_name}] Need to insert {remaining} chunks")
-        inserted = 0
-        for i in range(0, remaining, BATCH):
-            b_ids = todo_ids[i:i+BATCH]
-            b_docs = todo_docs[i:i+BATCH]
-            b_metas = todo_metas[i:i+BATCH]
-
-            body = {"model": OPENAI_EMBEDDING_MODEL, "input": b_docs}
-            resp = requests.post(f"{OPENAI_URL}/embeddings", json=body, headers=headers, timeout=120)
-            if resp.status_code != 200:
-                print(f"[REINSERT][{col_name}][ERROR] Embedding API error: {resp.text[:400]}")
-                results[col_name] = {"status": "error", "detail": resp.text[:400], "inserted_so_far": inserted}
-                break
-            emb_data = resp.json()
-            embeddings = [item["embedding"] for item in sorted(emb_data["data"], key=lambda x: x["index"])]
-
-            col_obj.add(ids=b_ids, documents=b_docs, metadatas=b_metas, embeddings=embeddings)
-            inserted += len(b_ids)
-            print(f"[REINSERT][{col_name}] {inserted}/{remaining} done")
-        else:
-            final_count = col_obj.count()
-            print(f"[REINSERT][{col_name}] Complete! Inserted {inserted}, final count: {final_count}")
-            results[col_name] = {"status": "done", "inserted": inserted, "skipped": len(existing), "count": final_count}
-
-    return results
