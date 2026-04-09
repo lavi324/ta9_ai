@@ -796,7 +796,7 @@ def _ado_fetch_saved_query_wiql(project: str, query_path: str) -> str:
 def _ado_execute_wiql(project: str, wiql: str, label: str) -> List[int]:
     url = f"{_ado_project_base(project)}/_apis/wit/wiql?api-version=7.1-preview.2&$top=20000"
     try:
-        resp = requests.post(url, json={"query": wiql}, headers=_ado_headers(), timeout=60)
+        resp = requests.post(url, json={"query": wiql}, headers=_ado_headers(), timeout=8)
     except Exception as e:
         print(f"[ADO][TICKETS][ERROR] Query '{label}' failed during execution: {e}")
         traceback.print_exc()
@@ -2583,10 +2583,10 @@ def _ado_inject_keyword_conditions(base_wiql: str, query: str, use_or: bool = Fa
         return base_wiql
 
     # Pick the single most distinctive (longest) word for the WIQL.
-    # Using more words causes ADO query timeouts on large projects because
-    # Contains Words on Description/ReproSteps is expensive.  One word
-    # is enough to get a manageable candidate set; strict all-terms
-    # filtering happens in Python (Phase 3).
+    # Using multiple AND'd Contains Words clauses causes ADO query timeouts
+    # (30s) on large projects.  One word keeps WIQL fast; strict all-terms
+    # filtering happens in Python, and the Search API (Strategy C) catches
+    # anything the single-word WIQL misses.
     distinctive = sorted(content_words, key=lambda t: -len(t))[:1]
     print(f"[ADO][WIQL] clean_words={content_words} | distinctive={distinctive}")
 
@@ -2610,6 +2610,89 @@ def _ado_inject_keyword_conditions(base_wiql: str, query: str, use_or: bool = Fa
         return f"{before_order} AND {keyword_clause} {order_part}"
     else:
         return f"{base_wiql.rstrip()} AND {keyword_clause}"
+
+
+def _ado_search_api(query: str, top: int = 200) -> List[int]:
+    """Use the ADO Search API to find work items by full-text search.
+
+    This searches ALL fields including discussion/comments, which the WIQL
+    Contains Words operator cannot do efficiently.  Returns work item IDs.
+    """
+    search_url = (
+        f"https://almsearch.dev.azure.com/{ADO_ORG}"
+        f"/_apis/search/workitemsearchresults?api-version=7.1-preview.1"
+    )
+
+    # Build search text: use the longest content words joined by AND so all
+    # must appear somewhere in the work item (any field).
+    raw = re.sub(r"[^\w\s']", " ", str(query or "")).lower()
+    raw_words = [w.strip("' ") for w in raw.split()]
+    raw_words = [w for w in raw_words if len(w) >= 3]
+    # Strip possessives
+    clean: List[str] = []
+    for w in raw_words:
+        if "'" in w:
+            base = w.split("'")[0]
+            if len(base) >= 3:
+                clean.append(base)
+        else:
+            clean.append(w)
+    # Deduplicate
+    seen: set = set()
+    unique: List[str] = []
+    for w in clean:
+        if w not in seen:
+            seen.add(w)
+            unique.append(w)
+    noise = {
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
+        "her", "was", "one", "our", "out", "has", "his", "how", "its", "may",
+        "new", "now", "old", "see", "way", "who", "did", "get", "got", "let",
+        "say", "she", "too", "use", "into", "that", "this", "with", "from",
+        "will", "won", "don", "isn", "does", "been", "have",
+        "just", "like", "also", "need", "were", "some", "them",
+        "than", "then", "what", "when", "where", "which", "would", "could",
+        "should", "about", "there", "these", "those",
+    }
+    content = [w for w in unique if w not in noise]
+    if not content:
+        content = unique[:5]
+    if not content:
+        return []
+
+    # Pick up to 8 most distinctive words for search query
+    distinctive = sorted(content, key=lambda t: -len(t))[:8]
+    search_text = " AND ".join(distinctive)
+    print(f"[ADO][SEARCH-API] searchText='{search_text}'")
+
+    body: dict = {
+        "searchText": search_text,
+        "$top": min(top, 1000),
+        "$skip": 0,
+    }
+
+    try:
+        resp = requests.post(search_url, json=body, headers=_ado_headers(), timeout=15)
+    except Exception as exc:
+        print(f"[ADO][SEARCH-API][ERROR] Request failed: {exc}")
+        return []
+
+    if resp.status_code != 200:
+        print(f"[ADO][SEARCH-API][ERROR] {resp.status_code}: {resp.text[:300]}")
+        return []
+
+    results = resp.json().get("results", [])
+    ids: List[int] = []
+    for r in results:
+        fields = r.get("fields", {})
+        wid = fields.get("system.id")
+        if wid:
+            try:
+                ids.append(int(wid))
+            except (ValueError, TypeError):
+                pass
+    print(f"[ADO][SEARCH-API] Returned {len(ids)} work item IDs")
+    return ids
 
 
 def _ado_fetch_work_items_lightweight(ids: List[int]) -> List[dict]:
@@ -2705,17 +2788,38 @@ def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 
                 seen_ids.add(item_id)
                 merged_ids.append(item_id)
 
-    # Strategy A: Direct WIQL override with keyword injection
-    if ADO_KEYWORD_WIQL:
+    # --- Run WIQL (Strategy A) and Search API (Strategy C) in parallel ---
+    # Both hit ADO over HTTP; running them concurrently halves the wait time.
+    wiql_ids: List[int] = []
+    search_api_ids: List[int] = []
+
+    def _run_wiql():
+        nonlocal wiql_ids
+        if not ADO_KEYWORD_WIQL:
+            return
         filtered_wiql = _ado_inject_keyword_conditions(ADO_KEYWORD_WIQL, query)
         print(f"[ADO][SEARCH] Using keyword-filtered WIQL: {filtered_wiql[:400]}")
         try:
             project = (ADO_PROJECT or "").strip()
             ids = _ado_execute_wiql(project, filtered_wiql, "ADO_KEYWORD_WIQL_FILTERED")
             print(f"[ADO][SEARCH] Keyword-filtered WIQL returned {len(ids)} IDs")
-            _add_ids(ids)
+            wiql_ids = ids
         except Exception as exc:
             print(f"[ADO][SEARCH][WARN] Keyword-filtered WIQL failed: {exc}")
+
+    def _run_search_api():
+        nonlocal search_api_ids
+        try:
+            search_api_ids = _ado_search_api(query, top=200)
+        except Exception as exc:
+            print(f"[ADO][SEARCH][WARN] ADO Search API failed: {exc}")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        executor.submit(_run_wiql)
+        executor.submit(_run_search_api)
+        executor.shutdown(wait=True)
+
+    _add_ids(wiql_ids)
 
     # Strategy B: Saved query targets with keyword injection (fallback)
     if not merged_ids:
@@ -2734,6 +2838,14 @@ def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 
             except Exception as exc:
                 print(f"[ADO][SEARCH][ERROR] saved query '{label}' failed: {exc}")
                 continue
+
+    # Merge Search API results
+    search_api_id_set: set = set()
+    if search_api_ids:
+        search_api_id_set = set(search_api_ids)
+        before = len(merged_ids)
+        _add_ids(search_api_ids)
+        print(f"[ADO][SEARCH] Search API added {len(merged_ids) - before} new IDs (total now {len(merged_ids)})")
 
     print(f"[ADO][SEARCH] Total candidate IDs from WIQL: {len(merged_ids)}")
 
@@ -2775,13 +2887,12 @@ def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 
 
     # --- Phase 2.5: Two-pass filtering to avoid fetching comments for all candidates.
     # Pass A: check title + description only (already fetched). Tickets where
-    # ALL terms match go straight to results. Tickets that are CLOSE (at least
-    # 60% of terms match) are "maybe" candidates that need discussion check.
+    # ALL terms match go straight to results. Others are queued for discussion
+    # check, sorted by how many terms already match (best partial matches first).
     print(f"[ADO][SEARCH] Pass A: title+description filter for {len(candidates)} candidates ({len(terms)} terms)...")
 
     matched: List[dict] = []
     needs_discussion: List[dict] = []
-    min_term_ratio = 0.6  # at least 60% of terms must be in title+desc to warrant comment fetch
 
     for item in candidates:
         work_item_id = item.get("id")
@@ -2797,19 +2908,31 @@ def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 
             title_norm = _normalize_ticket_search_text(title)
             hits_in_title = sum(1 for t in terms if t in title_norm)
             total_occurrences = sum(td_norm.count(t) for t in terms)
-            matched.append({**item, "_hits_in_title": hits_in_title, "_total_occurrences": total_occurrences})
-        elif terms and (len(terms) - len(missing)) / len(terms) >= min_term_ratio:
-            # Close match — needs discussion to fill in the missing terms
-            needs_discussion.append({**item, "_missing": missing, "_td_norm": td_norm})
+            matched.append({**item, "_hits_in_title": hits_in_title, "_total_occurrences": total_occurrences, "_combined_norm": td_norm})
+        elif terms:
+            hit_count = len(terms) - len(missing)
+            # Queue for discussion check — sort by hit_count later to prioritize best partial matches
+            needs_discussion.append({**item, "_missing": missing, "_td_norm": td_norm, "_hit_count": hit_count})
 
     print(f"[ADO][SEARCH] Pass A done: {len(matched)} immediate matches, {len(needs_discussion)} need discussion check")
 
-    # Pass B: fetch discussion ONLY for close-match tickets
+    # Pass B: fetch discussion ONLY for top candidates sorted by partial match quality.
+    # If Pass A already found matches, limit discussion fetch to save time.
+    # If Pass A found 0 matches, invest more in discussion search.
+    # Candidates found by the Search API are always included (they matched
+    # the full query server-side, so they're very likely to pass strict filtering).
+    discussion_cap = 10 if matched else 50
     if needs_discussion:
+        # Partition: Search-API hits first (always checked), then the rest sorted by hit_count.
+        from_search_api = [x for x in needs_discussion if x.get("id") in search_api_id_set]
+        from_wiql = [x for x in needs_discussion if x.get("id") not in search_api_id_set]
+        from_wiql.sort(key=lambda x: -x.get("_hit_count", 0))
+        remaining_cap = max(0, discussion_cap - len(from_search_api))
+        needs_discussion = from_search_api + from_wiql[:remaining_cap]
         discussion_ids = [item["id"] for item in needs_discussion]
-        print(f"[ADO][SEARCH] Pass B: fetching discussion for {len(discussion_ids)} close-match tickets...")
+        print(f"[ADO][SEARCH] Pass B: fetching discussion for {len(discussion_ids)} tickets ({len(from_search_api)} from Search API)...")
         try:
-            discussion_map = _ado_fetch_comments_for_search(discussion_ids, max_workers=10)
+            discussion_map = _ado_fetch_comments_for_search(discussion_ids, max_workers=20)
         except Exception as exc:
             print(f"[ADO][SEARCH][WARN] Discussion fetch failed: {exc}")
             discussion_map = {}
@@ -2832,7 +2955,7 @@ def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 
             total_occurrences = sum(combined_norm.count(t) for t in terms)
             matched.append({
                 k: v for k, v in item.items() if not k.startswith("_")
-            } | {"_hits_in_title": hits_in_title, "_total_occurrences": total_occurrences})
+            } | {"_hits_in_title": hits_in_title, "_total_occurrences": total_occurrences, "_combined_norm": combined_norm})
 
     # Sort: more title hits first, then more total occurrences, then newest
     matched.sort(
@@ -2842,6 +2965,17 @@ def ado_search_tickets_by_keywords(query: str, limit: int = 20, max_scan: int = 
             str(x.get("changedDate") or ""),
         )
     )
+
+    # --- Phrase proximity filter ---
+    # When multiple tickets match all keyword terms, prefer those that contain
+    # the original query as a contiguous phrase.  This eliminates false positives
+    # where keywords happen to appear scattered across unrelated sentences.
+    query_words = normalized_query.split()
+    if len(matched) > 1 and len(query_words) >= 3:
+        phrase_matches = [item for item in matched if normalized_query in (item.get("_combined_norm") or "")]
+        if phrase_matches and len(phrase_matches) < len(matched):
+            print(f"[ADO][SEARCH] Phrase filter: {len(phrase_matches)} of {len(matched)} tickets contain the full query phrase")
+            matched = phrase_matches
 
     results = [
         {k: v for k, v in item.items() if not k.startswith("_")}
