@@ -8647,19 +8647,8 @@
         keywordSearchBtn.disabled = !!ticketKeywordState.loading;
         keywordSearchBtn.textContent = 'Search';
 
-        keywordResultsSelect.innerHTML = '';
-        if (ticketKeywordState.active && ticketItems.length > 0) {
-          keywordResults.classList.remove('hidden');
-
-          for (const item of ticketItems) {
-            const option = document.createElement('option');
-            option.value = item.url;
-            option.textContent = `#${item.id} | ${item.project ? `[${item.project}] ` : ''}${item.title}`;
-            keywordResultsSelect.appendChild(option);
-          }
-
-          keywordResultsSelect.selectedIndex = -1;
-        } else {
+        if (!ticketKeywordState.active) {
+          keywordResultsSelect.innerHTML = '';
           keywordResults.classList.add('hidden');
         }
 
@@ -8730,7 +8719,17 @@
             status: `Found ${items.length} matching ticket(s), choose a ticket from the list under.`,
             isError: false,
           };
-          renderTicketOptions(items, ticketSelect.value);
+          applyKeywordUiState();
+          // Populate keyword results dropdown with matched items
+          keywordResultsSelect.innerHTML = '';
+          keywordResults.classList.remove('hidden');
+          for (const item of items) {
+            const option = document.createElement('option');
+            option.value = item.url;
+            option.textContent = `#${item.id} | ${item.project ? `[${item.project}] ` : ''}${item.title}`;
+            keywordResultsSelect.appendChild(option);
+          }
+          keywordResultsSelect.selectedIndex = -1;
           didRerender = true;
         } catch (err) {
           console.warn('Ticket keyword search failed', err);
