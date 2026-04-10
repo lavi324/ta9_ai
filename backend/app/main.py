@@ -5159,7 +5159,7 @@ def _score_vector_document_summary(item: dict, query: str) -> Optional[dict]:
         exact_in_source = False
         exact_in_content = False
 
-    has_any_match = exact_in_title or exact_in_source or exact_in_content or bool(matched_terms)
+    has_any_match = exact_in_title or exact_in_source or exact_in_content
     if not has_any_match:
         return None
 
@@ -5569,33 +5569,22 @@ def vector_db_documents(
         raise HTTPException(status_code=400, detail=f"Unsupported sort_direction: {sort_direction}")
 
     summaries = _group_collection_documents(collection_name)
-    search_value = (search or "").strip()
+    search_value = (search or "").strip()[:40]
     if search_value:
-        full_term_matches: List[dict] = []
-        partial_matches: List[dict] = []
+        needle = search_value.lower()
+        matched_docs: List[dict] = []
         for item in summaries:
-            match_meta = _score_vector_document_summary(item, search_value)
-            if not match_meta:
+            full_content = str(item.get("_search_content") or "").lower()
+            title_text = str(item.get("title") or "").lower()
+            source_text = str(item.get("source") or "").lower()
+            if needle not in full_content and needle not in title_text and needle not in source_text:
                 continue
-
             matched_item = dict(item)
-            matched_item["preview"] = match_meta["preview"]
-            matched_item["_search_score"] = match_meta["score"]
-
-            if match_meta["all_terms_matched"] or not _tokenize_normalized(search_value):
-                full_term_matches.append(matched_item)
-            else:
-                partial_matches.append(matched_item)
-
-        active_matches = full_term_matches if full_term_matches else partial_matches
-        active_matches.sort(
-            key=lambda item: (
-                -float(item.get("_search_score") or 0.0),
-                str(item.get("updated_at") or ""),
-                str(item.get("title") or "").lower(),
+            matched_item["preview"] = _build_vector_search_preview(
+                item.get("_search_content", ""), search_value, str(item.get("preview") or "")
             )
-        )
-        summaries = active_matches
+            matched_docs.append(matched_item)
+        summaries = matched_docs
 
     if normalized_sort_by == "token_count":
         summaries.sort(
