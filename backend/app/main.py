@@ -2331,14 +2331,39 @@ def ado_get_ticket_picker_item(work_item_id: int) -> dict:
     fields = wi.get("fields", {}) or {}
     project_name = str(fields.get("System.TeamProject") or ADO_PROJECT or "").strip()
     expected_project = str(ADO_PROJECT or "").strip()
-    if expected_project and project_name and project_name.lower() != expected_project.lower():
+
+    # Allow tickets from the configured project AND from "TA9 Support".
+    allowed_projects = {expected_project.lower()} if expected_project else set()
+    allowed_projects.add("ta9 support")
+
+    if allowed_projects and project_name and project_name.lower() not in allowed_projects:
         raise HTTPException(
             status_code=404,
             detail=(
                 f"Ticket #{work_item_id} belongs to project '{project_name}'. "
-                f"Please provide a ticket from '{expected_project}'."
+                f"Please provide a ticket from one of: {', '.join(sorted(p.title() for p in allowed_projects if p))}."
             ),
         )
+
+    # For non-primary projects, enforce a 2-year age limit.
+    if project_name and expected_project and project_name.lower() != expected_project.lower():
+        created_str = str(fields.get("System.CreatedDate") or "").strip()
+        if created_str:
+            try:
+                from datetime import timezone, timedelta
+                created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                cutoff = datetime.now(timezone.utc) - timedelta(days=730)
+                if created_dt < cutoff:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=(
+                            f"Ticket #{work_item_id} from '{project_name}' is older than 2 years."
+                        ),
+                    )
+            except HTTPException:
+                raise
+            except Exception:
+                pass  # If date parsing fails, allow it through
 
     title = str(fields.get("System.Title") or "").strip()
     state = str(fields.get("System.State") or "").strip()
