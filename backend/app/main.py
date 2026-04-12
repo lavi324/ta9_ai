@@ -461,14 +461,8 @@ def embed_text(text: str) -> List[float]:
     return emb
 
 
-def embed_texts_batch(texts: List[str]) -> List[List[float]]:
-    """Batch embed multiple texts in a single API call. Much faster than sequential embed_text calls."""
-    if not texts:
-        return []
-    if len(texts) == 1:
-        return [embed_text(texts[0])]
-    print(f"[EMBED_BATCH] Calling OpenAI embeddings model={OPENAI_EMBEDDING_MODEL} batch_size={len(texts)}")
-    start = time.time()
+def _embed_texts_single_batch(texts: List[str]) -> List[List[float]]:
+    """Call OpenAI embeddings API for a single batch of texts."""
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     body = {"model": OPENAI_EMBEDDING_MODEL, "input": texts}
     try:
@@ -477,20 +471,39 @@ def embed_texts_batch(texts: List[str]) -> List[List[float]]:
         print(f"[EMBED_BATCH][ERROR] Exception: {e}")
         traceback.print_exc()
         raise RuntimeError(f"Failed to call OpenAI embeddings batch: {e}")
-    duration = time.time() - start
-    print(f"[EMBED_BATCH] OpenAI embeddings status={resp.status_code} took={duration:.2f}s count={len(texts)}")
     if resp.status_code != 200:
         print(f"[EMBED_BATCH][ERROR] Non-200: {resp.text[:400]}")
         raise RuntimeError(f"OpenAI embeddings batch error: {resp.text}")
     data = resp.json()
     try:
         sorted_items = sorted(data["data"], key=lambda x: x["index"])
-        embeddings = [item["embedding"] for item in sorted_items]
+        return [item["embedding"] for item in sorted_items]
     except Exception as e:
         print(f"[EMBED_BATCH][ERROR] Unexpected response shape: {e}")
         raise RuntimeError(f"OpenAI embeddings batch parse error: {e}")
-    print(f"[EMBED_BATCH] Got {len(embeddings)} embeddings in {duration:.2f}s")
-    return embeddings
+
+
+def embed_texts_batch(texts: List[str]) -> List[List[float]]:
+    """Batch embed multiple texts, splitting into sub-batches of 100 to avoid API limits."""
+    if not texts:
+        return []
+    if len(texts) == 1:
+        return [embed_text(texts[0])]
+    BATCH_SIZE = 100
+    total = len(texts)
+    print(f"[EMBED_BATCH] Calling OpenAI embeddings model={OPENAI_EMBEDDING_MODEL} total={total} sub_batches={-(-total // BATCH_SIZE)}")
+    start = time.time()
+    all_embeddings: List[List[float]] = []
+    for i in range(0, total, BATCH_SIZE):
+        batch = texts[i:i + BATCH_SIZE]
+        batch_start = time.time()
+        print(f"[EMBED_BATCH] Sub-batch {i // BATCH_SIZE + 1}: texts {i+1}-{min(i+len(batch), total)} of {total}")
+        batch_embeddings = _embed_texts_single_batch(batch)
+        all_embeddings.extend(batch_embeddings)
+        print(f"[EMBED_BATCH] Sub-batch done in {time.time() - batch_start:.2f}s")
+    duration = time.time() - start
+    print(f"[EMBED_BATCH] Got {len(all_embeddings)} embeddings in {duration:.2f}s")
+    return all_embeddings
 
 
 def call_llm(prompt: str, temperature: float = 0.2, model: Optional[str] = None, max_tokens: Optional[int] = None, system_message: Optional[str] = None) -> str:
@@ -5267,7 +5280,7 @@ def _build_vector_document_detail(
     }
 
 
-def _build_updated_chunk_records(source: str, content: str, existing_metas: List[dict]) -> Tuple[List[str], List[str], List[dict], List[List[float]]]:
+def _build_updated_chunk_records(source: str, content: str, existing_metas: List[dict], existing_docs: Optional[List[str]] = None, existing_embeddings: Optional[List[List[float]]] = None) -> Tuple[List[str], List[str], List[dict], List[List[float]]]:
     clean_content = (content or "").strip()
     if not clean_content:
         raise HTTPException(status_code=400, detail="content is empty")
@@ -5296,13 +5309,20 @@ def _build_updated_chunk_records(source: str, content: str, existing_metas: List
     if not chunks:
         raise HTTPException(status_code=400, detail="No chunks generated from content")
 
+    # Build a reuse pool from existing chunks: content_text -> list of embeddings
+    reuse_pool: Dict[str, List[List[float]]] = {}
+    if existing_docs and existing_embeddings and len(existing_docs) == len(existing_embeddings):
+        for doc_text, emb in zip(existing_docs, existing_embeddings):
+            if doc_text and emb is not None and (isinstance(emb, list) or len(emb) > 0):
+                reuse_pool.setdefault(doc_text, []).append(list(emb) if not isinstance(emb, list) else emb)
+
     ids_to_add: List[str] = []
     docs_to_add: List[str] = []
     metas_to_add: List[dict] = []
     embeddings_to_add: List[List[float]] = []
+    chunks_needing_embedding: List[Tuple[int, str]] = []  # (index, chunk_text)
 
     for chunk_index, chunk_text_value in enumerate(chunks):
-        embedding = embed_text(chunk_text_value)
         chunk_meta = dict(base_meta)
         chunk_meta["chunk"] = chunk_index
         if chunk_text_value.startswith(TABLE_ROW_START_TAG):
@@ -5313,7 +5333,26 @@ def _build_updated_chunk_records(source: str, content: str, existing_metas: List
         ids_to_add.append(str(uuid.uuid4()))
         docs_to_add.append(chunk_text_value)
         metas_to_add.append(chunk_meta)
-        embeddings_to_add.append(embedding)
+
+        # Check if we can reuse an existing embedding for this exact chunk content
+        pool_list = reuse_pool.get(chunk_text_value)
+        if pool_list:
+            embeddings_to_add.append(pool_list.pop(0))
+            if not pool_list:
+                del reuse_pool[chunk_text_value]
+        else:
+            embeddings_to_add.append([])  # placeholder
+            chunks_needing_embedding.append((chunk_index, chunk_text_value))
+
+    reused_count = len(chunks) - len(chunks_needing_embedding)
+    print(f"[VECTOR_DB][UPDATE] source={source} total_chunks={len(chunks)} reused={reused_count} need_embedding={len(chunks_needing_embedding)}")
+
+    # Batch-embed only the changed/new chunks
+    if chunks_needing_embedding:
+        texts_to_embed = [text for _, text in chunks_needing_embedding]
+        new_embeddings = embed_texts_batch(texts_to_embed)
+        for (chunk_idx, _), embedding in zip(chunks_needing_embedding, new_embeddings):
+            embeddings_to_add[chunk_idx] = embedding
 
     return ids_to_add, docs_to_add, metas_to_add, embeddings_to_add
 
@@ -5754,9 +5793,13 @@ def vector_db_update_chunk(req: VectorDbChunkUpdateRequest):
 @app.put("/vector-db/document")
 def vector_db_update_document(req: VectorDbDocumentUpdateRequest):
     target_collection = _get_vector_collection(req.collection_name)
-    existing = target_collection.get(where={"source": req.source}, include=["metadatas"])
-    existing_ids = list(existing.get("ids", []) or [])
-    existing_metas = list(existing.get("metadatas", []) or [])
+    existing = target_collection.get(where={"source": req.source}, include=["metadatas", "documents", "embeddings"])
+    existing_ids = list(existing.get("ids") or [])
+    existing_metas = list(existing.get("metadatas") or [])
+    _raw_docs = existing.get("documents")
+    _raw_embs = existing.get("embeddings")
+    existing_docs = list(_raw_docs) if _raw_docs is not None else []
+    existing_embeddings = list(_raw_embs) if _raw_embs is not None else []
     if not existing_ids:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -5764,20 +5807,29 @@ def vector_db_update_document(req: VectorDbDocumentUpdateRequest):
         req.source,
         req.content,
         existing_metas,
+        existing_docs,
+        existing_embeddings,
     )
 
     try:
-        target_collection.add(
-            ids=new_ids,
-            documents=new_docs,
-            metadatas=new_metas,
-            embeddings=new_embeddings,
-        )
-        target_collection.delete(ids=existing_ids)
+        CHROMA_BATCH = 500
+        for i in range(0, len(new_ids), CHROMA_BATCH):
+            end = min(i + CHROMA_BATCH, len(new_ids))
+            target_collection.add(
+                ids=new_ids[i:end],
+                documents=new_docs[i:end],
+                metadatas=new_metas[i:end],
+                embeddings=new_embeddings[i:end],
+            )
+        for i in range(0, len(existing_ids), CHROMA_BATCH):
+            end = min(i + CHROMA_BATCH, len(existing_ids))
+            target_collection.delete(ids=existing_ids[i:end])
         invalidate_collection_cache(req.collection_name)
     except Exception as exc:
         try:
-            target_collection.delete(ids=new_ids)
+            for i in range(0, len(new_ids), CHROMA_BATCH):
+                end = min(i + CHROMA_BATCH, len(new_ids))
+                target_collection.delete(ids=new_ids[i:end])
         except Exception:
             pass
         print(f"[API][VECTOR_DB][ERROR] update failed: {exc}")
