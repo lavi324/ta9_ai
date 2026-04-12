@@ -5680,6 +5680,14 @@
       vectorState.saveMessage = message || '';
     }
 
+    function updateVectorEditButtons() {
+      const isDirty = vectorState.saveState === 'dirty';
+      const discardBtn = document.getElementById('vector-discard-edit-btn');
+      const saveBtn = document.getElementById('vector-save-document-btn');
+      if (discardBtn) discardBtn.disabled = !isDirty || vectorState.isSaving;
+      if (saveBtn) saveBtn.disabled = !isDirty || vectorState.isSaving;
+    }
+
     function getVectorSaveStatusMarkup() {
       if (vectorState.saveState === 'idle' || vectorState.saveState === 'loading' || !vectorState.saveMessage) return '';
       const classes = ['vector-doc-status'];
@@ -5863,10 +5871,12 @@
       }
 
       const detail = vectorState.detail;
-      const isEditing = !!vectorState.isEditing;
+      vectorState.isEditing = true;
+      vectorState.largeEditorActivated = true;
+      const isEditing = true;
       const baseContentValue = stripVectorFilePrefix(detail.full_content || '', detail.input_type);
-      const isLargeEditDoc = isEditing && baseContentValue.length > VECTOR_LARGE_EDIT_THRESHOLD;
-      const isDeferredLargeEdit = isEditing && isLargeEditDoc && !vectorState.largeEditorActivated;
+      const isLargeEditDoc = baseContentValue.length > VECTOR_LARGE_EDIT_THRESHOLD;
+      const isDeferredLargeEdit = false;
       const contentValue = isEditing
         ? (vectorState.hasDraftContent
           ? vectorState.draftContent
@@ -5877,9 +5887,8 @@
         <div class="vector-detail-header">
           <div class="vector-detail-actions">
             <button id="vector-refresh-detail-btn" type="button" class="vector-action-btn">Refresh</button>
-            ${isEditing
-              ? '<button id="vector-cancel-edit-btn" type="button" class="vector-action-btn">Cancel</button><button id="vector-save-document-btn" type="button" class="vector-action-btn primary">Save Changes</button>'
-              : '<button id="vector-edit-document-btn" type="button" class="vector-action-btn">Edit Document</button>'}
+            <button id="vector-discard-edit-btn" type="button" class="vector-action-btn" ${vectorState.saveState !== 'dirty' ? 'disabled' : ''}>Discard Changes</button>
+            <button id="vector-save-document-btn" type="button" class="vector-action-btn primary" ${vectorState.saveState !== 'dirty' ? 'disabled' : ''}>Save Changes</button>
             <button id="vector-delete-document-btn" type="button" class="vector-action-btn danger">Delete Document</button>
           </div>
         </div>
@@ -5955,19 +5964,23 @@
           });
         }
 
-        // Debounced search + backdrop update on input
+        // Immediate backdrop sync + debounced search nav update on input
         let editorSearchTimer = 0;
         editor.addEventListener('input', () => {
           syncEditorDraftContent(editor);
           if (vectorState.saveState === 'saved' || vectorState.saveState === 'idle') {
             setVectorSaveState('dirty', 'Unsaved changes');
+            updateVectorEditButtons();
           }
           if (isLargeDoc) {
             return;
           }
+          // Update backdrop immediately so visible text stays in sync
+          if (!editor._editorNoBackdrop) {
+            updateEditorBackdrop(editor, -1);
+          }
           clearTimeout(editorSearchTimer);
           editorSearchTimer = setTimeout(() => {
-            syncEditorDraftContent(editor);
             updateEditorSearchNav(editor);
           }, 350);
         });
@@ -6010,51 +6023,21 @@
         }
       }
 
-      const editBtn = document.getElementById('vector-edit-document-btn');
-      if (editBtn) {
-        editBtn.addEventListener('click', async () => {
-          vectorState.pendingRestore = null;
-          vectorState.largeEditorActivated = true;
-          vectorState.largeEditReplacements = {};
-          vectorState.largeEditActiveChunkNumber = null;
-          const loaded = await ensureVectorFullContentLoaded(detail.source);
-          if (!loaded) {
-            showKnowledgeToast('Failed to load full document for editing.', true);
-            return;
-          }
-          vectorState.isEditing = true;
-          vectorState.draftContent = '';
-          vectorState.hasDraftContent = false;
-          setVectorSaveState('idle', '');
-          renderVectorDetail();
-        });
-      }
-
-      const cancelBtn = document.getElementById('vector-cancel-edit-btn');
-      if (cancelBtn) {
-        cancelBtn.addEventListener('click', () => {
-          // Save scroll position before switching back to read mode
-          const editorEl = document.getElementById('vector-document-editor');
-          if (editorEl && editorEl.scrollHeight > 0) {
-            setVectorPendingRestore('view', detail.source, editorEl.scrollTop / editorEl.scrollHeight);
-          } else {
-            setVectorPendingRestore('view', detail.source, 0);
-          }
-          vectorState.isEditing = false;
-          setVectorSaveState('idle', '');
+      const discardBtn = document.getElementById('vector-discard-edit-btn');
+      if (discardBtn) {
+        discardBtn.addEventListener('click', () => {
           vectorState.draftContent = '';
           vectorState.hasDraftContent = false;
           vectorState.largeEditWindow = null;
-          vectorState.largeEditorActivated = false;
           vectorState.largeEditReplacements = {};
           vectorState.largeEditActiveChunkNumber = null;
+          setVectorSaveState('idle', '');
           renderVectorDetail();
         });
       }
 
       const saveBtn = document.getElementById('vector-save-document-btn');
       if (saveBtn) {
-        saveBtn.disabled = vectorState.isSaving;
         saveBtn.addEventListener('click', saveVectorDocument);
       }
 
@@ -6090,15 +6073,15 @@
       if (cachedDetail && cachedDetail.full_content) {
         vectorState.selectedSource = source;
         vectorState.detail = { ...cachedDetail };
-        if (!vectorState.isEditing || !sameSource) {
+        if (!sameSource) {
           vectorState.draftContent = '';
           vectorState.hasDraftContent = false;
           vectorState.largeEditWindow = null;
-          vectorState.largeEditorActivated = false;
           vectorState.largeEditReplacements = {};
           vectorState.largeEditActiveChunkNumber = null;
-          vectorState.isEditing = false;
         }
+        vectorState.isEditing = true;
+        vectorState.largeEditorActivated = true;
         renderVectorDocumentList();
         renderVectorDetail();
         return;
@@ -6147,13 +6130,13 @@
         };
         cacheVectorDetail(vectorState.detail);
 
-        if (!vectorState.isEditing || !sameSource) {
+        if (!sameSource) {
           vectorState.draftContent = '';
           vectorState.hasDraftContent = false;
           vectorState.largeEditWindow = null;
-          vectorState.largeEditorActivated = false;
-          vectorState.isEditing = false;
         }
+        vectorState.isEditing = true;
+        vectorState.largeEditorActivated = true;
 
         renderVectorDetail();
       } catch (err) {
@@ -6206,11 +6189,11 @@
         vectorState.draftContent = '';
         vectorState.hasDraftContent = false;
         vectorState.largeEditWindow = null;
-        vectorState.largeEditorActivated = false;
+        vectorState.largeEditorActivated = true;
         vectorState.largeEditReplacements = {};
         vectorState.largeEditActiveChunkNumber = null;
         cacheVectorDetail(vectorState.detail);
-        vectorState.isEditing = false;
+        vectorState.isEditing = true;
         syncVectorSummaryFromDetail(vectorState.detail);
         setVectorSaveState('saved', data.message || 'Saved successfully.');
         renderVectorDocumentList();
