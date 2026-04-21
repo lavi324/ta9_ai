@@ -1168,19 +1168,16 @@
 
     .knowledge-font-s {
       font-size: 12px;
-      line-height: 1.35;
       font-weight: normal;
     }
 
     .knowledge-font-m {
       font-size: 18px;
-      line-height: 1.35;
       font-weight: normal;
     }
 
     .knowledge-font-l {
       font-size: 24px;
-      line-height: 1.35;
       font-weight: normal;
     }
 
@@ -6611,6 +6608,7 @@
       knowledgeContentBackdrop.classList.remove('hidden');
       knowledgeContentBackdrop.setAttribute('aria-hidden', 'false');
       loadKnowledgeDraft();
+      normalizeKnowledgeCaretAnchors();
       knowledgeContentEditor.focus();
       setTimeout(() => ensureFontSpan(), 0);
       updatePageNav();
@@ -6726,7 +6724,7 @@
 
       const span = document.createElement('span');
       span.className = desiredClass;
-      span.appendChild(document.createTextNode('\u2060'));
+      span.appendChild(document.createTextNode('\u200B'));
       activeRange.insertNode(span);
 
       const caretRange = document.createRange();
@@ -6734,6 +6732,23 @@
       caretRange.collapse(true);
       selection.removeAllRanges();
       selection.addRange(caretRange);
+    }
+
+    function normalizeKnowledgeCaretAnchors() {
+      if (!knowledgeContentEditor) return;
+      const textNodes = [];
+      const walker = document.createTreeWalker(knowledgeContentEditor, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      while (node) {
+        textNodes.push(node);
+        node = walker.nextNode();
+      }
+
+      textNodes.forEach((textNode) => {
+        if (textNode.nodeValue && textNode.nodeValue.includes('\u2060')) {
+          textNode.nodeValue = textNode.nodeValue.replace(/\u2060/g, '\u200B');
+        }
+      });
     }
 
     function updatePageNav() {
@@ -7436,6 +7451,7 @@
     });
 
     knowledgeContentEditor.addEventListener('input', () => {
+      normalizeKnowledgeCaretAnchors();
       const currentText = knowledgeContentEditor.innerText || '';
       if (hasHebrewText(currentText)) {
         knowledgeContentEditor.innerText = currentText.replace(/[\u0590-\u05FF]/g, '');
