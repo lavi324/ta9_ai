@@ -817,6 +817,11 @@
       padding: 20px;
     }
 
+    #knowledge-content-backdrop {
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+
     .knowledge-modal {
       background: #ffffff;
       border-radius: 18px;
@@ -1168,16 +1173,22 @@
 
     .knowledge-font-s {
       font-size: 12px;
+      line-height: inherit;
+      vertical-align: baseline;
       font-weight: normal;
     }
 
     .knowledge-font-m {
       font-size: 18px;
+      line-height: inherit;
+      vertical-align: baseline;
       font-weight: normal;
     }
 
     .knowledge-font-l {
       font-size: 24px;
+      line-height: inherit;
+      vertical-align: baseline;
       font-weight: normal;
     }
 
@@ -3433,9 +3444,9 @@
       box-shadow: 0 0 0 3px rgba(12, 61, 107, 0.08);
       position: relative;
       z-index: 2;
-      color: transparent;
+      color: #1f2d3d;
       caret-color: #1f2d3d;
-      -webkit-text-fill-color: transparent;
+      -webkit-text-fill-color: #1f2d3d;
     }
 
     .vector-document-editor.editing.vector-large-document {
@@ -5765,20 +5776,6 @@
         editor._editorMatches = null;
         return;
       }
-      if (editor && editor._editorNoBackdrop) {
-        const seededMatches = editor._editorMatches;
-        const hasMatches = !!(seededMatches && Array.isArray(seededMatches.positions) && seededMatches.positions.length);
-        const activeSearch = String(vectorState.search || '').trim();
-        searchNav.style.display = activeSearch ? 'flex' : 'none';
-        if (searchLabel) {
-          searchLabel.textContent = hasMatches
-            ? ((seededMatches.idx >= 0 ? seededMatches.idx : 0) + 1) + ' of ' + seededMatches.positions.length
-            : '0 results';
-        }
-        if (prevBtn) prevBtn.disabled = !hasMatches || !!editor._editorMatchesDisabled;
-        if (nextBtn) nextBtn.disabled = !hasMatches || !!editor._editorMatchesDisabled;
-        return;
-      }
       const activeSearch = String(vectorState.search || '').trim();
       if (!activeSearch) {
         searchNav.style.display = 'none';
@@ -5979,7 +5976,7 @@
       }
       if (editor) {
         const isLargeDoc = isLargeEditDoc;
-        editor._editorNoBackdrop = isLargeDoc;
+        editor._editorNoBackdrop = true;
         editor._editorWindowedLarge = isLargeDoc;
 
         const backdrop = document.getElementById('vector-editor-backdrop');
@@ -5994,7 +5991,7 @@
             backdrop.style.display = 'none';
           }
         } else if (backdrop) {
-          backdrop.style.display = 'block';
+          backdrop.style.display = 'none';
         }
 
         // Wire search nav buttons
