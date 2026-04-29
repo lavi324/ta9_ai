@@ -4294,7 +4294,11 @@ def _resolve_question_with_history(
     if not original or not stored_history:
         return result
 
-    history_text = _format_history_for_prompt(stored_history, max_messages=8)
+    # Keep the linkage window short so a topic shift mid-conversation drops
+    # earlier topics out of the resolver's view. Pronoun-style follow-ups
+    # ("is there a way from the UI?", "what about deleting it?") only ever
+    # refer to the immediately preceding turn, not turns from 5+ messages ago.
+    history_text = _format_history_for_prompt(stored_history, max_messages=2)
     if not history_text or not OPENAI_API_KEY:
         return result
 
@@ -4309,9 +4313,11 @@ def _resolve_question_with_history(
         "4) If standalone, resolved_question should equal the current question.\n"
         "5) Do not invent facts or topics not present in history.\n"
         "6) confidence must be a number between 0 and 1.\n"
-        "7) Keep reason short (max 20 words).\n\n"
+        "7) Keep reason short (max 20 words).\n"
+        "8) IMPORTANT — incomplete-question detection: if the CURRENT QUESTION lacks a clear topic noun or object — i.e. it cannot be answered without referring back to a previous turn (examples of this pattern include but are not limited to: 'is there another way?', 'is there a way from X?', 'how about Y?', 'what about Z?', 'can I do it differently?', 'and from W?', 'why?', 'why not?') — you MUST classify it as dependent and resolve it against the MOST RECENT user turn in history (the last entry shown). Topic carries forward only from the immediately previous turn, never from earlier turns.\n"
+        "9) If the question contains its own clear topic noun and is grammatically self-contained, classify it as standalone even if it is on a related theme — a fresh, fully-formed question is a topic shift, not a follow-up.\n\n"
         f"Explicit follow-up flag: {str(bool(explicit_is_followup)).lower()}\n\n"
-        f"RECENT HISTORY:\n{history_text}\n\n"
+        f"RECENT HISTORY (oldest to newest, only user turns):\n{history_text}\n\n"
         f"CURRENT QUESTION:\n{original}\n"
     )
 
@@ -6437,7 +6443,10 @@ def chat(req: ChatRequest):
 
     use_history_context = bool(history_resolution.get("use_history"))
     resolved_question = str(history_resolution.get("resolved_question") or question).strip() or question
-    history_context = _format_history_for_prompt(stored_history, max_messages=8) if use_history_context else ""
+    # Mirror the resolver window: only the last 2 user turns reach the answer
+    # prompt. Anything older is treated as a different topic and excluded so
+    # the model cannot drift back to it after a topic shift.
+    history_context = _format_history_for_prompt(stored_history, max_messages=2) if use_history_context else ""
     if history_context:
         print(
             f"[API][CHAT] Using conversation history context key={conversation_key} "
