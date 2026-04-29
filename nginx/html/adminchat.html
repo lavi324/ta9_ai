@@ -3456,12 +3456,12 @@
       contain: content;
     }
 
-    .vector-document-editor.editing.vector-large-document::selection {
+    .vector-document-editor.editing::selection {
       background: rgba(118, 199, 86, 0.35);
       color: #1f2d3d;
     }
 
-    .vector-document-editor.editing.vector-large-document::-moz-selection {
+    .vector-document-editor.editing::-moz-selection {
       background: rgba(118, 199, 86, 0.35);
       color: #1f2d3d;
     }
@@ -4716,7 +4716,6 @@
       const wrapper = viewport.querySelector('[data-role="wrapper"]');
       const contentEl = viewport.querySelector('[data-role="content"]');
       const model = cacheEntry.viewerModel;
-      const activeSearchText = String(vectorState.search || '').trim();
       let rafId = 0;
 
       function scrollToActiveMatch(lineHeight, cumulativeRows) {
@@ -4740,14 +4739,15 @@
 
       const prevBtn = document.getElementById('vector-search-prev');
       const nextBtn = document.getElementById('vector-search-next');
-      prevBtn.addEventListener('click', function() { navigateMatch(-1); });
-      nextBtn.addEventListener('click', function() { navigateMatch(1); });
+      if (prevBtn) prevBtn.onclick = function() { navigateMatch(-1); };
+      if (nextBtn) nextBtn.onclick = function() { navigateMatch(1); };
 
       function draw() {
         rafId = 0;
         const metrics = ensureVectorViewerMetrics(model, viewport);
         const lineHeight = metrics.lineHeight;
         const cumulativeRows = model.cumulativeRows || [0, 1];
+        const activeSearchText = String(vectorState.search || '').trim();
         ensureVectorViewerSearchState(model, activeSearchText);
 
         const hasMatches = model.matchPositions && model.matchPositions.length > 0;
@@ -5519,7 +5519,11 @@
         ? editor.value
         : (vectorState.draftContent || '');
       var totalChars = sourceText.length;
-      if (((editor && editor._editorNoBackdrop) && !(editor && editor._editorWindowedLarge)) || totalChars > VECTOR_LARGE_EDIT_THRESHOLD) {
+      var isWindowedLarge = !!(editor && editor._editorWindowedLarge);
+      // Use proportional fallback only when content is huge AND not windowed.
+      // For windowed-large the mirror is fast (only renders ~4000 chars of prefix).
+      // For small no-backdrop editors the mirror is required for accurate row-level scroll.
+      if (!isWindowedLarge && totalChars > VECTOR_LARGE_EDIT_THRESHOLD) {
         var scrollRange = Math.max(0, editor.scrollHeight - editor.clientHeight);
         var safeCharPos = Math.max(0, Math.min(totalChars, Number(charPos) || 0));
         editor.scrollTop = scrollRange > 0 && totalChars > 0
@@ -5717,6 +5721,19 @@
       setTimeout(applyContent, 0);
     }
 
+    function refreshActiveVectorSearchState() {
+      const activeEditor = document.getElementById('vector-document-editor');
+      if (activeEditor) {
+        updateEditorSearchNav(activeEditor);
+        return;
+      }
+
+      const activeView = document.getElementById('vector-document-view');
+      if (activeView && vectorState.detail) {
+        renderVirtualizedVectorDocument(activeView, vectorState.detail);
+      }
+    }
+
     let _vectorSaveStatusTimer = 0;
     function setVectorSaveState(state, message) {
       vectorState.saveState = state || 'idle';
@@ -5768,14 +5785,6 @@
       const prevBtn = document.getElementById('vector-search-prev');
       const nextBtn = document.getElementById('vector-search-next');
       if (!searchNav) return;
-      if (editor && editor._editorWindowedLarge) {
-        searchNav.style.display = 'none';
-        if (searchLabel) searchLabel.textContent = 'Search disabled for large-file edit mode';
-        if (prevBtn) prevBtn.disabled = true;
-        if (nextBtn) nextBtn.disabled = true;
-        editor._editorMatches = null;
-        return;
-      }
       const activeSearch = String(vectorState.search || '').trim();
       if (!activeSearch) {
         searchNav.style.display = 'none';
@@ -5855,7 +5864,6 @@
     function editorNavigateMatch(editor, delta) {
       if (!editor) return;
       if (editor.disabled) return;
-      if (editor._editorWindowedLarge) return;
       if (!editor._editorMatches) return;
       const em = editor._editorMatches;
       if (!em.positions.length) return;
@@ -5872,6 +5880,27 @@
         ? getSearchMatchLengthAt(searchSource, em.search, selectionStart)
         : rawHit.length;
       const selectionEnd = selectionStart + resolvedLength;
+
+      if (editor._editorWindowedLarge) {
+        // Window the editor around the match, then select and scroll to it.
+        // Lock _winBusy so the auto-window-shift scroll listener doesn't fire and
+        // re-window backwards when scrollTop momentarily hits 0.
+        editor._winBusy = true;
+        const windowInfo = setLargeEditorWindow(editor, selectionStart);
+        const localStart = windowInfo.localTarget;
+        const localEnd = Math.min(editor.value.length, localStart + resolvedLength);
+        editor.focus();
+        editor.setSelectionRange(localStart, localEnd);
+        requestAnimationFrame(() => {
+          scrollEditorToChar(editor, localStart);
+          requestAnimationFrame(() => { editor._winBusy = false; });
+        });
+        const searchLabelLarge = document.getElementById('vector-search-label');
+        if (searchLabelLarge) {
+          searchLabelLarge.textContent = (em.idx + 1) + ' of ' + em.positions.length;
+        }
+        return;
+      }
 
       editor.focus();
       editor.setSelectionRange(selectionStart, selectionEnd);
@@ -6059,41 +6088,58 @@
               setVectorSaveState('idle', '');
             }
             editor.scrollTop = 0;
+            // Large docs load text asynchronously; refresh nav after draft is available.
+            updateEditorSearchNav(editor);
           });
 
-          // Auto-reposition window when scrolling near edges
-          let _winBusy = false;
+          // Auto-reposition window when scrolling near edges.
+          // Debounced so it fires only after the user stops scrolling, avoiding
+          // mid-scroll interruption that feels like "jumping back up".
+          editor._winBusy = false;
           const WIN_OVERLAP = Math.floor(VECTOR_LARGE_EDIT_WINDOW_SIZE * 0.33);
+          let _winShiftTimer = 0;
           editor.addEventListener('scroll', () => {
-            if (_winBusy || !editor._editorWindowedLarge) return;
-            const win = vectorState.largeEditWindow;
-            if (!win) return;
-            const fullText = vectorState.draftContent || '';
-            const scrollBottom = editor.scrollHeight - editor.scrollTop - editor.clientHeight;
-            const threshold = Math.max(300, editor.clientHeight);
+            if (editor._winBusy || !editor._editorWindowedLarge) return;
+            clearTimeout(_winShiftTimer);
+            _winShiftTimer = setTimeout(() => {
+              if (editor._winBusy || !editor._editorWindowedLarge) return;
+              const win = vectorState.largeEditWindow;
+              if (!win) return;
+              const fullText = vectorState.draftContent || '';
+              const scrollBottom = editor.scrollHeight - editor.scrollTop - editor.clientHeight;
+              const threshold = Math.max(40, Math.floor(editor.clientHeight * 0.1));
 
-            if (scrollBottom < threshold && win.end < fullText.length) {
-              _winBusy = true;
-              syncEditorDraftContent(editor);
-              const draft = vectorState.draftContent;
-              const newStart = Math.max(0, win.end - WIN_OVERLAP);
-              const newEnd = Math.min(draft.length, newStart + VECTOR_LARGE_EDIT_WINDOW_SIZE);
-              editor.value = draft.slice(newStart, newEnd);
-              vectorState.largeEditWindow = { start: newStart, end: newEnd };
-              editor.scrollTop = 0;
-              requestAnimationFrame(() => { _winBusy = false; });
-            } else if (editor.scrollTop < threshold && win.start > 0) {
-              _winBusy = true;
-              syncEditorDraftContent(editor);
-              const draft = vectorState.draftContent;
-              const newStart = Math.max(0, win.start - VECTOR_LARGE_EDIT_WINDOW_SIZE + WIN_OVERLAP);
-              const newEnd = Math.min(draft.length, newStart + VECTOR_LARGE_EDIT_WINDOW_SIZE);
-              editor.value = draft.slice(newStart, newEnd);
-              vectorState.largeEditWindow = { start: newStart, end: newEnd };
-              editor.scrollTop = editor.scrollHeight - editor.clientHeight;
-              requestAnimationFrame(() => { _winBusy = false; });
-            }
-          });
+              if (scrollBottom < threshold && win.end < fullText.length) {
+                editor._winBusy = true;
+                syncEditorDraftContent(editor);
+                const draft = vectorState.draftContent;
+                // Jump straight to the last window so "scroll to bottom" reaches
+                // the actual end of the document.
+                const newStart = Math.max(0, draft.length - VECTOR_LARGE_EDIT_WINDOW_SIZE);
+                const newEnd = draft.length;
+                editor.value = draft.slice(newStart, newEnd);
+                vectorState.largeEditWindow = { start: newStart, end: newEnd };
+                requestAnimationFrame(() => {
+                  editor.scrollTop = Math.max(0, editor.scrollHeight - editor.clientHeight);
+                  requestAnimationFrame(() => { editor._winBusy = false; });
+                });
+              } else if (editor.scrollTop < threshold && win.start > 0) {
+                editor._winBusy = true;
+                syncEditorDraftContent(editor);
+                const draft = vectorState.draftContent;
+                // Jump straight to the first window so "scroll to top" reaches
+                // the actual beginning of the document.
+                const newStart = 0;
+                const newEnd = Math.min(draft.length, VECTOR_LARGE_EDIT_WINDOW_SIZE);
+                editor.value = draft.slice(newStart, newEnd);
+                vectorState.largeEditWindow = { start: newStart, end: newEnd };
+                requestAnimationFrame(() => {
+                  editor.scrollTop = 0;
+                  requestAnimationFrame(() => { editor._winBusy = false; });
+                });
+              }
+            }, 180);
+          }, { passive: true });
         } else {
           editor.disabled = true;
           editor.placeholder = 'Loading document content\u2026';
@@ -9150,11 +9196,12 @@
     });
 
     if (vectorSearchBtn) {
-      vectorSearchBtn.addEventListener('click', () => {
+      vectorSearchBtn.addEventListener('click', async () => {
         if (!vectorState.selectedCollection) return;
         vectorState.search = (vectorSearchInput.value || '').trim();
         vectorState.offset = 0;
-        loadVectorDocuments();
+        await loadVectorDocuments();
+        refreshActiveVectorSearchState();
       });
     }
 
@@ -9172,7 +9219,11 @@
         if (!vectorState.selectedCollection) return;
         vectorState.search = (vectorSearchInput.value || '').trim();
         vectorState.offset = 0;
-        loadVectorDocuments();
+        loadVectorDocuments().then(() => {
+          refreshActiveVectorSearchState();
+        }).catch(() => {
+          refreshActiveVectorSearchState();
+        });
       });
     }
 
