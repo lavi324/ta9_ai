@@ -4191,14 +4191,21 @@ def _normalize_history_messages(raw_messages: Optional[List[Dict[str, Any]]]) ->
 
 
 def _format_history_for_prompt(messages: List[Dict[str, str]], max_messages: int = 8) -> str:
-    """Format recent conversation history for retrieval and prompt context."""
+    """Format recent conversation history for retrieval and prompt context.
+
+    Only the user's prior questions are included. Prior assistant answers are
+    intentionally omitted so the model cannot copy stale wording from earlier
+    turns (which caused old/incorrect facts to leak into new answers even when
+    retrieval was correct). The user turns are still enough for follow-up
+    pronoun resolution ("what about for SQL?", "explain that more").
+    """
     if not messages:
         return ""
-    tail = messages[-max_messages:]
-    lines: List[str] = []
-    for msg in tail:
-        role = "User" if msg.get("role") == "user" else "Assistant"
-        lines.append(f"{role}: {msg.get('content', '')}")
+    user_msgs = [m for m in messages if m.get("role") == "user"]
+    if not user_msgs:
+        return ""
+    tail = user_msgs[-max_messages:]
+    lines = [f"User: {m.get('content', '')}" for m in tail]
     return "\n".join(lines)
 
 
