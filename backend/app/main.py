@@ -3621,6 +3621,73 @@ def _validate_ta9_knowledge_content(content_text: str) -> Tuple[bool, str]:
     )
 
 
+_COMPOUND_SPLIT_PATTERN = re.compile(
+    # Splits BEFORE the next question/imperative word using a lookahead so the
+    # sub-question retains its leading "how", "what", etc. and stays a strong
+    # embedding query.
+    r"\s*(?:,\s*)?\band\s+then\s+(?=(?:how|what|where|when|why|which|who|create|configure|set\s*up|setup|add|edit|update|delete|remove|enable|disable|fix|resolve|install|deploy|search|find|view|open)\b)"
+    r"|\s*(?:,\s*)?\bthen\s+(?=(?:how|what|where|when|why|which|who|create|configure|set\s*up|setup|add|edit|update|delete|remove|enable|disable|fix|resolve|install|deploy|search|find|view|open)\b)"
+    r"|\s*(?:,\s*)?\band\s+(?=(?:how|what|where|when|why|which|who)\b)"
+    r"|\s*(?:,\s*)?\band\s+also\s+(?=(?:how|what|where|when|why|which|who|create|configure|set\s*up|setup|add|edit|update|delete|remove|enable|disable|fix|resolve|install|deploy|search|find|view|open)\b)"
+    r"|\s*(?:,\s*)?\bafter\s+that\s*,?\s*(?=(?:how|what|where|when|why|which|who|create|configure|set\s*up|setup|add|edit|update|delete|remove|enable|disable|fix|resolve|install|deploy|search|find|view|open)\b)"
+    r"|\s*(?:,\s*)?\bas\s+well\s+as\s+(?=(?:how|what|where|when|why|which|who|create|configure|set\s*up|setup|add|edit|update|delete|remove|enable|disable|fix|resolve|install|deploy|search|find|view|open)\b)"
+    r"|\s*(?:,\s*)?\bin\s+addition\s+to\s+(?=(?:how|what|where|when|why|which|who|create|configure|set\s*up|setup|add|edit|update|delete|remove|enable|disable|fix|resolve|install|deploy|search|find|view|open)\b)"
+    r"|\s*(?:,\s*)?\bplus\s+(?=(?:how|what|where|when|why|which|who|create|configure|set\s*up|setup|add|edit|update|delete|remove|enable|disable|fix|resolve|install|deploy|search|find|view|open)\b)"
+    r"|\s*;\s*"
+    r"|\s*\?\s+(?=(?:how|what|where|when|why|which|who|create|configure|set\s*up|setup|add|edit|update|delete|remove|enable|disable|fix|resolve|install|deploy|search|find|view|open)\b)",
+    flags=re.IGNORECASE,
+)
+
+_QUESTION_LEAD_RE = re.compile(
+    r"^\s*(?:how(?:\s+(?:to|do|can|would|should))?|what|where|when|why|which|who|can\s+i|could\s+i|please|create|configure|set\s*up|setup|add|edit|update|delete|remove|enable|disable|fix|resolve|install|deploy|search|find|view|open)\b",
+    flags=re.IGNORECASE,
+)
+
+
+# Hard cap to keep retrieval+rerank bounded even for extreme inputs.
+_MAX_SUB_QUESTIONS = 15
+
+
+def _decompose_compound_question(question: str) -> List[str]:
+    """
+    Heuristically split a compound question into atomic sub-questions.
+
+    Used to drive multi-query retrieval so each sub-question gets its own
+    embedding and its own top-k pool, instead of competing for slots inside a
+    single averaged-embedding query. Capped at _MAX_SUB_QUESTIONS to keep
+    retrieval bounded for any input size.
+    """
+    if not question:
+        return []
+    text = question.strip()
+    if not text:
+        return []
+
+    # First split on strong compound markers ("and then", "and how", ";", "?", etc.)
+    raw_parts = [p.strip(" ,.-\t") for p in _COMPOUND_SPLIT_PATTERN.split(text) if p and p.strip(" ,.-\t")]
+
+    sub_questions: List[str] = []
+    for part in raw_parts:
+        # Drop trailing punctuation, keep contents
+        cleaned = part.strip(" ,.-\t?")
+        if not cleaned:
+            continue
+        # Only treat as a sub-question if it looks like a question/imperative
+        if _QUESTION_LEAD_RE.match(cleaned) or len(cleaned.split()) >= 4:
+            # Re-append '?' so the embedding matches the standalone-question form
+            # ("how to create a relation?" embeds slightly differently from
+            # "how to create a relation" and standalone form is the known-good one).
+            normalized = cleaned + "?"
+            if normalized not in sub_questions:
+                sub_questions.append(normalized)
+
+    # Require at least 2 sub-questions to be considered compound
+    if len(sub_questions) < 2:
+        return []
+
+    return sub_questions[:_MAX_SUB_QUESTIONS]
+
+
 def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
     """Generate a small set of query variants for multi-retrieval (no LLM calls)."""
     variants = []
@@ -3638,7 +3705,17 @@ def _build_query_variants(question: str, ta9_mode: bool) -> List[str]:
         if keyword_query and keyword_query not in variants:
             variants.append(keyword_query)
 
-    return variants[:3]
+    head_variants = variants[:3]
+
+    # Compound-question decomposition: append each atomic sub-question as its own
+    # retrieval variant. This restores per-sub-question recall when the user
+    # combines multiple distinct asks in one prompt.
+    sub_questions = _decompose_compound_question(base)
+    for sq in sub_questions:
+        if sq and sq not in head_variants:
+            head_variants.append(sq)
+
+    return head_variants
 
 def augment_question(question: str) -> str:
     """
@@ -3988,6 +4065,7 @@ def rerank_results(
     metas: List[dict],
     distances: Optional[List[float]] = None,
     ids: Optional[List[str]] = None,
+    max_chunks_per_source: int = 5,
 ) -> Tuple[List[str], List[dict], List[float], List[str]]:
     if not docs:
         print("[RERANK] No docs to rerank")
@@ -4027,7 +4105,10 @@ def rerank_results(
         reranked_metas = [it["meta"] for it in items]
         reranked_distances = [it["dist"] for it in items]
         reranked_ids = [it["id"] for it in items]
-        return _smart_deduplicate_and_diversify(reranked_docs, reranked_metas, reranked_distances, reranked_ids)
+        return _smart_deduplicate_and_diversify(
+            reranked_docs, reranked_metas, reranked_distances, reranked_ids,
+            max_chunks_per_source=max_chunks_per_source,
+        )
 
     items.sort(
         key=lambda x: (
@@ -4058,7 +4139,10 @@ def rerank_results(
     reranked_ids = [it["id"] for it in items]
     
     # Apply comprehensive deduplication and diversification
-    return _smart_deduplicate_and_diversify(reranked_docs, reranked_metas, reranked_distances, reranked_ids)
+    return _smart_deduplicate_and_diversify(
+        reranked_docs, reranked_metas, reranked_distances, reranked_ids,
+        max_chunks_per_source=max_chunks_per_source,
+    )
 
 
 def _lexical_overlap_ratio(question: str, doc: str) -> float:
@@ -5460,9 +5544,23 @@ def _build_source_context_candidates(
             continue
 
         full_content = _merge_chunk_texts([row["content"] for row in rows])
-        # For scoring, use only matched chunks (not full doc) so large docs aren't diluted
-        matched_ids_set = set(entry.get("matched_chunk_ids") or [])
-        matched_rows = [r for r in rows if r["id"] in matched_ids_set] if matched_ids_set else rows[:5]
+        # For scoring, use only matched chunks (not full doc) so large docs aren't diluted.
+        # Preserve the order from matched_chunk_ids (which reflects rerank/round-robin
+        # priority) instead of doc order — this ensures the highest-ranked chunk per
+        # sub-question appears FIRST in the excerpt and survives the char-budget cut.
+        matched_id_order = entry.get("matched_chunk_ids") or []
+        rows_by_id = {r["id"]: r for r in rows}
+        seen_ids: set = set()
+        matched_rows: List[dict] = []
+        for mid in matched_id_order:
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            row = rows_by_id.get(mid)
+            if row is not None:
+                matched_rows.append(row)
+        if not matched_rows:
+            matched_rows = rows[:5]
         matched_text = _merge_chunk_texts([r["content"] for r in matched_rows], max_chars=12000)
         excerpt = _merge_chunk_texts([r["content"] for r in matched_rows], max_chars=8000) if matched_rows else _merge_chunk_texts([row["content"] for row in rows], max_chars=8000)
         title = _build_document_title(entry["source"], rows[0]["content"] if rows else "")
@@ -6457,6 +6555,17 @@ def chat(req: ChatRequest):
         print(f"[API][CHAT] Treating question as standalone key={conversation_key}")
 
     retrieval_question = resolved_question if use_history_context else question
+    # Safety: if the user's current message is itself a compound question
+    # (multiple explicit sub-questions in one prompt), the history resolver
+    # must NOT drop any of them. Always use the original message for retrieval
+    # in that case so every sub-question is decomposed and retrieved.
+    if _decompose_compound_question(question):
+        if retrieval_question != question:
+            print(
+                f"[API][CHAT] Compound question detected; ignoring history-resolver rewrite "
+                f"and retrieving against original message"
+            )
+        retrieval_question = question
     if retrieval_question != question:
         print(f"[API][CHAT] Resolved follow-up question for retrieval: '{retrieval_question[:240]}'")
 
@@ -6508,16 +6617,48 @@ def chat(req: ChatRequest):
 
     ta9_mode = _is_ta9_question(retrieval_question)
     is_foundational = _is_foundational_question(retrieval_question)
-    query_variants = _build_query_variants(retrieval_question, ta9_mode)
-    _rag_log_step(4, total_rag_steps, "Preparing retrieval queries", f"variants={len(query_variants)} history_used={bool(history_context)}")
+
+    # Build base variants (no sub-question decomposition appended) for both
+    # the ORIGINAL user question and the history-resolved retrieval question.
+    # Sub-questions are added separately at the end so the affinity tracker
+    # can rely on them being the tail of augmented_variants.
+    def _build_base_variants(q: str) -> List[str]:
+        v = _build_query_variants(q, ta9_mode)
+        # Strip any decomposed sub-questions (they're appended at the tail);
+        # keep only the head (original / normalized / keyword variants).
+        decomposed = _decompose_compound_question(q)
+        if decomposed:
+            v = v[: max(0, len(v) - len(decomposed))]
+        return v
+
+    base_head_variants: List[str] = []
+    seen_variants: set = set()
+
+    # Highest priority: variants of the LATEST user message.
+    for v in _build_base_variants(question):
+        if v and v not in seen_variants:
+            seen_variants.add(v)
+            base_head_variants.append(v)
+
+    # Secondary: variants of the history-resolved question (only if different).
+    if retrieval_question.strip() and retrieval_question.strip() != question.strip():
+        for v in _build_base_variants(retrieval_question):
+            if v and v not in seen_variants:
+                seen_variants.add(v)
+                base_head_variants.append(v)
+
+    # Lowest priority: history-seed (only if real history was injected).
     if history_context:
         history_seed = (
             f"Conversation context:\n{history_context}\n\n"
             f"Current question:\n{question}\n\n"
             f"Resolved question for retrieval:\n{retrieval_question}"
         )
-        query_variants = [history_seed] + query_variants
-        query_variants = query_variants[:3]
+        if history_seed not in seen_variants:
+            seen_variants.add(history_seed)
+            base_head_variants.append(history_seed)
+
+    _rag_log_step(4, total_rag_steps, "Preparing retrieval queries", f"variants={len(base_head_variants)} history_used={bool(history_context)}")
     ticket_context_hint = None
     if selected_ticket_text:
         # Keep a short hint to enrich similarity search without overwhelming the question
@@ -6530,10 +6671,69 @@ def chat(req: ChatRequest):
     agg_docs: List[str] = []
     agg_metas: List[dict] = []
 
+    # Per-sub-question chunk affinity. For each candidate chunk we remember the
+    # best (smallest) vector distance it achieved against each sub-question's
+    # own embedding. After rerank we use this to guarantee every sub-question
+    # keeps its own top chunks even if those chunks score low against the full
+    # compound question.
+    sub_questions_list: List[str] = _decompose_compound_question(retrieval_question)
+
+    # Also decompose the ORIGINAL question; if it has sub-questions of its own
+    # they take precedence (latest user intent wins over a history rewrite).
+    original_sub_questions = _decompose_compound_question(question)
+    if original_sub_questions:
+        sub_questions_list = original_sub_questions
+
+    # PRIORITY-TO-LATEST-QUESTION: when no compound decomposition kicked in
+    # but the current question differs from the retrieval question (i.e. the
+    # history resolver rewrote it), treat the ORIGINAL user message as a
+    # forced sub-question. This routes the latest question through the same
+    # per-source affinity rerank that already protects compound sub-questions
+    # from being crowded out by other variants — guaranteeing the latest
+    # intent's top chunks survive dedup and source-grouping.
+    if not sub_questions_list and question and question.strip() != retrieval_question.strip():
+        sub_questions_list = [question.strip()]
+
+    # Build the FINAL ordered variant list: head (priority order) + sub-questions tail.
+    sub_q_set = set(sub_questions_list)
+    final_head = [v for v in base_head_variants if v not in sub_q_set]
+    query_variants = final_head + sub_questions_list
+    # Hard cap to keep total bounded.
+    query_variants = query_variants[: _MAX_SUB_QUESTIONS + 4]
+    # If the cap truncated past sub_questions, recompute sub_questions_list to
+    # match what's actually in query_variants tail.
+    if len(query_variants) < len(final_head) + len(sub_questions_list):
+        # Truncated into the head — keep sub_questions only if still in tail.
+        tail_set = set(query_variants)
+        sub_questions_list = [s for s in sub_questions_list if s in tail_set]
+    subq_affinity: Dict[str, Dict[int, float]] = {}
+
+    def _chunk_key(idv: Optional[str], doc: Optional[str]) -> str:
+        if idv:
+            return str(idv)
+        return hashlib.sha1(((doc or "")[:512]).encode("utf-8", errors="ignore")).hexdigest()
+
+    def _record_affinity(idv: Optional[str], doc: Optional[str], subq_idx: int, dist: Optional[float]) -> None:
+        if subq_idx < 0 or dist is None:
+            return
+        key = _chunk_key(idv, doc)
+        bucket = subq_affinity.setdefault(key, {})
+        prev = bucket.get(subq_idx)
+        if prev is None or dist < prev:
+            bucket[subq_idx] = dist
+
     try:
         _rag_log_step(5, total_rag_steps, "Running vector retrieval", f"query_variants={len(query_variants)}")
         # Batch-embed all query variants (+ ticket-aware query if applicable) in a single API call
         augmented_variants = [augment_question(qv) for qv in query_variants]
+
+        # Compute the slice of `augmented_variants` that corresponds to sub-questions
+        # so we can track per-sub-question chunk affinity below. The base
+        # `_build_query_variants` returns [original, normalized, keyword_only]
+        # followed by appended sub-questions; if a history seed was prepended
+        # the order shifts but sub-questions stay at the tail.
+        subq_start_idx = max(0, len(augmented_variants) - len(sub_questions_list)) if sub_questions_list else len(augmented_variants)
+
         _ticket_aware_idx = None
         if ticket_context_hint:
             similar_query = retrieval_question + "\n\nRelated ticket context:\n" + ticket_context_hint
@@ -6559,34 +6759,66 @@ def chat(req: ChatRequest):
                 if LOG_FULL_EMBEDDINGS:
                     print(f"[API][CHAT] Query embeddings FULL={q_emb}")
 
-            # More candidates improves recall a lot
-            effective_top_k = max(req.top_k, 50)
-            per_query_k = max(20, min(50, effective_top_k // max(1, len(query_variants))))
-            print(f"[API][CHAT] effective_top_k={effective_top_k} per_query_k={per_query_k} variant_idx={idx}")
+        # Per-variant retrieval depth. Sub-question variants are dedicated
+        # retrievals for one atomic ask, so they need the same depth as a
+        # standalone question would (otherwise relevant chunks can fall
+        # outside top-K of a large collection). Base/keyword variants stay
+        # at a moderate depth because they overlap heavily.
+        n_variants = max(1, len(all_variant_embeddings))
+        n_subq = len(sub_questions_list)
+        base_per_query_k = 30 if n_subq >= 5 else 50
+        # Sub-question variants need depth comparable to a single-question pool
+        # so the right chunk in a 1000+ chunk doc is reachable, but not so deep
+        # that downstream rerank/LLM blows the 15s budget for compound asks.
+        subq_per_query_k = 30 if n_subq >= 5 else 40
+        print(
+            f"[API][CHAT] n_variants={n_variants} n_subq={n_subq} "
+            f"base_per_query_k={base_per_query_k} subq_per_query_k={subq_per_query_k}"
+        )
 
-            # Primary search: question-focused (user knowledge first, then wiki)
+        # Run all (variant × collection) Chroma queries in parallel.
+        def _run_query(emb, col, col_label, variant_idx, k):
+            res = col.query(
+                query_embeddings=[emb],
+                n_results=k,
+                include=["distances", "documents", "metadatas"],
+            )
+            return res, col_label, variant_idx
+
+        query_jobs = []
+        for v_idx, q_emb in enumerate(all_variant_embeddings):
+            k = subq_per_query_k if (sub_questions_list and v_idx >= subq_start_idx) else base_per_query_k
             for col, col_label in ((memory_collection, "user_knowledge"), (collection, "wiki")):
-                results = col.query(
-                    query_embeddings=[q_emb],
-                    n_results=per_query_k,
-                    include=["distances", "documents", "metadatas"],
-                )
+                query_jobs.append((q_emb, col, col_label, v_idx, k))
 
-                ids = results.get("ids", [[]])[0]
-                distances = results.get("distances", [[]])[0]
-                docs = results.get("documents", [[]])[0]
-                metas = results.get("metadatas", [[]])[0]
-
+        with ThreadPoolExecutor(max_workers=min(16, max(2, len(query_jobs)))) as ex:
+            futures = [ex.submit(_run_query, *job) for job in query_jobs]
+            for fut in futures:
+                results, col_label, variant_idx = fut.result()
+                r_ids = results.get("ids", [[]])[0]
+                r_distances = results.get("distances", [[]])[0]
+                r_docs = results.get("documents", [[]])[0]
+                r_metas = results.get("metadatas", [[]])[0]
                 normalized_metas = []
-                for meta in metas or []:
+                for meta in r_metas or []:
                     meta = meta or {}
                     meta = {**meta, "collection": col_label}
                     normalized_metas.append(meta)
-
-                agg_ids.extend(ids or [])
-                agg_distances.extend(distances or [])
-                agg_docs.extend(docs or [])
+                agg_ids.extend(r_ids or [])
+                agg_distances.extend(r_distances or [])
+                agg_docs.extend(r_docs or [])
                 agg_metas.extend(normalized_metas)
+
+                # Record per-sub-question chunk affinity using the actual
+                # vector distances Chroma returned for that sub-question's
+                # embedding.
+                if sub_questions_list and variant_idx >= subq_start_idx:
+                    sq_idx = variant_idx - subq_start_idx
+                    if 0 <= sq_idx < len(sub_questions_list):
+                        for d_idx, doc in enumerate(r_docs or []):
+                            idv = r_ids[d_idx] if d_idx < len(r_ids) else None
+                            dist = r_distances[d_idx] if d_idx < len(r_distances) else None
+                            _record_affinity(idv, doc, sq_idx, dist)
     except Exception as exc:
         print(f"[API][CHAT][ERROR] Embedding or vector search failed: {exc}")
         traceback.print_exc()
@@ -6725,7 +6957,173 @@ def chat(req: ChatRequest):
         )
         return ChatResponse(answer=answer, sources=[])
 
-    docs, metas, distances, ids = rerank_results(retrieval_question, docs, metas, distances=distances, ids=ids)
+    # ------------------------------------------------------------------
+    # Sub-question-aware pre-reorder.
+    # Downstream `_smart_deduplicate_and_diversify` (called inside rerank_results)
+    # caps each source at max_chunks_per_source=5. When a single source document
+    # contains content matching multiple sub-questions, the compound-question
+    # rerank order tends to fill those 5 slots with chunks that match the
+    # COMPOUND embedding best, dropping chunks each individual sub-question
+    # actually needs. By front-loading docs with each sub-question's top
+    # affinity chunks (round-robin), we ensure the per-source cap retains a
+    # sub-question-balanced slice. Generic for any topic and any number of
+    # sub-questions (capped at _MAX_SUB_QUESTIONS).
+    # ------------------------------------------------------------------
+    if sub_questions_list and docs:
+        n_sq_pre = len(sub_questions_list)
+        # How many top chunks per sub-question to guarantee survive dedup.
+        # Bigger n_sq → fewer per sub to keep total bounded.
+        if n_sq_pre <= 2:
+            keep_per_sub_pre = 8
+        elif n_sq_pre <= 4:
+            keep_per_sub_pre = 6
+        elif n_sq_pre <= 8:
+            keep_per_sub_pre = 5
+        else:
+            keep_per_sub_pre = 4
+
+        # Build per-sub sorted index list using affinity.
+        per_sub_sorted_pre: List[List[int]] = []
+        for sq_idx in range(n_sq_pre):
+            scored: List[Tuple[float, int]] = []
+            for i, doc in enumerate(docs):
+                idv = ids[i] if i < len(ids) else None
+                key = _chunk_key(idv, doc)
+                aff = subq_affinity.get(key, {}).get(sq_idx)
+                if aff is None:
+                    continue
+                scored.append((aff, i))
+            scored.sort(key=lambda x: x[0])
+            per_sub_sorted_pre.append([i for _aff, i in scored[:keep_per_sub_pre]])
+
+        # Round-robin interleave so EVERY sub-question gets representation
+        # in the head of the list before per-source caps apply.
+        head_indices: List[int] = []
+        head_seen: set = set()
+        cursors = [0] * n_sq_pre
+        progress = True
+        while progress:
+            progress = False
+            for sq_idx in range(n_sq_pre):
+                while cursors[sq_idx] < len(per_sub_sorted_pre[sq_idx]):
+                    i = per_sub_sorted_pre[sq_idx][cursors[sq_idx]]
+                    cursors[sq_idx] += 1
+                    if i in head_seen:
+                        continue
+                    head_seen.add(i)
+                    head_indices.append(i)
+                    progress = True
+                    break
+
+        # Append the rest of docs (compound rerank order) after the head.
+        tail_indices = [i for i in range(len(docs)) if i not in head_seen]
+        new_order = head_indices + tail_indices
+
+        docs = [docs[i] for i in new_order]
+        metas = [metas[i] for i in new_order]
+        distances = [
+            (distances[i] if i < len(distances) else None) for i in new_order
+        ]
+        ids = [(ids[i] if i < len(ids) else None) for i in new_order]
+        print(
+            f"[PRE-RERANK][SUBQ] reordered docs: subs={n_sq_pre} "
+            f"keep_per_sub={keep_per_sub_pre} head={len(head_indices)} total={len(docs)}"
+        )
+
+    # For compound questions, raise the per-source cap so that EACH sub-question
+    # can keep its top chunks within a single large source document.
+    _n_sq_for_cap = len(sub_questions_list) if sub_questions_list else 0
+    if _n_sq_for_cap >= 2:
+        # Roughly: 5 base + 4 per extra sub-question, capped at 25.
+        _max_per_source = min(25, 5 + 4 * _n_sq_for_cap)
+    else:
+        _max_per_source = 5
+    docs, metas, distances, ids = rerank_results(
+        retrieval_question, docs, metas,
+        distances=distances, ids=ids,
+        max_chunks_per_source=_max_per_source,
+    )
+    if sub_questions_list and len(docs) > 0:
+        n_sq = len(sub_questions_list)
+        # Generous per-sub quota so each sub-question has enough material for the
+        # COMPLETENESS_SELF_CHECK rules in the system prompt.
+        if n_sq <= 2:
+            per_sub_quota = 8
+        elif n_sq <= 4:
+            per_sub_quota = 6
+        elif n_sq <= 8:
+            per_sub_quota = 5
+        else:
+            per_sub_quota = 4
+        # Reserve room for compound-question high scorers as well.
+        global_keep = max(8, 24 - per_sub_quota * n_sq)
+
+        kept_keys: set = set()
+        kept_order: List[int] = []
+
+        # Pre-compute each sub-question's affinity-sorted chunk list.
+        per_sub_sorted: List[List[int]] = []
+        for sq_idx in range(n_sq):
+            scored_indices = []
+            for i, doc in enumerate(docs):
+                idv = ids[i] if i < len(ids) else None
+                key = _chunk_key(idv, doc)
+                aff = subq_affinity.get(key, {}).get(sq_idx)
+                if aff is None:
+                    continue
+                scored_indices.append((aff, i))
+            scored_indices.sort(key=lambda x: x[0])
+            per_sub_sorted.append([i for _aff, i in scored_indices])
+
+        # Round-robin interleave so every sub-question gets representation in the
+        # top positions BEFORE downstream truncation (max_sources, source grouping).
+        # Without this, sub1 fills slot 0..N, sub2 fills N..2N, sub3 fills 2N..3N
+        # and trailing sub-questions get dropped when the source list is truncated.
+        sub_cursors = [0] * n_sq
+        sub_taken = [0] * n_sq
+        while True:
+            progress = False
+            for sq_idx in range(n_sq):
+                if sub_taken[sq_idx] >= per_sub_quota:
+                    continue
+                cursor = sub_cursors[sq_idx]
+                while cursor < len(per_sub_sorted[sq_idx]):
+                    i = per_sub_sorted[sq_idx][cursor]
+                    cursor += 1
+                    idv = ids[i] if i < len(ids) else None
+                    key = _chunk_key(idv, docs[i])
+                    if key in kept_keys:
+                        continue
+                    kept_keys.add(key)
+                    kept_order.append(i)
+                    sub_taken[sq_idx] += 1
+                    progress = True
+                    break
+                sub_cursors[sq_idx] = cursor
+            if not progress:
+                break
+
+        # Fill the rest with compound-question rerank order so single-topic
+        # high scorers and cross-cutting chunks are not lost.
+        for i in range(len(docs)):
+            if len(kept_order) >= per_sub_quota * n_sq + global_keep:
+                break
+            idv = ids[i] if i < len(ids) else None
+            key = _chunk_key(idv, docs[i])
+            if key in kept_keys:
+                continue
+            kept_keys.add(key)
+            kept_order.append(i)
+
+        docs = [docs[i] for i in kept_order]
+        metas = [metas[i] for i in kept_order]
+        distances = [distances[i] if i < len(distances) else None for i in kept_order]
+        ids = [ids[i] if i < len(ids) else None for i in kept_order]
+        print(
+            f"[RERANK][SUBQ] compound rerank: subs={n_sq} per_sub={per_sub_quota} "
+            f"global_keep={global_keep} kept={len(docs)}"
+        )
+
     print(f"[API][CHAT][TIMING] Retrieval+rerank done at {time.time() - _chat_t0:.2f}s")
     _rag_log_step(6, total_rag_steps, "Ranking and consolidating sources", f"candidate_docs={len(docs)}")
     question_is_procedural = _question_has_procedural_intent(retrieval_question)
@@ -6748,13 +7146,26 @@ def chat(req: ChatRequest):
     context_blocks: List[str] = []
     source_strings: List[str] = []
     source_detail_list: List[dict] = []
+    # For compound questions, allow more source documents so every sub-question's
+    # best source survives truncation (each sub-question typically maps to a
+    # different doc; with 3 sub-questions and max_sources=8, late sub-questions
+    # can lose their source).
+    _n_sq_for_sources = len(sub_questions_list) if sub_questions_list else 0
+    if has_ticket:
+        _max_sources = 5
+    elif broad_coverage_intent:
+        _max_sources = 12 if _n_sq_for_sources >= 2 else 10
+    elif _n_sq_for_sources >= 2:
+        _max_sources = min(20, 8 + 3 * _n_sq_for_sources)
+    else:
+        _max_sources = 8
     source_candidates = _build_source_context_candidates(
         retrieval_question,
         docs,
         metas,
         distances=distances,
         ids=ids,
-        max_sources=5 if has_ticket else (10 if broad_coverage_intent else 8),
+        max_sources=_max_sources,
     )
 
     # More sources but cap content per source to stay within 15s response budget
@@ -6982,7 +7393,7 @@ def chat(req: ChatRequest):
                 # Stream LLM chunks
                 full_answer_parts = []
                 try:
-                    for chunk_text_part in call_llm_stream(user_msg, temperature=0.2, max_tokens=1000, system_message=system_msg):
+                    for chunk_text_part in call_llm_stream(user_msg, temperature=0.0, max_tokens=1000, system_message=system_msg):
                         full_answer_parts.append(chunk_text_part)
                         yield f"data: {json.dumps({'type': 'chunk', 'content': chunk_text_part})}\n\n"
                 except Exception as stream_exc:
@@ -7011,7 +7422,7 @@ def chat(req: ChatRequest):
             )
 
         # --- Non-streaming path ---
-        draft_answer = call_llm(user_msg, temperature=0.2, max_tokens=1000, system_message=system_msg)
+        draft_answer = call_llm(user_msg, temperature=0.0, max_tokens=1000, system_message=system_msg)
         # NOTE: Removed 4 post-processing LLM calls that were degrading answers:
         # _ground_answer_against_context — was stripping valid content and saying "not found"
         # _enforce_specific_grounded_answer — redundant with system prompt rules
