@@ -5500,13 +5500,19 @@ def _build_source_context_candidates(
                 "matched_chunk_ids": [],
                 "matched_chunk_indices": [],
                 "primary_matched_chunk_index": None,
+                "chunk_id_scores": {},
             },
         )
-        entry["chunk_signal_scores"].append(chunk_score + overlap_score + position_bonus + distance_bonus)
+        per_chunk_score = chunk_score + overlap_score + position_bonus + distance_bonus
+        entry["chunk_signal_scores"].append(per_chunk_score)
         if distance is not None and (entry["best_distance"] is None or float(distance) < float(entry["best_distance"])):
             entry["best_distance"] = distance
         if ids is not None and idx < len(ids) and ids[idx] is not None:
-            entry["matched_chunk_ids"].append(ids[idx])
+            chunk_id = ids[idx]
+            entry["matched_chunk_ids"].append(chunk_id)
+            prev = entry["chunk_id_scores"].get(chunk_id)
+            if prev is None or per_chunk_score > prev:
+                entry["chunk_id_scores"][chunk_id] = per_chunk_score
         chunk_idx = safe_meta.get("chunk")
         if chunk_idx is not None:
             normalized_chunk_idx = int(chunk_idx)
@@ -5549,19 +5555,27 @@ def _build_source_context_candidates(
         # priority) instead of doc order — this ensures the highest-ranked chunk per
         # sub-question appears FIRST in the excerpt and survives the char-budget cut.
         matched_id_order = entry.get("matched_chunk_ids") or []
+        chunk_id_scores = entry.get("chunk_id_scores") or {}
         rows_by_id = {r["id"]: r for r in rows}
         seen_ids: set = set()
-        matched_rows: List[dict] = []
+        unique_ordered_ids: List[str] = []
         for mid in matched_id_order:
             if mid in seen_ids:
                 continue
             seen_ids.add(mid)
+            unique_ordered_ids.append(mid)
+        # Reorder matched ids by per-chunk score (descending) so the most-relevant
+        # chunk per source appears FIRST in the excerpt and survives the char cap.
+        # Stable sort preserves original ingestion order on score ties.
+        unique_ordered_ids.sort(key=lambda mid: -float(chunk_id_scores.get(mid, 0.0)))
+        matched_rows: List[dict] = []
+        for mid in unique_ordered_ids:
             row = rows_by_id.get(mid)
             if row is not None:
                 matched_rows.append(row)
         if not matched_rows:
             matched_rows = rows[:5]
-        matched_text = _merge_chunk_texts([r["content"] for r in matched_rows], max_chars=12000)
+        matched_text = _merge_chunk_texts([r["content"] for r in matched_rows], max_chars=28000)
         excerpt = _merge_chunk_texts([r["content"] for r in matched_rows], max_chars=8000) if matched_rows else _merge_chunk_texts([row["content"] for row in rows], max_chars=8000)
         title = _build_document_title(entry["source"], rows[0]["content"] if rows else "")
 
@@ -7198,7 +7212,7 @@ def chat(req: ChatRequest):
             if has_ticket:
                 max_content_chars = 4000
             else:
-                max_content_chars = 10000
+                max_content_chars = 24000
             # Use matched_text (full matched chunks) instead of excerpt for richer context
             raw_content = str(candidate.get("matched_text") or candidate.get("excerpt") or candidate.get("full_content") or "")
             candidate_content = raw_content[:max_content_chars] if len(raw_content) > max_content_chars else raw_content
