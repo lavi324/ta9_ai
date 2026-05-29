@@ -1074,6 +1074,7 @@ def _build_ticket_attachment_context(
         extracted_text = process_uploaded_file(
             upload_payload,
             describe_image_func=img_func,
+            analyze_images=not skip_image_analysis,
         ).strip()
         if extracted_text:
             header_lines.append(extracted_text)
@@ -1614,6 +1615,10 @@ POPULAR_OTHER_EXTS = {
     "mp4", "mkv", "mov", "avi", "wmv", "webm",
 }
 
+ARCHIVE_TEXT_ENTRY_MAX_BYTES = int(os.getenv("ARCHIVE_TEXT_ENTRY_MAX_BYTES", str(2 * 1024 * 1024)))
+ARCHIVE_MAX_ENTRY_OUTPUT_CHARS = int(os.getenv("ARCHIVE_MAX_ENTRY_OUTPUT_CHARS", "80000"))
+ARCHIVE_MAX_TOTAL_OUTPUT_CHARS = int(os.getenv("ARCHIVE_MAX_TOTAL_OUTPUT_CHARS", "350000"))
+
 
 def _process_unstructured_popular_file(file_name: str, file_ext: str) -> str:
     """Graceful fallback for popular file types that are uploadable but not text-extractable yet."""
@@ -1622,9 +1627,33 @@ def _process_unstructured_popular_file(file_name: str, file_ext: str) -> str:
         f"[NOTICE] .{file_ext} is accepted for upload, but automatic text extraction is not available yet for this type."
     )
 
+
+def _truncate_extracted_text(text: str, max_chars: int, label: str) -> str:
+    candidate = str(text or "")
+    if max_chars <= 0 or len(candidate) <= max_chars:
+        return candidate
+    return (
+        candidate[:max_chars].rstrip()
+        + f"\n\n[TRUNCATED] {label} content was shortened from {len(candidate)} to {max_chars} characters for prompt safety."
+    )
+
+
+def _should_sample_archive_text_entry(file_name: str, mime_type: Optional[str] = None) -> bool:
+    file_name = str(file_name or "")
+    file_ext = file_name.split(".")[-1].lower() if "." in file_name else ""
+    if file_ext in POPULAR_TEXT_EXTS or file_ext in {"csv"}:
+        return True
+    guessed_mime = (mime_type or mimetypes.guess_type(file_name)[0] or "").lower()
+    return guessed_mime.startswith("text/") or guessed_mime in {
+        "application/json",
+        "application/xml",
+        "text/xml",
+    }
+
 def process_uploaded_file(
     file_data: Dict[str, str],
     describe_image_func=None,
+    analyze_images: bool = True,
     cancel_check=None,
     request_id: Optional[str] = None,
 ) -> str:
@@ -1665,7 +1694,7 @@ def process_uploaded_file(
         
         # Route to appropriate handler
         if file_ext in POPULAR_IMAGE_EXTS or (file_type and file_type.startswith("image/")):
-            return _process_image_file(file_name, file_b64, file_type, describe_image_func)
+            return _process_image_file(file_name, file_b64, file_type, describe_image_func, analyze_images=analyze_images)
         elif file_ext in POPULAR_EXCEL_EXTS:
             return _process_excel_file(file_name, file_bytes)
         elif file_ext == "csv":
@@ -1677,9 +1706,9 @@ def process_uploaded_file(
         elif file_ext in ["doc", "docx"]:
             return _process_word_file(file_name, file_bytes)
         elif file_ext == "zip":
-            return _process_archive_file(file_name, file_bytes, describe_image_func=describe_image_func, cancel_check=cancel_check, request_id=request_id)
+            return _process_archive_file(file_name, file_bytes, describe_image_func=describe_image_func, analyze_images=analyze_images, cancel_check=cancel_check, request_id=request_id)
         elif any(file_name.lower().endswith(ext) for ext in (".tar.gz", ".tgz", ".tar.bz2", ".tar")) or file_ext == "tar":
-            return _process_archive_file(file_name, file_bytes, describe_image_func=describe_image_func, cancel_check=cancel_check, request_id=request_id)
+            return _process_archive_file(file_name, file_bytes, describe_image_func=describe_image_func, analyze_images=analyze_images, cancel_check=cancel_check, request_id=request_id)
         elif file_ext in POPULAR_OTHER_EXTS:
             return _process_unstructured_popular_file(file_name, file_ext)
         else:
@@ -1690,9 +1719,17 @@ def process_uploaded_file(
         return f"[ERROR] Failed to process file: {str(e)}"
 
 
-def _process_image_file(file_name: str, file_b64: str, file_type: Optional[str] = None, describe_func=None) -> str:
+def _process_image_file(
+    file_name: str,
+    file_b64: str,
+    file_type: Optional[str] = None,
+    describe_func=None,
+    analyze_images: bool = True,
+) -> str:
     """Process image file using OpenAI Vision API or fallback."""
     try:
+        if not analyze_images:
+            return f"[Image file {file_name} skipped because image analysis is disabled]"
         if not OPENAI_API_KEY:
             return f"[Image file {file_name} - OPENAI_API_KEY is not configured]"
 
@@ -2049,6 +2086,7 @@ def _process_archive_file(
     file_name: str,
     file_bytes: bytes,
     describe_image_func=None,
+    analyze_images: bool = True,
     cancel_check=None,
     request_id: Optional[str] = None,
 ) -> str:
@@ -2066,12 +2104,37 @@ def _process_archive_file(
     file_ext = file_name.split(".")[-1].lower()
     results: List[str] = []
     total_extracted_bytes = 0
+    total_output_chars = 0
+    output_limit_hit = False
 
-    def _process_entry(entry_name: str, entry_bytes: bytes) -> None:
+    def _append_result(block: str) -> bool:
+        nonlocal total_output_chars, output_limit_hit
+        if output_limit_hit:
+            return False
+        remaining = ARCHIVE_MAX_TOTAL_OUTPUT_CHARS - total_output_chars
+        if remaining <= 0:
+            results.append(
+                f"[TRUNCATED] Archive output limit of {ARCHIVE_MAX_TOTAL_OUTPUT_CHARS} characters reached. Remaining files not included."
+            )
+            output_limit_hit = True
+            return False
+        if len(block) > remaining:
+            results.append(
+                block[:remaining].rstrip()
+                + f"\n\n[TRUNCATED] Archive output limit of {ARCHIVE_MAX_TOTAL_OUTPUT_CHARS} characters reached. Remaining files not included."
+            )
+            total_output_chars = ARCHIVE_MAX_TOTAL_OUTPUT_CHARS
+            output_limit_hit = True
+            return False
+        results.append(block)
+        total_output_chars += len(block)
+        return True
+
+    def _process_entry(entry_name: str, entry_bytes: bytes, original_size: Optional[int] = None, was_sampled: bool = False) -> None:
         nonlocal total_extracted_bytes
         total_extracted_bytes += len(entry_bytes)
         if total_extracted_bytes > MAX_EXTRACTED_BYTES:
-            results.append(
+            _append_result(
                 f"[TRUNCATED] Archive size limit of {MAX_EXTRACTED_BYTES // (1024 * 1024)} MB reached. "
                 "Remaining files not processed."
             )
@@ -2084,10 +2147,28 @@ def _process_archive_file(
         content = process_uploaded_file(
             entry_data,
             describe_image_func=describe_image_func,
+            analyze_images=analyze_images,
             cancel_check=cancel_check,
             request_id=request_id,
         )
-        results.append(f"[From archive: {file_name} → {display_name}]\n{content}")
+        content = _truncate_extracted_text(content, ARCHIVE_MAX_ENTRY_OUTPUT_CHARS, display_name)
+        prefix_lines = []
+        if was_sampled and original_size and original_size > len(entry_bytes):
+            prefix_lines.append(
+                f"[TRUNCATED] Only the first {len(entry_bytes)} bytes of {original_size} were processed for {display_name}."
+            )
+        if prefix_lines:
+            content = "\n".join(prefix_lines + [content])
+        _append_result(f"[From archive: {file_name} → {display_name}]\n{content}")
+
+    def _read_entry_bytes(stream, max_bytes: Optional[int] = None) -> Tuple[bytes, bool]:
+        if max_bytes is None or max_bytes <= 0:
+            return stream.read(), False
+        data = stream.read(max_bytes + 1)
+        was_sampled = len(data) > max_bytes
+        if was_sampled:
+            data = data[:max_bytes]
+        return data, was_sampled
 
     try:
         if file_ext == "zip":
@@ -2099,14 +2180,18 @@ def _process_archive_file(
                     for entry in entries[:MAX_FILES]:
                         if cancel_check and cancel_check():
                             break
-                        if total_extracted_bytes > MAX_EXTRACTED_BYTES:
+                        if total_extracted_bytes > MAX_EXTRACTED_BYTES or output_limit_hit:
                             break
                         try:
-                            entry_bytes = zf.read(entry.filename)
+                            display_name = os.path.basename(entry.filename) or entry.filename
+                            mime_type = mimetypes.guess_type(display_name)[0] or ""
+                            max_bytes = ARCHIVE_TEXT_ENTRY_MAX_BYTES if _should_sample_archive_text_entry(display_name, mime_type) else None
+                            with zf.open(entry) as entry_stream:
+                                entry_bytes, was_sampled = _read_entry_bytes(entry_stream, max_bytes=max_bytes)
                         except Exception as e:
-                            results.append(f"[From {file_name} → {entry.filename}]\n[Error reading entry: {e}]")
+                            _append_result(f"[From {file_name} → {entry.filename}]\n[Error reading entry: {e}]")
                             continue
-                        _process_entry(entry.filename, entry_bytes)
+                        _process_entry(entry.filename, entry_bytes, original_size=getattr(entry, "file_size", None), was_sampled=was_sampled)
             except zipfile.BadZipFile:
                 return f"**Archive: {file_name}**\n\n[Invalid or corrupted zip file]"
         else:
@@ -2119,17 +2204,20 @@ def _process_archive_file(
                     for member in members[:MAX_FILES]:
                         if cancel_check and cancel_check():
                             break
-                        if total_extracted_bytes > MAX_EXTRACTED_BYTES:
+                        if total_extracted_bytes > MAX_EXTRACTED_BYTES or output_limit_hit:
                             break
                         try:
                             f = tf.extractfile(member)
                             if f is None:
                                 continue
-                            entry_bytes = f.read()
+                            display_name = os.path.basename(member.name) or member.name
+                            mime_type = mimetypes.guess_type(display_name)[0] or ""
+                            max_bytes = ARCHIVE_TEXT_ENTRY_MAX_BYTES if _should_sample_archive_text_entry(display_name, mime_type) else None
+                            entry_bytes, was_sampled = _read_entry_bytes(f, max_bytes=max_bytes)
                         except Exception as e:
-                            results.append(f"[From {file_name} → {member.name}]\n[Error reading entry: {e}]")
+                            _append_result(f"[From {file_name} → {member.name}]\n[Error reading entry: {e}]")
                             continue
-                        _process_entry(member.name, entry_bytes)
+                        _process_entry(member.name, entry_bytes, original_size=getattr(member, "size", None), was_sampled=was_sampled)
             except tarfile_mod.TarError as e:
                 return f"**Archive: {file_name}**\n\n[Invalid or corrupted archive: {e}]"
 
