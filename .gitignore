@@ -1,3 +1,5 @@
+# Ignore chroma_db_backup directory
+chroma_db_backup/
 # Environment & Secrets
 .env
 .env.local
